@@ -1,0 +1,213 @@
+{
+  "log": {
+    "level": "info",
+    "dir": "",
+    "max_size_mb": 100,
+    "max_backups": 7,
+    "max_age_days": 30,
+    "compress": true
+  },
+  "workspace": {
+    "path": ""
+  },
+  "agents": {
+    "defaults": {
+      "model": "YOUR_DEFAULT_MODEL_HERE",
+      "max_iterations": 15,
+      "temperature": 0.7,
+      "max_tokens": 4096
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowed_ids": []
+    },
+    "whatsapp": {
+      "enabled": false,
+      "bridge_url": "",
+      "allowed_ids": []
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "domain": "feishu",
+      "group_policy": "open"
+    },
+    "qq": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allowed_ids": []
+    },
+    "wework": {
+      "enabled": false,
+      "corp_id": "",
+      "agent_id": "",
+      "secret": "",
+      "token": "",
+      "encoding_aes_key": ""
+    },
+    "dingtalk": {
+      "enabled": false,
+      "client_id": "",
+      "secret": "",
+      "allowed_ids": []
+    },
+    "infoflow": {
+      "enabled": false,
+      "webhook_url": "",
+      "token": "",
+      "aes_key": "",
+      "webhook_port": 18766,
+      "allowed_ids": [],
+      "accounts": {
+        "bot1": {
+          "enabled": false,
+          "name": "Infoflow Bot 1",
+          "webhook_url": "",
+          "token": "",
+          "aes_key": "",
+          "webhook_port": 18766,
+          "allowed_ids": []
+        }
+      }
+    },
+    "gotify": {
+      "enabled": false,
+      "server_url": "https://gotify.example.com",
+      "app_token": "",
+      "priority": 5,
+      "allowed_ids": [],
+      "accounts": {
+        "app1": {
+          "enabled": false,
+          "name": "Gotify App 1",
+          "server_url": "https://gotify.example.com",
+          "app_token": "",
+          "priority": 5,
+          "allowed_ids": []
+        }
+      }
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "api_key": "",
+      "base_url": "",
+      "timeout": 600,
+      "max_retries": 3
+    },
+    "openai": {
+      "api_key": "YOUR_OPENAI_API_KEY_HERE",
+      "base_url": "https://api.deepseek.com",
+      "timeout": 600
+    },
+    "anthropic": {
+      "api_key": "",
+      "base_url": "",
+      "timeout": 600
+    }
+  },
+  "gateway": {
+    "host": "localhost",
+    "port": 8080,
+    "read_timeout": 30,
+    "write_timeout": 30,
+    "websocket": {
+      "host": "localhost",
+      "port": 28789,
+      "path": "/ws",
+      "enable_auth": false,
+      "auth_token": "",
+      "ping_interval": "30s",
+      "pong_timeout": "60s",
+      "read_timeout": "60s",
+      "write_timeout": "10s"
+    }
+  },
+  "acp": {
+    "enabled": false,
+    "backend": "acp-go-sdk",
+    "agent_path": "/abs/path/to/acp-agent",
+    "agent_args": [],
+    "agent_env": [],
+    "allowed_agents": ["main", "coding"],
+    "default_agent": "main",
+    "max_concurrent_sessions": 5,
+    "idle_timeout_ms": 300000
+  },
+  "tools": {
+    "filesystem": {
+      "allowed_paths": [],
+      "denied_paths": []
+    },
+    "shell": {
+      "enabled": true,
+      "allowed_cmds": [],
+      "denied_cmds": ["rm -rf", "dd", "mkfs", "format"],
+      "timeout": 30,
+      "working_dir": ""
+    },
+    "web": {
+      "search_api_key": "",
+      "search_engine": "travily",
+      "timeout": 10
+    },
+    "browser": {
+      "enabled": true,
+      "headless": true,
+      "timeout": 30,
+      "relay_url": "ws://127.0.0.1:18789",
+      "relay_mode": "auto"
+    },
+    "cron": {
+      "enabled": true,
+      "store_path": "~/.goclaw/cron/jobs.json"
+    }
+  },
+  "memory": {
+    "backend": "builtin",
+    "builtin": {
+      "enabled": true,
+      "database_path": "",
+      "auto_index": true
+    },
+    "qmd": {
+      "command": "qmd",
+      "enabled": false,
+      "include_default": true,
+      "paths": [
+        {
+          "name": "notes",
+          "path": "~/notes",
+          "pattern": "**/*.md"
+        },
+        {
+          "name": "docs",
+          "path": "~/Documents",
+          "pattern": "**/*.md"
+        }
+      ],
+      "sessions": {
+        "enabled": false,
+        "export_dir": "~/.goclaw/sessions/export",
+        "retention_days": 30
+      },
+      "update": {
+        "interval": "5m",
+        "on_boot": true,
+        "embed_interval": "60m",
+        "command_timeout": "30s",
+        "update_timeout": "120s"
+      },
+      "limits": {
+        "max_results": 6,
+        "max_snippet_chars": 700,
+        "timeout_ms": 4000
+      }
+    }
+  }
+}

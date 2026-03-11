@@ -1,0 +1,703 @@
+# goclaw Skills 系统设计方案
+
+> 参考 OpenClaw 的 Skills 机制，为 goclaw 设计一套遵循 [AgentSkills](https://agentskills.io) 规范的技能系统。
+>
+> **测试文档**: 参见 [Skills_Test.md](./Skills_Test.md) 查看完整的测试步骤和方法。
+
+## 设计理念
+
+**Skill 是知识（Knowledge），而非直接的代码插件。**
+
+与传统的 "Plugin = Function Call Tool" 模式不同，AgentSkills 的核心理念是 **"Prompt Injection" (提示词注入)**：
+1.  **加载**：系统加载 `SKILL.md`。
+2.  **注入**：将技能的使用说明注入到 Agent 的 System Prompt 中。
+3.  **执行**：LLM 阅读说明后，**主动调用现有的基础工具**（如 `exec`、`read_file`、`web_search`）来完成任务。
+
+这种设计极大地降低了开发门槛：**只要你会写文档，你就能开发 Skill。**
+
+## 核心架构
+
+### 1. 技能定义格式 (SKILL.md)
+
+遵循 [AgentSkills](https://agentskills.io) 规范，并兼容 OpenClaw 的元数据扩展。
+
+```yaml
+---
+# --- 标准字段 (AgentSkills Standard) ---
+name: weather
+description: Get current weather and forecasts via CLI.
+homepage: https://wttr.in/:help
+
+# --- 兼容扩展 (OpenClaw Extension) ---
+# 使用 openclaw 命名空间以实现与现有技能生态的二进制兼容
+metadata: 
+  openclaw:
+    emoji: "🌤️"
+    requires: 
+      bins: ["curl"] # 准入检查：仅在 PATH 中存在 curl 时加载
+      env: ["WEATHER_API_KEY"] # 可选：要求特定环境变量
+---
+
+# Weather Forecast
+...
+```
+
+### 2. 技能加载器 (Loader) 与 准入控制 (Gating)
+
+Loader 不仅负责加载文本，还负责 **"Skill Gating" (技能准入过滤)**。
+
+*   **标准字段处理**：解析 `name` 和 `description` 用于 Prompt 识别。
+*   **兼容性过滤**：解析 `metadata.openclaw.requires`：
+    *   **Bins 检查**：调用 `exec.LookPath` 验证依赖工具（如 `curl`, `git`）是否存在。
+    *   **Env 检查**：验证必需的环境变量是否已配置。
+    *   **OS 检查**：验证当前系统（darwin/linux/windows）是否受支持。
+*   **结果**：只有满足准入条件的技能才会被注入到 System Prompt 中。这保证了 Agent 看到的技能都是“捡起来就能用”的。
+
+### 3. 与 Agent Loop 集成 (Context Injection)
+
+这是与原设计最大的不同点：**我们不再注册新的 Tool，而是更新 Prompt。**
+
+```go
+// agent/context.go
+
+// BuildSystemPrompt 构建系统提示词
+func (b *ContextBuilder) BuildSystemPrompt(skills []*Skill) string {
+    var sb strings.Builder
+    
+    // ... 基础身份定义 ...
+
+    // 注入技能部分
+    if len(skills) > 0 {
+        sb.WriteString("\n## Enabled Skills\n\n")
+        sb.WriteString("You have been trained on the following specific skills. Use your base tools (exec, read_file, etc.) to execute them.\n\n")
+        
+        for _, skill := range skills {
+            sb.WriteString(fmt.Sprintf("### %s\n", skill.Name))
+            sb.WriteString(fmt.Sprintf("> %s\n\n", skill.Description))
+            sb.WriteString(skill.Content) // 注入 SKILL.md 的 Markdown 正文
+            sb.WriteString("\n---\n")
+        }
+    }
+
+    return sb.String()
+}
+```
+
+### 4. 自定义二进制 (Binaries)
+
+有些技能不仅仅是 Prompt，还包含自定义脚本或二进制文件（例如一个复杂的 `database-helper` CLI）。
+
+#### 目录结构
+```
+skills/my-db-helper/
+├── SKILL.md
+└── bin/
+    └── db-cli  (可执行文件)
+```
+
+#### 处理逻辑
+1. Loader 发现技能目录下有 `bin/` 文件夹。
+2. Loader 将该 `bin/` 目录的绝对路径加入到 Agent 运行时的 `PATH` 环境变量中。
+3. `SKILL.md` 中写明：
+   > "Use the `db-cli` command via `exec` tool to interact with the database."
+4. LLM 调用 `exec(command="db-cli status")`。
+5. 系统在 PATH 中找到了 `db-cli` 并执行。
+
+**优势**：无需编写任何 Go 代码来包装 `db-cli`，LLM 直接通过 Shell 使用它。
+
+### 5. 配置文件 (skills.yaml)
+
+简化配置，主要用于开关和环境注入。
+
+```yaml
+skills:
+  # 禁用特定技能
+  disabled:
+    - "heavy-computation-skill"
+
+  # 为特定技能注入环境变量（仅在 Agent 运行时生效，不污染全局）
+  overrides:
+    "weather":
+      env:
+        DEFAULT_CITY: "Beijing"
+    "github-helper":
+      env:
+        GITHUB_TOKEN: "${GITHUB_TOKEN}" # 从宿主环境透传
+```
+
+### 6. 安全沙箱 (Sandboxing)
+
+**重要前提**：由于技能本质上是调用 `exec` 等基础工具，安全控制完全依赖基础工具层的配置。**在启用 Skills 系统之前，必须确保已正确配置基础工具的安全策略。**
+
+#### 基础层控制
+
+1. **ShellTool 配置**：在 `config.yaml` 中配置 `AllowedCmds` 或 `DeniedCmds`
+   ```yaml
+   tools:
+     shell:
+       enabled: true
+       allowed_cmds:
+         - "git"
+         - "curl"
+         - "node"
+         - "python"
+       denied_cmds:
+         - "rm -rf"
+         - "dd"
+         - "mkfs"
+         - "format"
+   ```
+
+2. **权限隔离**：每个 Agent 会话可以有不同的权限配置
+   ```yaml
+   agents:
+     defaults:
+       permissions:
+         filesystem: true
+         network: true
+         commands: ["git", "curl"]
+     untrusted:
+       permissions:
+         filesystem: false
+         network: false
+         commands: []
+   ```
+
+#### 沙箱环境
+
+如果启用了 Docker 沙箱，Agent 的 `exec` 是在容器内执行的：
+
+```yaml
+skills:
+  sandbox:
+    enabled: true
+    image: "goclaw/sandbox:latest"
+```
+
+**挑战**：如果是自定义二进制技能，需要将 `bin/` 挂载到容器内，或者在容器启动时安装依赖。
+
+**解决方案**：在 `metadata` 中定义 `install` 步骤，在构建沙箱时预先安装：
+
+```yaml
+---
+name: postgres-helper
+description: Interact with PostgreSQL databases
+metadata:
+  openclaw:
+    install:
+      - type: apt
+        packages: ["postgresql-client"]
+      - type: copy
+        src: "./bin/custom-pg-tool"
+        dest: "/usr/local/bin/custom-pg-tool"
+---
+
+# PostgreSQL Helper
+
+Use `psql` or `custom-pg-tool` to interact with databases...
+```
+
+**安装类型支持**：
+- `apt`: Debian/Ubuntu 包管理器
+- `yum`: CentOS/RHEL 包管理器
+- `brew`: macOS Homebrew
+- `npm`: Node.js 包
+- `pip`: Python 包
+- `copy`: 复制本地文件到沙箱
+- `url`: 下载远程脚本并执行
+
+### 7. 开发流程示例
+
+#### 场景：开发一个 "Git Commit 助手" 技能
+
+1. **创建目录**：`~/.goclaw/skills/git-helper`
+2. **创建 SKILL.md**：
+
+```markdown
+---
+name: git-helper
+description: Help user commit code with conventional commits规范.
+metadata:
+  openclaw:
+    requires:
+      bins: ["git"]
+---
+
+# Git Helper
+
+When the user asks to commit code:
+
+1. Check status using `git status`.
+2. Generate a commit message following Conventional Commits (feat, fix, docs, etc.).
+3. Execute commit using `git commit -m "..."
+
+**Do not ask for confirmation if the change is trivial.**
+```
+
+3. **测试**：
+   - 运行 `goclaw chat`
+   - 用户："帮我提交代码，我刚修了个 bug"
+   - Agent (思考)：
+     - 加载了 `git-helper` 技能。
+     - 看到指令：先用 `git status`。
+     - **Action**: `exec("git status")`
+     - **Observation**: `modified: main.go`
+     - 生成 Commit Message: `fix: resolve nil pointer in main loop`
+     - **Action**: `exec("git commit -m 'fix: resolve nil pointer in main loop'")`
+   - Agent (回复)："已提交修复：fix: resolve nil pointer in main loop"
+
+### 8. 调试机制
+
+由于 Skills 系统基于 Prompt Injection，调试的核心是**查看注入的内容**。
+
+#### CLI 调试命令
+
+```bash
+# 列出所有加载的技能
+goclaw skills list
+
+# 详细模式：显示每个技能的 ID、描述和注入的 Prompt 片段
+goclaw skills list --verbose
+
+# 打印完整的 System Prompt（包含所有注入的 Skills）
+goclaw chat --debug-prompt
+
+# 验证技能的依赖检查
+goclaw skills validate weather
+
+# 测试特定技能的 Prompt 效果
+goclaw skills test git-helper --prompt "帮我提交代码"
+```
+
+#### 日志输出
+
+启用详细日志可以看到技能加载过程：
+
+```bash
+goclaw chat --log-level=debug
+```
+
+输出示例：
+```
+[DEBUG] Loading skills from: /Users/user/.goclaw/skills
+[DEBUG] Found skill: git-helper
+[DEBUG] Checking dependencies for git-helper...
+[DEBUG]   - Checking binary: git ✓
+[DEBUG] Skill git-helper loaded successfully
+[DEBUG] Injecting 3 skills into system prompt
+[INFO] System prompt size: 2,456 tokens
+```
+
+### 9. 技能冲突与优先级
+
+#### 加载优先级（由高到低）
+
+1. **Workspace Skills**: `${WORKSPACE}/skills`
+2. **User Skills**: `~/.goclaw/skills`
+3. **Builtin Skills**: 随二进制分发的内置技能
+
+当出现同名技能时，高优先级的会覆盖低优先级的。
+
+#### 显式优先级
+
+在 `metadata` 中可以设置 `priority` 字段：
+
+```yaml
+---
+name: custom-weather
+description: Custom weather implementation
+metadata:
+  openclaw:
+    priority: 100  # 数字越大优先级越高，默认为 50
+---
+```
+
+#### 冲突检测
+
+Loader 会检测潜在冲突并给出警告：
+
+```
+[WARN] Skill name conflict: 'weather' exists in both workspace and user
+[WARN] Using workspace version (priority: 100 > 50)
+```
+
+#### 禁用冲突技能
+
+在 `skills.yaml` 中可以禁用特定来源的技能：
+
+```yaml
+skills:
+  disabled:
+    - "builtin/weather"  # 禁用内置版本
+    # 使用 workspace/weather 代替
+```
+
+### 10. 技能版本管理
+
+#### 版本字段
+
+在 `metadata` 中添加版本信息：
+
+```yaml
+---
+name: git-helper
+version: "2.1.0"
+metadata:
+  openclaw:
+    min_goclaw_version: "1.5.0"
+---
+```
+
+#### 版本比较
+
+Loader 会检查版本兼容性：
+
+```go
+// 检查技能要求的最低 goclaw 版本
+if skill.MinGoClawVersion != "" {
+    if !versionCompatible(currentVersion, skill.MinGoClawVersion) {
+        logger.Warn("Skill requires newer goclaw version",
+            zap.String("skill", skill.Name),
+            zap.String("required", skill.MinGoClawVersion),
+            zap.String("current", currentVersion))
+        continue
+    }
+}
+```
+
+#### 多版本共存
+
+支持同一技能的多个版本并存：
+
+```
+~/.goclaw/skills/
+├── git-helper@1/
+├── git-helper@2/
+└── git-helper -> git-helper@2  # 符号链接指向默认版本
+```
+
+### 11. 架构图
+
+#### 系统整体架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         User Request                            │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         Agent Loop                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    Context Builder                       │    │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │    │
+│  │  │ Base Prompt │  │   Skills     │  │   Memory     │   │    │
+│  │  │             │  │  Injection   │  │   Context    │   │    │
+│  │  └─────────────┘  └──────────────┘  └──────────────┘   │    │
+│  │         │                │                  │           │    │
+│  │         └────────────────┴──────────────────┘           │    │
+│  │                        │                                 │    │
+│  │                 System Prompt                           │    │
+│  └────────────────────────┼─────────────────────────────────┘    │
+│                           │                                       │
+│  ┌────────────────────────▼─────────────────────────────────┐    │
+│  │                       LLM                                  │    │
+│  │  (Claude / GPT-4 / etc.)                                  │    │
+│  └────────────────────────┬─────────────────────────────────┘    │
+│                           │                                       │
+│  ┌────────────────────────▼─────────────────────────────────┐    │
+│  │                   Tool Dispatcher                         │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐│    │
+│  │  │   exec   │  │read_file │  │web_search│  │   ...    ││    │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘│    │
+│  └───────┼────────────┼────────────┼────────────┼──────────┘    │
+│          │            │            │            │                │
+└──────────┼────────────┼────────────┼────────────┼────────────────┘
+           │            │            │            │
+           ▼            ▼            ▼            ▼
+    ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+    │   Shell  │ │   File   │ │   Web    │ │   ...    │
+    │   Tool   │ │   Tool   │ │   Tool   │ │          │
+    └──────────┘ └──────────┘ └──────────┘ └──────────┘
+```
+
+#### Skills 加载流程
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Skills Loader                          │
+└─────────────────────────────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+        ▼                   ▼                   ▼
+   ┌─────────┐        ┌─────────┐        ┌─────────┐
+   │Workspace│        │  User   │        │ Builtin │
+   │ Skills  │        │ Skills  │        │ Skills  │
+   └────┬────┘        └────┬────┘        └────┬────┘
+        │                  │                  │
+        └───────────────────┼──────────────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │  Scan & Parse   │
+                  │  SKILL.md files │
+                  └────────┬────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ Dependency Check│
+                  │  - bins in PATH │
+                  │  - env vars set │
+                  └────────┬────────┘
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+              ▼                         ▼
+         ┌─────────┐              ┌─────────┐
+         │  Valid  │              │ Invalid │
+         │ Skills  │              │ (Skip)  │
+         └────┬────┘              └─────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │ Apply Config    │
+     │ (disabled list) │
+     └────────┬────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │ Sort by Priority│
+     └────────┬────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │ Inject into     │
+     │ System Prompt   │
+     └─────────────────┘
+```
+
+### 12. SKILL.md 编写最佳实践
+
+由于 LLM 需要理解并执行 SKILL.md 的内容，编写高质量的文档至关重要。
+
+#### 结构模板
+
+```markdown
+---
+name: skill-name
+description: 一句话描述技能功能
+metadata:
+  openclaw:
+    emoji: "🔧"
+    requires:
+      bins: ["required-command"]
+    priority: 50
+---
+
+# 技能名称
+
+简短介绍这个技能做什么以及何时使用。
+
+## 使用场景
+
+当用户提到以下关键词时使用此技能：
+- 关键词 1
+- 关键词 2
+
+## 执行步骤
+
+1. **步骤一**：使用 `tool_name` 做什么
+   ```bash
+   command example
+   ```
+
+2. **步骤二**：根据结果做决策
+   - 如果结果为 A，执行 X
+   - 如果结果为 B，执行 Y
+
+3. **步骤三**：输出最终结果
+
+## 重要提示
+
+> **注意**：特殊情况的说明
+
+- 边界条件 1
+- 边界条件 2
+
+## 常见错误
+
+避免以下常见错误：
+- ❌ 错误做法
+- ✅ 正确做法
+```
+
+#### 编写原则
+
+1. **明确具体**：给出具体的命令示例，不要模糊描述
+   ```markdown
+   # ❌ 不好
+   使用 git 检查状态
+
+   # ✅ 好
+   使用 `exec` 工具执行：`git status --short`
+   ```
+
+2. **分步骤说明**：将复杂任务分解为清晰的步骤
+   ```markdown
+   ## 提交流程
+
+   1. 检查当前状态
+   2. 生成提交信息
+   3. 执行提交
+   4. 确认结果
+   ```
+
+3. **使用代码块**：所有命令都应该在代码块中
+   ````markdown
+   使用以下命令：
+   ```bash
+   curl -s "https://api.example.com" | jq '.data'
+   ```
+   ````
+
+4. **说明输出格式**：告诉 LLM 期望的输出格式
+   ```markdown
+   API 返回 JSON 格式：
+   ```json
+   {"status": "ok", "data": {...}}
+   ```
+   使用 `jq` 提取 `data` 字段。
+   ```
+
+5. **边界条件**：说明特殊情况如何处理
+   ```markdown
+   ## 错误处理
+
+   - 如果返回 404，说明资源不存在，通知用户
+   - 如果返回 500，重试最多 3 次
+   ```
+
+#### 示例：高质量 SKILL.md
+
+```markdown
+---
+name: json-formatter
+description: Format and validate JSON files with jq
+metadata:
+  openclaw:
+    emoji: "📝"
+    requires:
+      bins: ["jq"]
+---
+
+# JSON Formatter
+
+使用 `jq` 美化和验证 JSON 文件。
+
+## 何时使用
+
+当用户要求：
+- "格式化 JSON"
+- "美化这个 JSON 文件"
+- "验证 JSON 是否合法"
+- 提到 `.json` 文件格式化
+
+## 执行步骤
+
+1. **读取文件**：使用 `read_file` 工具读取目标 JSON 文件
+
+2. **验证并格式化**：使用 `exec` 工具执行 jq
+   ```bash
+   jq '.' input.json > formatted.json
+   ```
+
+3. **显示结果**：显示格式化后的内容或错误信息
+
+## 高级选项
+
+### 指定缩进
+```bash
+jq --indent 2 '.' input.json
+```
+
+### 提取特定字段
+```bash
+jq '.field.name' input.json
+```
+
+### 过滤数组
+```bash
+jq '.[] | select(.age > 18)' input.json
+```
+
+## 错误处理
+
+- 如果 `jq` 报错 "parse error"，说明 JSON 格式不合法
+  - 显示原始内容和错误位置
+  - 建议用户使用 JSON 验证工具
+
+- 如果文件为空或不存在
+  - 使用 `read_file` 的错误信息通知用户
+```
+
+### 13. CLI 命令完整列表
+
+```bash
+# ========== 技能管理 ==========
+# 列出所有已加载的技能
+goclaw skills list
+
+# 详细模式（显示 Prompt 片段）
+goclaw skills list --verbose
+goclaw skills list -v
+
+# 验证技能依赖
+goclaw skills validate [skill-name]
+
+# 测试技能
+goclaw skills test [skill-name] --prompt "test prompt"
+
+# ========== 技能安装 ==========
+# 从 Git 仓库安装
+goclaw skills install https://github.com/user/skills/my-skill
+
+# 从本地目录安装
+goclaw skills install ./path/to/skill
+
+# 更新技能
+goclaw skills update [skill-name]
+
+# 卸载技能
+goclaw skills uninstall [skill-name]
+
+
+# ========== 调试 ==========
+# 打印完整 System Prompt
+goclaw chat --debug-prompt
+
+# 启用详细日志
+goclaw chat --log-level=debug
+
+# ========== 配置 ==========
+# 显示当前配置
+goclaw skills config
+
+# 设置配置
+goclaw skills config set disabled skill-name
+goclaw skills config set env.skill-name KEY=value
+```
+
+## 总结
+
+此方案回归了 AgentSkills 的本质：**Prompt Engineering at Scale**。
+
+| 特性 | 旧方案 (Tool Wrap) | 新方案 (Prompt Injection) |
+| :--- | :--- | :--- |
+| **实现难度** | 高 (需解析 Markdown 自动生成 Tool) | 低 (仅需字符串拼接) |
+| **灵活性** | 低 (参数被写死) | 高 (LLM 自由组合命令) |
+| **兼容性** | 差 (特有协议) | 优 (兼容 OpenClaw/AgentSkills) |
+| **维护性** | 差 (依赖代码绑定) | 优 (完全解耦，热更新) |
+| **调试性** | 中 (需查看 Tool 定义) | 高 (直接查看 Prompt) |
+| **安全性** | 独立控制层 | 依赖基础工具配置 ⚠️ |
+| **热更新** | 需重新编译 | 修改文本即可 ✅ |
