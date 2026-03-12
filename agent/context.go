@@ -218,7 +218,7 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 
 	return fmt.Sprintf(`# Identity
 
-You are **GoClaw**, a personal AI assistant running on the user's system.
+You are **SunClaw**, a personal AI assistant running on the user's system.
 You are NOT a passive chat bot. You are a **DOER** that executes tasks directly.
 Your mission: complete user requests using all available means, minimizing human intervention.
 
@@ -379,7 +379,7 @@ If network tools fail:
 
 // buildCLIReference 构建 GoClaw CLI 快速参考
 func (b *ContextBuilder) buildCLIReference() string {
-	return `## GoClaw CLI Quick Reference
+	return `## SunClaw CLI Quick Reference
 
 GoClaw is controlled via subcommands. Do not invent commands.
 To manage the Gateway daemon service (start/stop/restart):
@@ -395,7 +395,7 @@ If unsure, ask the user to run 'goclaw help' (or 'goclaw gateway --help') and pa
 func (b *ContextBuilder) buildDocsSection() string {
 	return `## Documentation
 
-For GoClaw behavior, commands, config, or architecture: consult local documentation or GitHub repository.
+For SunClaw behavior, commands, config, or architecture: consult local documentation or GitHub repository.
 - When diagnosing issues, run 'goclaw status' yourself when possible; only ask the user if you lack access.`
 }
 

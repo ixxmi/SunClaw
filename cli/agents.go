@@ -102,7 +102,7 @@ func runAgentsList(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	agentsDir := filepath.Join(homeDir, ".goclaw", "agents")
+	agentsDir := filepath.Join(homeDir, ".sunclaw", "agents")
 	agents, err := loadAgents(agentsDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading agents: %v\n", err)
@@ -121,7 +121,7 @@ func runAgentsList(cmd *cobra.Command, args []string) {
 
 	if len(agents) == 0 {
 		fmt.Println("No agents found.")
-		fmt.Println("\nCreate a new agent with: goclaw agents add [name]")
+		fmt.Println("\nCreate a new agent with: sunclaw agents add [name]")
 		return
 	}
 
@@ -169,7 +169,7 @@ func runAgentsAdd(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	agentsDir := filepath.Join(homeDir, ".goclaw", "agents")
+	agentsDir := filepath.Join(homeDir, ".sunclaw", "agents")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating agents directory: %v\n", err)
 		os.Exit(1)
@@ -192,7 +192,7 @@ func runAgentsAdd(cmd *cobra.Command, args []string) {
 	// Set defaults
 	workspace := agentsAddWorkspace
 	if workspace == "" {
-		workspace = filepath.Join(homeDir, ".goclaw", "workspaces", name)
+		workspace = filepath.Join(homeDir, ".sunclaw", "workspaces", name)
 	}
 
 	model := agentsAddModel
@@ -252,7 +252,7 @@ func runAgentsDelete(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	agentsDir := filepath.Join(homeDir, ".goclaw", "agents")
+	agentsDir := filepath.Join(homeDir, ".sunclaw", "agents")
 	agentConfigPath := filepath.Join(agentsDir, name+".json")
 
 	// Check if agent exists

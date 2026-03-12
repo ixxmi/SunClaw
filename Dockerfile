@@ -15,7 +15,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goclaw .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sunclaw .
 
 # Final stage
 FROM alpine:latest
@@ -24,21 +24,21 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates tzdata
 
 # Create app user
-RUN addgroup -g 1000 goclaw && \
-    adduser -D -u 1000 -G goclaw goclaw
+RUN addgroup -g 1000 sunclaw && \
+    adduser -D -u 1000 -G sunclaw sunclaw
 
 # Set working directory
-WORKDIR /home/goclaw
+WORKDIR /home/sunclaw
 
 # Copy binary from builder
-COPY --from=builder /app/goclaw .
+COPY --from=builder /app/sunclaw .
 
 # Create directories
-RUN mkdir -p .goclaw/workspace .goclaw/sessions && \
-    chown -R goclaw:goclaw /home/goclaw
+RUN mkdir -p .sunclaw/workspace .sunclaw/sessions && \
+    chown -R sunclaw:sunclaw /home/sunclaw
 
 # Switch to non-root user
-USER goclaw
+USER sunclaw
 
 # Expose health check and webhooks
 EXPOSE 8080
@@ -48,4 +48,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 # Run the application
-CMD ["./goclaw", "start"]
+CMD ["./sunclaw", "start"]

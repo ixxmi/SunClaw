@@ -34,6 +34,7 @@ type BrowserSessionManager struct {
 	conn           *rpcc.Conn
 	cmd            *exec.Cmd
 	ready          bool
+	headless       bool
 	chromePath     string
 	userDataDir    string
 	remoteURL      string               // 远程 Chrome 实例 URL
@@ -54,27 +55,55 @@ func GetBrowserSession() *BrowserSessionManager {
 
 // Start 启动浏览器会话
 func (b *BrowserSessionManager) Start(timeout time.Duration) error {
-	return b.StartWithMode(timeout, "", ModeAuto)
+	return b.StartWithPreferences(timeout, "", ModeAuto, true)
 }
 
 // StartWithMode 使用指定模式启动浏览器会话
 func (b *BrowserSessionManager) StartWithMode(timeout time.Duration, relayURL string, mode ConnectionMode) error {
+	return b.StartWithPreferences(timeout, relayURL, mode, true)
+}
+
+// StartWithPreferences 使用指定模式和窗口可见性启动浏览器会话
+func (b *BrowserSessionManager) StartWithPreferences(timeout time.Duration, relayURL string, mode ConnectionMode, headless bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	requestedMode := mode
+	if !headless {
+		// 可见窗口必须走本地 direct 模式。
+		requestedMode = ModeDirect
+	}
+
 	if b.ready {
-		return nil
+		sameMode := false
+		switch requestedMode {
+		case ModeAuto:
+			sameMode = b.connectionMode == ModeDirect || b.connectionMode == ModeRelay
+		default:
+			sameMode = b.connectionMode == requestedMode
+		}
+
+		if sameMode && b.headless == headless {
+			return nil
+		}
+
+		logger.Info("Restarting browser session to satisfy requested mode",
+			zap.String("current_mode", string(b.connectionMode)),
+			zap.Bool("current_headless", b.headless),
+			zap.String("requested_mode", string(requestedMode)),
+			zap.Bool("requested_headless", headless))
+		b.stopLocked()
 	}
 
 	b.relayURL = relayURL
-	b.connectionMode = mode
+	b.headless = headless
 
 	// 根据模式决定连接方式
-	switch mode {
+	switch requestedMode {
 	case ModeRelay:
 		return b.startRelayMode(timeout)
 	case ModeDirect:
-		return b.startDirectMode(timeout)
+		return b.startDirectMode(timeout, headless)
 	case ModeAuto:
 		// 自动模式：优先尝试 relay，失败则尝试 direct
 		if relayURL != "" {
@@ -85,9 +114,9 @@ func (b *BrowserSessionManager) StartWithMode(timeout time.Duration, relayURL st
 			}
 			logger.Warn("OpenClaw Relay connection failed, falling back to direct CDP", zap.Error(err))
 		}
-		return b.startDirectMode(timeout)
+		return b.startDirectMode(timeout, headless)
 	default:
-		return fmt.Errorf("unknown connection mode: %s", mode)
+		return fmt.Errorf("unknown connection mode: %s", requestedMode)
 	}
 }
 
@@ -102,23 +131,28 @@ func (b *BrowserSessionManager) startRelayMode(timeout time.Duration) error {
 	}
 
 	b.relaySession = relaySession
+	b.connectionMode = ModeRelay
 	b.ready = true
 	logger.Debug("Browser session started successfully with OpenClaw Relay")
 	return nil
 }
 
 // startDirectMode 启动直接 CDP 模式
-func (b *BrowserSessionManager) startDirectMode(timeout time.Duration) error {
-	logger.Debug("Starting persistent browser session with Chrome DevTools Protocol")
+func (b *BrowserSessionManager) startDirectMode(timeout time.Duration, headless bool) error {
+	logger.Debug("Starting persistent browser session with Chrome DevTools Protocol",
+		zap.Bool("headless", headless))
 
-	// 首先尝试连接到已运行的 Chrome 实例
-	if err := b.tryConnectToExisting(); err == nil {
-		b.ready = true
-		logger.Debug("Connected to existing Chrome instance")
-		return nil
+	// 无头模式可以复用现有远程调试会话；可见模式必须启动受控本地窗口。
+	if headless {
+		if err := b.tryConnectToExisting(); err == nil {
+			b.connectionMode = ModeDirect
+			b.ready = true
+			logger.Debug("Connected to existing Chrome instance")
+			return nil
+		}
 	}
 
-	logger.Debug("No existing Chrome found, starting new instance")
+	logger.Debug("No compatible Chrome instance found, starting new instance")
 
 	// 查找 Chrome 可执行文件
 	chromePath, err := b.findChrome()
@@ -134,20 +168,30 @@ func (b *BrowserSessionManager) startDirectMode(timeout time.Duration) error {
 	}
 	b.userDataDir = userDataDir
 
-	// 启动 Chrome
-	b.cmd = exec.Command(chromePath,
-		"--headless=new",
-		"--no-sandbox",
-		"--disable-setuid-sandbox",
-		"--disable-dev-shm-usage",
-		"--disable-gpu",
-		"--disable-software-rasterizer",
+	args := []string{
 		"--remote-debugging-port=9222",
 		fmt.Sprintf("--user-data-dir=%s", userDataDir),
-		"--disable-background-timer-throttling",
-		"--disable-backgrounding-occluded-windows",
-		"--disable-renderer-backgrounding",
-	)
+		"--no-first-run",
+		"--no-default-browser-check",
+	}
+	if headless {
+		args = append(args,
+			"--headless=new",
+			"--no-sandbox",
+			"--disable-setuid-sandbox",
+			"--disable-dev-shm-usage",
+			"--disable-gpu",
+			"--disable-software-rasterizer",
+			"--disable-background-timer-throttling",
+			"--disable-backgrounding-occluded-windows",
+			"--disable-renderer-backgrounding",
+		)
+	} else {
+		args = append(args, "--new-window", "about:blank")
+	}
+
+	// 启动 Chrome
+	b.cmd = exec.Command(chromePath, args...)
 
 	if err := b.cmd.Start(); err != nil {
 		os.RemoveAll(userDataDir)
@@ -171,6 +215,8 @@ func (b *BrowserSessionManager) startDirectMode(timeout time.Duration) error {
 		return fmt.Errorf("failed to connect to Chrome: %w", err)
 	}
 
+	b.remoteURL = "http://localhost:9222"
+	b.connectionMode = ModeDirect
 	b.ready = true
 	logger.Debug("Browser session started successfully with Chrome DevTools Protocol")
 	return nil
@@ -304,6 +350,13 @@ func (b *BrowserSessionManager) GetConnectionMode() ConnectionMode {
 	return b.connectionMode
 }
 
+// IsHeadless 检查当前会话是否为无头模式
+func (b *BrowserSessionManager) IsHeadless() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.headless
+}
+
 // IsRelayMode 检查是否使用 Relay 模式
 func (b *BrowserSessionManager) IsRelayMode() bool {
 	b.mu.RLock()
@@ -317,36 +370,42 @@ func (b *BrowserSessionManager) Stop() {
 	defer b.mu.Unlock()
 
 	if b.ready {
-		logger.Debug("Stopping browser session")
-
-		// 停止 Relay 会话
-		if b.relaySession != nil {
-			b.relaySession.Stop()
-			b.relaySession = nil
-		}
-
-		// 关闭连接
-		if b.conn != nil {
-			_ = b.conn.Close()
-		}
-
-		// 停止 Chrome 进程
-		if b.cmd != nil && b.cmd.Process != nil {
-			_ = b.cmd.Process.Kill()
-			_ = b.cmd.Wait()
-		}
-
-		// 清理临时目录
-		if b.userDataDir != "" {
-			_ = os.RemoveAll(b.userDataDir)
-		}
-
-		b.ready = false
-		b.client = nil
-		b.conn = nil
-		b.cmd = nil
-		b.userDataDir = ""
-		b.connectionMode = ModeAuto
-		b.relayURL = ""
+		b.stopLocked()
 	}
+}
+
+func (b *BrowserSessionManager) stopLocked() {
+	logger.Debug("Stopping browser session")
+
+	// 停止 Relay 会话
+	if b.relaySession != nil {
+		b.relaySession.Stop()
+		b.relaySession = nil
+	}
+
+	// 关闭连接
+	if b.conn != nil {
+		_ = b.conn.Close()
+	}
+
+	// 停止 Chrome 进程
+	if b.cmd != nil && b.cmd.Process != nil {
+		_ = b.cmd.Process.Kill()
+		_ = b.cmd.Wait()
+	}
+
+	// 清理临时目录
+	if b.userDataDir != "" {
+		_ = os.RemoveAll(b.userDataDir)
+	}
+
+	b.ready = false
+	b.client = nil
+	b.conn = nil
+	b.cmd = nil
+	b.userDataDir = ""
+	b.remoteURL = ""
+	b.connectionMode = ModeAuto
+	b.relayURL = ""
+	b.headless = false
 }

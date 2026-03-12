@@ -23,7 +23,7 @@ func HealthCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "health",
 		Short: "Check health of running Gateway",
-		Long:  `Fetch health status from the running goclaw gateway server.`,
+		Long:  `Fetch health status from the running sunclaw gateway server.`,
 		Run:   runHealth,
 	}
 
@@ -60,7 +60,7 @@ func runHealth(cmd *cobra.Command, args []string) {
 			fmt.Printf(`{"status":"error","error":"%s"}`+"\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "Failed to connect to gateway: %v\n", err)
-			fmt.Println("Make sure the gateway is running (use 'goclaw gateway run')")
+			fmt.Println("Make sure the gateway is running (use 'sunclaw gateway run')")
 		}
 		os.Exit(1)
 	}

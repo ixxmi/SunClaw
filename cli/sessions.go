@@ -70,7 +70,7 @@ func runSessionsList(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
 			os.Exit(1)
 		}
-		sessionDir = filepath.Join(homeDir, ".goclaw", "sessions")
+		sessionDir = filepath.Join(homeDir, ".sunclaw", "sessions")
 	}
 
 	// Create session manager

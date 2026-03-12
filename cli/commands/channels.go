@@ -247,7 +247,7 @@ func getChannelStatusFromGateway(channelName string, timeout int) map[string]int
 		"online":  false,
 		"channel": channelName,
 		"status":  "unavailable",
-		"message": "Gateway is not running. Start with 'goclaw start' or 'goclaw gateway run'",
+		"message": "Gateway is not running. Start with 'sunclaw start' or 'sunclaw gateway run'",
 	}
 }
 
@@ -267,7 +267,7 @@ func outputChannelsJSON(activeChannels []ChannelInfo, allChannels []ChannelInfo)
 		Active:  activeChannels,
 		All:     allChannels,
 		Online:  gatewayOnline,
-		Message: "Use 'goclaw start' to start the gateway with configured channels",
+		Message: "Use 'sunclaw start' to start the gateway with configured channels",
 	}
 
 	jsonOut, err := json.MarshalIndent(out, "", "  ")
@@ -287,7 +287,7 @@ func outputChannelsText(activeChannels []ChannelInfo, allChannels []ChannelInfo)
 	if gatewayOnline {
 		fmt.Println("Gateway: Online")
 	} else {
-		fmt.Println("Gateway: Offline (start with 'goclaw start')")
+		fmt.Println("Gateway: Offline (start with 'sunclaw start')")
 	}
 
 	// Show configured channels
@@ -311,9 +311,9 @@ func outputChannelsText(activeChannels []ChannelInfo, allChannels []ChannelInfo)
 	}
 
 	fmt.Println("\nTip:")
-	fmt.Println("  1. Edit ~/.goclaw/config.json to configure channels")
-	fmt.Println("  2. Run 'goclaw start' to start the agent with channels enabled")
-	fmt.Println("  3. Use 'goclaw channels status [name]' to check specific channel status")
+	fmt.Println("  1. Edit ~/.sunclaw/config.json to configure channels")
+	fmt.Println("  2. Run 'sunclaw start' to start the agent with channels enabled")
+	fmt.Println("  3. Use 'sunclaw channels status [name]' to check specific channel status")
 }
 
 // outputChannelStatusJSON outputs channel status as JSON

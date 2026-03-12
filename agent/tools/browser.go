@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mafredri/cdp"
@@ -93,6 +94,120 @@ func NewBrowserToolWithRelay(headless bool, timeout int, relayURL, relayMode str
 	}
 }
 
+const (
+	windowModeAuto        = "auto"
+	windowModeInteractive = "interactive"
+	windowModeHeadless    = "headless"
+)
+
+func browserWindowModeProperty(defaultBehavior string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "string",
+		"description": fmt.Sprintf(
+			"Browser window mode. \"interactive\" opens a visible local Chrome window for the user, \"headless\" runs invisible automation, \"auto\" uses the tool default. Default behavior: %s",
+			defaultBehavior,
+		),
+		"enum": []string{windowModeAuto, windowModeInteractive, windowModeHeadless},
+	}
+}
+
+func (b *BrowserTool) parseWindowMode(params map[string]interface{}, defaultHeadless bool) (bool, bool, error) {
+	raw, ok := params["window_mode"]
+	if !ok {
+		return defaultHeadless, false, nil
+	}
+
+	mode, ok := raw.(string)
+	if !ok {
+		return false, false, fmt.Errorf("window_mode must be a string")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", windowModeAuto:
+		return defaultHeadless, false, nil
+	case windowModeInteractive:
+		return false, true, nil
+	case windowModeHeadless:
+		return true, true, nil
+	default:
+		return false, false, fmt.Errorf("unsupported window_mode: %s", mode)
+	}
+}
+
+func (b *BrowserTool) resolveConnectionMode(headless bool, forceDirect bool) ConnectionMode {
+	if forceDirect || !headless {
+		return ModeDirect
+	}
+
+	switch strings.ToLower(strings.TrimSpace(b.relayMode)) {
+	case "direct":
+		return ModeDirect
+	case "relay":
+		return ModeRelay
+	default:
+		return ModeAuto
+	}
+}
+
+func (b *BrowserTool) ensureSession(
+	params map[string]interface{},
+	defaultHeadless bool,
+	allowCreate bool,
+	preferDefaultOnReuse bool,
+	forceDirect bool,
+) (*BrowserSessionManager, error) {
+	sessionMgr := GetBrowserSession()
+	requestedHeadless, explicit, err := b.parseWindowMode(params, defaultHeadless)
+	if err != nil {
+		return nil, err
+	}
+
+	if !sessionMgr.IsReady() {
+		if !allowCreate {
+			return nil, fmt.Errorf("browser session not ready. Please navigate to a page first using browser_navigate.")
+		}
+		if err := sessionMgr.StartWithPreferences(
+			b.timeout,
+			b.relayURL,
+			b.resolveConnectionMode(requestedHeadless, forceDirect),
+			requestedHeadless,
+		); err != nil {
+			return nil, fmt.Errorf("failed to start browser session: %w", err)
+		}
+		return sessionMgr, nil
+	}
+
+	needsRestart := false
+	switch {
+	case explicit:
+		needsRestart = true
+	case preferDefaultOnReuse && sessionMgr.IsHeadless() != requestedHeadless:
+		needsRestart = true
+	case forceDirect && sessionMgr.IsRelayMode():
+		needsRestart = true
+	}
+
+	if needsRestart {
+		if err := sessionMgr.StartWithPreferences(
+			b.timeout,
+			b.relayURL,
+			b.resolveConnectionMode(requestedHeadless, forceDirect),
+			requestedHeadless,
+		); err != nil {
+			return nil, fmt.Errorf("failed to switch browser session mode: %w", err)
+		}
+	}
+
+	return sessionMgr, nil
+}
+
+func (b *BrowserTool) sessionModeLabel(sessionMgr *BrowserSessionManager) string {
+	if sessionMgr != nil && sessionMgr.IsHeadless() {
+		return windowModeHeadless
+	}
+	return windowModeInteractive
+}
+
 // Close Close browser tool and cleanup resources
 func (b *BrowserTool) Close() error {
 	// 确保输出目录存在
@@ -118,22 +233,9 @@ func (b *BrowserTool) BrowserNavigate(ctx context.Context, params map[string]int
 
 	logger.Debug("Browser navigating to", zap.String("url", urlStr))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		mode := ModeAuto
-		if b.relayMode != "" {
-			switch b.relayMode {
-			case "direct":
-				mode = ModeDirect
-			case "relay":
-				mode = ModeRelay
-			case "auto":
-				mode = ModeAuto
-			}
-		}
-		if err := sessionMgr.StartWithMode(b.timeout, b.relayURL, mode); err != nil {
-			return "", fmt.Errorf("failed to start browser session: %w", err)
-		}
+	sessionMgr, err := b.ensureSession(params, false, true, true, false)
+	if err != nil {
+		return "", err
 	}
 
 	// Relay 模式下的处理
@@ -176,7 +278,13 @@ func (b *BrowserTool) BrowserNavigate(ctx context.Context, params map[string]int
 		return "", fmt.Errorf("failed to get outer HTML: %w", err)
 	}
 
-	return fmt.Sprintf("Navigated to: %s\nFrame ID: %s\nPage size: %d bytes", urlStr, nav.FrameID, len(html.OuterHTML)), nil
+	return fmt.Sprintf(
+		"Navigated to: %s\nFrame ID: %s\nWindow mode: %s\nPage size: %d bytes",
+		urlStr,
+		nav.FrameID,
+		b.sessionModeLabel(sessionMgr),
+		len(html.OuterHTML),
+	), nil
 }
 
 // navigateViaRelay 通过 Relay 执行导航
@@ -197,7 +305,12 @@ func (b *BrowserTool) navigateViaRelay(ctx context.Context, urlStr string) (stri
 	}
 
 	frameID, _ := result["frameId"].(string)
-	return fmt.Sprintf("Navigated to: %s (via Relay)\nFrame ID: %s", urlStr, frameID), nil
+	return fmt.Sprintf(
+		"Navigated to: %s (via Relay)\nFrame ID: %s\nWindow mode: %s",
+		urlStr,
+		frameID,
+		b.sessionModeLabel(sessionMgr),
+	), nil
 }
 
 // BrowserScreenshot Take screenshot of page
@@ -221,9 +334,9 @@ func (b *BrowserTool) BrowserScreenshot(ctx context.Context, params map[string]i
 
 	logger.Debug("Browser screenshot", zap.String("url", urlStr), zap.Int("width", width), zap.Int("height", height))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		return "", fmt.Errorf("browser session not ready")
+	sessionMgr, err := b.ensureSession(params, true, urlStr != "", false, false)
+	if err != nil {
+		return "", err
 	}
 
 	// Relay 模式下的处理
@@ -276,8 +389,14 @@ func (b *BrowserTool) BrowserScreenshot(ctx context.Context, params map[string]i
 
 	base64Str := base64.StdEncoding.EncodeToString(screenshot.Data)
 
-	return fmt.Sprintf("Screenshot saved to: %s\nURL: %s\nBase64 length: %d bytes\nImage URL: file://%s",
-		filepath, currentURL, len(base64Str), filepath), nil
+	return fmt.Sprintf(
+		"Screenshot saved to: %s\nURL: %s\nWindow mode: %s\nBase64 length: %d bytes\nImage URL: file://%s",
+		filepath,
+		currentURL,
+		b.sessionModeLabel(sessionMgr),
+		len(base64Str),
+		filepath,
+	), nil
 }
 
 // screenshotViaRelay 通过 Relay 执行截图
@@ -335,8 +454,13 @@ func (b *BrowserTool) screenshotViaRelay(ctx context.Context, urlStr string, wid
 		return "", fmt.Errorf("failed to save screenshot: %w", err)
 	}
 
-	return fmt.Sprintf("Screenshot saved to: %s (via Relay)\nBase64 length: %d bytes\nImage URL: file://%s",
-		filepath, len(data), filepath), nil
+	return fmt.Sprintf(
+		"Screenshot saved to: %s (via Relay)\nWindow mode: %s\nBase64 length: %d bytes\nImage URL: file://%s",
+		filepath,
+		b.sessionModeLabel(sessionMgr),
+		len(data),
+		filepath,
+	), nil
 }
 
 // BrowserExecuteScript Execute JavaScript in browser
@@ -353,9 +477,9 @@ func (b *BrowserTool) BrowserExecuteScript(ctx context.Context, params map[strin
 
 	logger.Debug("Browser executing script", zap.String("url", urlStr), zap.String("script", script))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		return "", fmt.Errorf("browser session not ready")
+	sessionMgr, err := b.ensureSession(params, true, urlStr != "", false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -404,9 +528,9 @@ func (b *BrowserTool) BrowserClick(ctx context.Context, params map[string]interf
 
 	logger.Debug("Browser clicking element", zap.String("url", urlStr), zap.String("selector", selector))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		return "", fmt.Errorf("browser session not ready")
+	sessionMgr, err := b.ensureSession(params, false, urlStr != "", false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -484,9 +608,9 @@ func (b *BrowserTool) BrowserFillInput(ctx context.Context, params map[string]in
 
 	logger.Debug("Browser filling input", zap.String("url", urlStr), zap.String("selector", selector), zap.String("value", "***"))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		return "", fmt.Errorf("browser session not ready. Please navigate to a page first using browser_navigate.")
+	sessionMgr, err := b.ensureSession(params, false, urlStr != "", false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -545,11 +669,9 @@ func (b *BrowserTool) BrowserGetText(ctx context.Context, params map[string]inte
 
 	logger.Debug("Browser getting text", zap.String("url", urlStr))
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		if err := sessionMgr.Start(b.timeout); err != nil {
-			return "", fmt.Errorf("failed to start browser session: %w", err)
-		}
+	sessionMgr, err := b.ensureSession(params, true, true, false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -589,7 +711,13 @@ func (b *BrowserTool) BrowserGetText(ctx context.Context, params map[string]inte
 		text = text[:10000] + "\n\n... (truncated)"
 	}
 
-	return fmt.Sprintf("Page text from %s\nFrame ID: %s\n\n%s", urlStr, string(nav.FrameID), text), nil
+	return fmt.Sprintf(
+		"Page text from %s\nFrame ID: %s\nWindow mode: %s\n\n%s",
+		urlStr,
+		string(nav.FrameID),
+		b.sessionModeLabel(sessionMgr),
+		text,
+	), nil
 }
 
 // querySelector Find element using CSS selector and return node ID
@@ -619,7 +747,7 @@ func (b *BrowserTool) GetTools() []Tool {
 	return []Tool{
 		NewBaseTool(
 			"browser_navigate",
-			"Navigate browser to a URL and wait for it to load",
+			"Open or navigate a browser page. Use this when the user explicitly wants a page opened for viewing or interaction.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -627,6 +755,7 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "string",
 						"description": "URL to navigate to (must start with http:// or https://)",
 					},
+					"window_mode": browserWindowModeProperty("if no session exists, defaults to interactive and opens a visible Chrome window"),
 				},
 				"required": []string{"url"},
 			},
@@ -634,7 +763,7 @@ func (b *BrowserTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"browser_screenshot",
-			"Take a screenshot of current page or navigate to a URL first",
+			"Take a screenshot of the current page or of a URL. Good for visual inspection and page capture.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -650,13 +779,14 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "number",
 						"description": "Screenshot height in pixels (default: 1080)",
 					},
+					"window_mode": browserWindowModeProperty("if a new session must be created, defaults to headless; if a session already exists, reuses it"),
 				},
 			},
 			b.BrowserScreenshot,
 		),
 		NewBaseTool(
 			"browser_execute_script",
-			"Execute JavaScript code in the browser console",
+			"Execute JavaScript in the current page. Prefer this for controlled browser automation, not general code execution.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -668,6 +798,7 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "string",
 						"description": "URL to navigate to before executing (optional)",
 					},
+					"window_mode": browserWindowModeProperty("if a new session must be created, defaults to headless; if a session already exists, reuses it"),
 				},
 				"required": []string{"script"},
 			},
@@ -675,7 +806,7 @@ func (b *BrowserTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"browser_click",
-			"Click an element on the page using CSS selector",
+			"Click an element on the page using a CSS selector. Use for browser interaction workflows.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -687,6 +818,7 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "string",
 						"description": "URL to navigate to before clicking (optional)",
 					},
+					"window_mode": browserWindowModeProperty("if a new session must be created, defaults to interactive; existing sessions are reused unless overridden"),
 				},
 				"required": []string{"selector"},
 			},
@@ -694,7 +826,7 @@ func (b *BrowserTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"browser_fill_input",
-			"Fill an input field with text",
+			"Fill an input field with text. Use for visible browser interaction or guided form automation.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -710,6 +842,7 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "string",
 						"description": "URL to navigate to before filling (optional)",
 					},
+					"window_mode": browserWindowModeProperty("if a new session must be created, defaults to interactive; existing sessions are reused unless overridden"),
 				},
 				"required": []string{"selector", "value"},
 			},
@@ -717,7 +850,7 @@ func (b *BrowserTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"browser_get_text",
-			"Get the text content of a web page",
+			"Read and return the text content of a web page. Prefer this for information retrieval and summarization.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -725,6 +858,7 @@ func (b *BrowserTool) GetTools() []Tool {
 						"type":        "string",
 						"description": "URL of the page to get text from",
 					},
+					"window_mode": browserWindowModeProperty("if no session exists, defaults to headless for invisible information retrieval"),
 				},
 				"required": []string{"url"},
 			},

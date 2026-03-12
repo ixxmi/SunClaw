@@ -69,5 +69,5 @@ func dumpGoroutineStacks() {
 }
 
 func GetVersionInfo() string {
-	return fmt.Sprintf("goclaw version %s (commit: %s, built at: %s by: %s)", Version, Commit, Date, BuiltBy)
+	return fmt.Sprintf("sunclaw version %s (commit: %s, built at: %s by: %s)", Version, Commit, Date, BuiltBy)
 }

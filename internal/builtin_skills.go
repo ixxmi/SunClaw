@@ -24,19 +24,19 @@ func GetHomeDir() string {
 }
 
 // GetGoclawDir 获取 goclaw 配置目录
-func GetGoclawDir() string {
+func GetSunclawDir() string {
 	return filepath.Join(GetHomeDir(), ".goclaw")
 }
 
 // GetConfigPath 获取配置文件路径
 func GetConfigPath() string {
-	return filepath.Join(GetGoclawDir(), "config.json")
+	return filepath.Join(GetSunclawDir(), "config.json")
 }
 
 // EnsureBuiltinSkills 确保内置技能被复制到用户目录
 // 支持增量复制：只复制缺失的技能，不会覆盖已存在的技能
 func EnsureBuiltinSkills() error {
-	goclawDir := GetGoclawDir()
+	goclawDir := GetSunclawDir()
 	skillsDir := filepath.Join(goclawDir, "skills")
 
 	// 确保目录存在
@@ -133,7 +133,7 @@ func EnsureConfig() (bool, error) {
 	}
 
 	// 确保目录存在
-	goclawDir := GetGoclawDir()
+	goclawDir := GetSunclawDir()
 	if err := os.MkdirAll(goclawDir, 0755); err != nil {
 		return false, fmt.Errorf("failed to create goclaw directory: %w", err)
 	}

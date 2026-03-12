@@ -158,18 +158,18 @@ func runSkillsList(cmd *cobra.Command, args []string) {
 	// 加载顺序（后加载的同名技能会覆盖前面的）：
 	// 1. ./skills/ (当前目录，最高优先级)
 	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
+	// 3. ~/.sunclaw/skills/ (用户全局目录)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
-	workspaceSkillsDir := goclawDir + "/workspace/skills"
+	sunclawDir := homeDir + "/.sunclaw"
+	globalSkillsDir := sunclawDir + "/skills"
+	workspaceSkillsDir := sunclawDir + "/workspace/skills"
 	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）
@@ -246,18 +246,18 @@ func runSkillsValidate(cmd *cobra.Command, args []string) {
 	// 加载顺序（后加载的同名技能会覆盖前面的）：
 	// 1. ./skills/ (当前目录，最高优先级)
 	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
+	// 3. ~/.sunclaw/skills/ (用户全局目录)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
-	workspaceSkillsDir := goclawDir + "/workspace/skills"
+	sunclawDir := homeDir + "/.sunclaw"
+	globalSkillsDir := sunclawDir + "/skills"
+	workspaceSkillsDir := sunclawDir + "/workspace/skills"
 	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）
@@ -388,18 +388,18 @@ func runSkillsTest(cmd *cobra.Command, args []string) {
 	// 加载顺序（后加载的同名技能会覆盖前面的）：
 	// 1. ./skills/ (当前目录，最高优先级)
 	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
+	// 3. ~/.sunclaw/skills/ (用户全局目录)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
-	workspaceSkillsDir := goclawDir + "/workspace/skills"
+	sunclawDir := homeDir + "/.sunclaw"
+	globalSkillsDir := sunclawDir + "/skills"
+	workspaceSkillsDir := sunclawDir + "/workspace/skills"
 	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）
@@ -477,7 +477,7 @@ func runSkillsInstall(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.goclaw/skills"
+	userSkillsDir := homeDir + "/.sunclaw/skills"
 	if err := os.MkdirAll(userSkillsDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create skills directory: %v\n", err)
 		os.Exit(1)
@@ -610,7 +610,7 @@ func runSkillsUpdate(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.goclaw/skills"
+	userSkillsDir := homeDir + "/.sunclaw/skills"
 	skillPath := filepath.Join(userSkillsDir, skillName)
 
 	// 检查是否是 Git 仓库
@@ -649,7 +649,7 @@ func runSkillsUninstall(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.goclaw/skills"
+	userSkillsDir := homeDir + "/.sunclaw/skills"
 	skillPath := filepath.Join(userSkillsDir, skillName)
 
 	// 检查技能是否存在
@@ -695,7 +695,7 @@ func runSkillsConfigShow(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	skillsConfigPath := homeDir + "/.goclaw/skills.yaml"
+	skillsConfigPath := homeDir + "/.sunclaw/skills.yaml"
 	if _, err := os.Stat(skillsConfigPath); err == nil {
 		fmt.Printf("\nConfig file: %s\n", skillsConfigPath)
 		// TODO: 解析并显示 skills.yaml 内容
@@ -737,7 +737,7 @@ func runSkillsConfigSet(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.goclaw"
+	userSkillsDir := homeDir + "/.sunclaw"
 	skillsConfigPath := filepath.Join(userSkillsDir, "skills.yaml")
 
 	// TODO: 实现 skills.yaml 的读写
@@ -763,14 +763,14 @@ func runSkillsInstallDeps(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	goclawDir := homeDir + "/.goclaw"
-	workspace := goclawDir + "/workspace"
-	globalSkillsDir := goclawDir + "/skills"
+	sunclawDir := homeDir + "/.sunclaw"
+	workspace := sunclawDir + "/workspace"
+	globalSkillsDir := sunclawDir + "/skills"
 	workspaceSkillsDir := workspace + "/skills"
 	currentSkillsDir := "./skills"
 
 	// 创建技能加载器并启用自动安装
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）
@@ -836,5 +836,5 @@ func runSkillsSearch(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println("\nTo install a skill:")
-	fmt.Println("  goclaw skills install <url>")
+	fmt.Println("  sunclaw skills install <url>")
 }

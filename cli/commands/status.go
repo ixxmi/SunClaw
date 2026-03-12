@@ -29,7 +29,7 @@ func StatusCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show session health and status",
-		Long:  `Display comprehensive status information about goclaw sessions and gateway.`,
+		Long:  `Display comprehensive status information about sunclaw sessions and gateway.`,
 		Run:   runStatus,
 	}
 
@@ -82,7 +82,7 @@ func runStatus(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	status := &SystemStatus{
-		SessionDir: filepath.Join(homeDir, ".goclaw", "sessions"),
+		SessionDir: filepath.Join(homeDir, ".sunclaw", "sessions"),
 	}
 
 	// Check gateway status
@@ -217,7 +217,7 @@ func outputStatusJSON(status *SystemStatus) {
 
 // outputStatusText outputs status as formatted text
 func outputStatusText(status *SystemStatus) {
-	fmt.Println("=== goclaw Status ===")
+	fmt.Println("=== sunclaw Status ===")
 
 	// Gateway status
 	fmt.Println("Gateway:")
@@ -233,7 +233,7 @@ func outputStatusText(status *SystemStatus) {
 		}
 	} else {
 		fmt.Printf("  Status:  Offline\n")
-		fmt.Printf("  Tip:     Start gateway with 'goclaw gateway run'\n")
+		fmt.Printf("  Tip:     Start gateway with 'sunclaw gateway run'\n")
 	}
 
 	// Session status
@@ -280,7 +280,7 @@ func outputStatusText(status *SystemStatus) {
 		fmt.Printf("\nVerbose Information:\n")
 		fmt.Printf("  Session Directory: %s\n", status.SessionDir)
 		homeDir, _ := os.UserHomeDir()
-		fmt.Printf("  Configuration: %s\n", filepath.Join(homeDir, ".goclaw", "config.yaml"))
+		fmt.Printf("  Configuration: %s\n", filepath.Join(homeDir, ".sunclaw", "config.yaml"))
 	}
 
 	if statusDebug {

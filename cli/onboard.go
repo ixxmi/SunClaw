@@ -21,8 +21,8 @@ var (
 
 var onboardCmd = &cobra.Command{
 	Use:   "onboard",
-	Short: "Interactive setup wizard for goclaw",
-	Long: `Guided setup wizard for goclaw.
+	Short: "Interactive setup wizard for sunclaw",
+	Long: `Guided setup wizard for sunclaw.
 
 This command helps you:
 1. Initialize the config file and built-in skills
@@ -45,14 +45,14 @@ func init() {
 func runOnboard(cmd *cobra.Command, args []string) {
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════════════════════╗")
-	fmt.Println("║                    GoClaw Onboarding                      ║")
+	fmt.Println("║                    SunClaw Onboarding                      ║")
 	fmt.Println("╚════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
 	// 1. Initialize config file and built-in skills
-	fmt.Println("Step 1: Initializing goclaw environment...")
-	goclawDir := internal.GetGoclawDir()
-	fmt.Printf("  Config directory: %s\n", goclawDir)
+	fmt.Println("Step 1: Initializing sunclaw environment...")
+	sunclawDir := internal.GetSunclawDir()
+	fmt.Printf("  Config directory: %s\n", sunclawDir)
 
 	// Ensure config file exists
 	configCreated, err := internal.EnsureConfig()
@@ -315,8 +315,8 @@ func printSummary(cfg *config.Config) {
 	fmt.Println("                     Next Steps")
 	fmt.Println("═════════════════════════════════════════════════════════")
 	fmt.Println()
-	fmt.Println("  1. Start goclaw:")
-	fmt.Println("     $ goclaw start")
+	fmt.Println("  1. Start sunclaw:")
+	fmt.Println("     $ sunclaw start")
 	fmt.Println()
 	fmt.Println("  2. Connect via HTTP:")
 	fmt.Printf("     $ curl http://localhost:%d/health\n", cfg.Gateway.Port)
@@ -328,8 +328,8 @@ func printSummary(cfg *config.Config) {
 	fmt.Printf("     $ cat %s\n", internal.GetConfigPath())
 	fmt.Println()
 	fmt.Println("  5. List available skills:")
-	fmt.Println("     $ goclaw skills list")
+	fmt.Println("     $ sunclaw skills list")
 	fmt.Println()
-	fmt.Println("For more information, visit: https://github.com/smallnest/goclaw")
+	fmt.Println("For more information, visit: https://github.com/ixxmi/sunclaw")
 	fmt.Println()
 }

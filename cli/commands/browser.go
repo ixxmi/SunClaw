@@ -289,7 +289,7 @@ func (r *BrowserCommandRegistry) browserResetProfile(args []string) (string, boo
 	}
 
 	// Clean up profile directory (if stored)
-	profileDir := filepath.Join(r.homeDir, ".goclaw", "browser-profile")
+	profileDir := filepath.Join(r.homeDir, ".sunclaw", "browser-profile")
 	if _, err := os.Stat(profileDir); err == nil {
 		os.RemoveAll(profileDir)
 	}
@@ -431,7 +431,7 @@ func (r *BrowserCommandRegistry) browserClose(args []string) (string, bool) {
 
 // browserProfiles List profiles
 func (r *BrowserCommandRegistry) browserProfiles(args []string) (string, bool) {
-	profileDir := filepath.Join(r.homeDir, ".goclaw", "browser-profile")
+	profileDir := filepath.Join(r.homeDir, ".sunclaw", "browser-profile")
 
 	entries, err := os.ReadDir(profileDir)
 	if err != nil {
@@ -470,7 +470,7 @@ func (r *BrowserCommandRegistry) browserScreenshot(args []string) (string, bool)
 	}
 
 	// Save screenshot
-	screenshotDir := filepath.Join(r.homeDir, "goclaw-screenshots")
+	screenshotDir := filepath.Join(r.homeDir, "sunclaw-screenshots")
 	_ = os.MkdirAll(screenshotDir, 0755)
 
 	filename := fmt.Sprintf("screenshot_%d.png", time.Now().Unix())
@@ -517,7 +517,7 @@ func (r *BrowserCommandRegistry) browserSnapshot(args []string) (string, bool) {
 	}
 
 	// Save snapshot
-	snapshotDir := filepath.Join(r.homeDir, "goclaw-snapshots")
+	snapshotDir := filepath.Join(r.homeDir, "sunclaw-snapshots")
 	_ = os.MkdirAll(snapshotDir, 0755)
 
 	timestamp := time.Now().Unix()
@@ -1173,7 +1173,7 @@ func (r *BrowserCommandRegistry) browserPDF(args []string) (string, bool) {
 	}
 
 	// Save PDF
-	screenshotDir := filepath.Join(r.homeDir, "goclaw-screenshots")
+	screenshotDir := filepath.Join(r.homeDir, "sunclaw-screenshots")
 	_ = os.MkdirAll(screenshotDir, 0755)
 
 	pdfPath := filepath.Join(screenshotDir, filename)

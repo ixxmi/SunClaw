@@ -2,6 +2,7 @@
   "log": {
     "level": "info",
     "dir": "",
+    "split_by_day": false,
     "max_size_mb": 100,
     "max_backups": 7,
     "max_age_days": 30,

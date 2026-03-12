@@ -122,8 +122,8 @@ var (
 func TUICommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tui",
-		Short: "Open Terminal UI for goclaw",
-		Long:  `Open an interactive terminal UI for interacting with goclaw agent.`,
+		Short: "Open Terminal UI for sunclaw",
+		Long:  `Open an interactive terminal UI for interacting with sunclaw agent.`,
 		Run:   runTUI,
 	}
 
@@ -146,7 +146,7 @@ func runTUI(cmd *cobra.Command, args []string) {
 	if runtime.GOOS == "windows" {
 		fmt.Fprintf(os.Stderr, "Error: TUI mode is not supported on Windows.\n")
 		fmt.Fprintf(os.Stderr, "Please use the regular command-line mode instead:\n")
-		fmt.Fprintf(os.Stderr, "  goclaw 'your prompt here'\n")
+		fmt.Fprintf(os.Stderr, "  sunclaw 'your prompt here'\n")
 		os.Exit(1)
 	}
 
@@ -178,13 +178,13 @@ func runTUI(cmd *cobra.Command, args []string) {
 	logDir := cfg.Log.Dir
 	if logDir == "" {
 		if home, err2 := os.UserHomeDir(); err2 == nil {
-			logDir = filepath.Join(home, ".goclaw", "logs")
+			logDir = filepath.Join(home, ".sunclaw", "logs")
 		}
 	}
 	var tuiFileCfg *logger.LogFileConfig
 	if logDir != "" {
 		tuiFileCfg = &logger.LogFileConfig{
-			Path:       filepath.Join(logDir, "goclaw.log"),
+			Path:       filepath.Join(logDir, "sunclaw.log"),
 			MaxSizeMB:  cfg.Log.MaxSizeMB,
 			MaxBackups: cfg.Log.MaxBackups,
 			MaxAgeDays: cfg.Log.MaxAgeDays,

@@ -9,10 +9,10 @@ GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=gofmt
 GOVET=$(GOCMD) vet
-BINARY_NAME=goclaw
+BINARY_NAME=sunclaw
 BUILD_DIR=.
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-DOCKER_IMAGE=goclaw
+DOCKER_IMAGE=sunclaw
 DOCKER_TAG=$(VERSION)
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
@@ -29,7 +29,7 @@ all: clean fmt lint test build
 
 ## help: Display this help message
 help:
-	@echo "$(COLOR_BOLD)GoClaw - Makefile Commands$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)SunClaw - Makefile Commands$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)Usage:$(COLOR_RESET)"
 	@echo "  make $(COLOR_GREEN)<target>$(COLOR_RESET)"
@@ -152,7 +152,7 @@ install:
 ## docs: Generate documentation
 docs:
 	@echo "$(COLOR_BLUE)Generating documentation...$(COLOR_RESET)"
-	@echo "Open http://localhost:6060/pkg/github.com/smallnest/goclaw/ in your browser"
+	@echo "Open http://localhost:6060/pkg/github.com/ixxmi/sunclaw/ in your browser"
 	godoc -http=:6060
 
 ## ci: Run continuous integration checks
@@ -177,8 +177,8 @@ version:
 ## info: Display project information
 info:
 	@echo "$(COLOR_BOLD)Project Information$(COLOR_RESET)"
-	@echo "  Name: GoClaw"
-	@echo "  Module: github.com/smallnest/goclaw/"
+	@echo "  Name: SunClaw"
+	@echo "  Module: github.com/ixxmi/sunclaw/"
 	@echo "  Go Version: $$($(GOCMD) version | cut -d' ' -f3)"
 	@echo "  Version: $(VERSION)"
 	@echo "  Packages: $$(find . -name '*.go' -not -path './vendor/*' | xargs dirname | sort -u | wc -l | tr -d ' ')"
@@ -187,7 +187,7 @@ info:
 ## setup: Setup development environment
 setup:
 	@echo "$(COLOR_BLUE)Setting up development environment...$(COLOR_RESET)"
-	@mkdir -p .goclaw/workspace .goclaw/sessions
+	@mkdir -p .sunclaw/workspace .sunclaw/sessions
 	@cp .env.example .env 2>/dev/null || echo "Please copy .env.example to .env and configure"
 	@echo "$(COLOR_GREEN)Setup complete. Edit .env with your configuration.$(COLOR_RESET)"
 
@@ -204,7 +204,7 @@ docker-run:
 	@echo "$(COLOR_BLUE)Running Docker container...$(COLOR_RESET)"
 	docker run --rm -it \
 		-p 8080:8080 \
-		-v $(PWD)/config.json:/home/goclaw/.goclaw/config.json:ro \
+		-v $(PWD)/config.json:/home/sunclaw/.sunclaw/config.json:ro \
 		$(DOCKER_IMAGE):latest
 
 ## docker-compose-up: Start services with docker-compose
@@ -230,7 +230,7 @@ docker-compose-ps:
 ## docker-shell: Open shell in container
 docker-shell:
 	@echo "$(COLOR_BLUE)Opening shell in container...$(COLOR_RESET)"
-	docker-compose exec goclaw sh
+	docker-compose exec sunclaw sh
 
 ## dev: Start development environment
 dev: docker-compose-up docker-compose-logs

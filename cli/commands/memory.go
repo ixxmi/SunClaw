@@ -17,7 +17,7 @@ import (
 // MemoryCmd 记忆管理命令
 var MemoryCmd = &cobra.Command{
 	Use:   "memory",
-	Short: "Manage goclaw memory",
+	Short: "Manage sunclaw memory",
 	Long:  `View status, index, and search memory stores. Supports builtin and QMD backends.`,
 }
 
@@ -84,14 +84,14 @@ func getWorkspace() (string, error) {
 	cfg, err := config.Load("")
 	if err != nil {
 		// 使用默认工作区
-		return filepath.Join(home, ".goclaw", "workspace"), nil
+		return filepath.Join(home, ".sunclaw", "workspace"), nil
 	}
 
 	if cfg.Workspace.Path != "" {
 		return cfg.Workspace.Path, nil
 	}
 
-	return filepath.Join(home, ".goclaw", "workspace"), nil
+	return filepath.Join(home, ".sunclaw", "workspace"), nil
 }
 
 // getSearchManager 获取搜索管理器

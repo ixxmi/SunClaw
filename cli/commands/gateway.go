@@ -46,7 +46,7 @@ func GatewayCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gateway",
 		Short: "Manage WebSocket Gateway",
-		Long:  `Run and manage the goclaw WebSocket gateway server.`,
+		Long:  `Run and manage the sunclaw WebSocket gateway server.`,
 	}
 
 	// Main gateway run command
@@ -141,7 +141,7 @@ func GatewayCommand() *cobra.Command {
 
 // runGateway runs the gateway server
 func runGateway(cmd *cobra.Command, args []string) {
-	fmt.Println("🚀 Starting goclaw Gateway")
+	fmt.Println("🚀 Starting sunclaw Gateway")
 
 	// Load configuration first so we can use log settings
 	cfg, err := config.Load("")
@@ -161,13 +161,13 @@ func runGateway(cmd *cobra.Command, args []string) {
 	logDir := cfg.Log.Dir
 	if logDir == "" {
 		if home, err2 := os.UserHomeDir(); err2 == nil {
-			logDir = filepath.Join(home, ".goclaw", "logs")
+			logDir = filepath.Join(home, ".sunclaw", "logs")
 		}
 	}
 	var gwFileCfg *logger.LogFileConfig
 	if logDir != "" {
 		gwFileCfg = &logger.LogFileConfig{
-			Path:       filepath.Join(logDir, "goclaw.log"),
+			Path:       filepath.Join(logDir, "sunclaw.log"),
 			MaxSizeMB:  cfg.Log.MaxSizeMB,
 			MaxBackups: cfg.Log.MaxBackups,
 			MaxAgeDays: cfg.Log.MaxAgeDays,
@@ -196,7 +196,7 @@ func runGateway(cmd *cobra.Command, args []string) {
 	if err != nil {
 		logger.Fatal("Failed to get home directory", zap.Error(err))
 	}
-	sessionDir := homeDir + "/.goclaw/sessions"
+	sessionDir := homeDir + "/.sunclaw/sessions"
 	sessionMgr, err := session.NewManager(sessionDir)
 	if err != nil {
 		logger.Fatal("Failed to create session manager", zap.Error(err))
@@ -431,7 +431,7 @@ func runGatewayProbe(cmd *cobra.Command, args []string) {
 
 // runGatewayInstall installs gateway as service
 func runGatewayInstall(cmd *cobra.Command, args []string) {
-	fmt.Println("Installing goclaw Gateway service...")
+	fmt.Println("Installing sunclaw Gateway service...")
 
 	// Get the executable path
 	execPath, err := os.Executable()
@@ -458,14 +458,14 @@ func runGatewayInstall(cmd *cobra.Command, args []string) {
 		installWindowsService(execPath)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unsupported operating system: %s\n", runtime.GOOS)
-		fmt.Println("Please run gateway manually with: goclaw gateway run")
+		fmt.Println("Please run gateway manually with: sunclaw gateway run")
 		os.Exit(1)
 	}
 }
 
 // runGatewayUninstall uninstalls gateway service
 func runGatewayUninstall(cmd *cobra.Command, args []string) {
-	fmt.Println("Uninstalling goclaw Gateway service...")
+	fmt.Println("Uninstalling sunclaw Gateway service...")
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -482,7 +482,7 @@ func runGatewayUninstall(cmd *cobra.Command, args []string) {
 
 // runGatewayStart starts gateway service
 func runGatewayStart(cmd *cobra.Command, args []string) {
-	fmt.Println("Starting goclaw Gateway service...")
+	fmt.Println("Starting sunclaw Gateway service...")
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -499,7 +499,7 @@ func runGatewayStart(cmd *cobra.Command, args []string) {
 
 // runGatewayStop stops gateway service
 func runGatewayStop(cmd *cobra.Command, args []string) {
-	fmt.Println("Stopping goclaw Gateway service...")
+	fmt.Println("Stopping sunclaw Gateway service...")
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -516,7 +516,7 @@ func runGatewayStop(cmd *cobra.Command, args []string) {
 
 // runGatewayRestart restarts gateway service
 func runGatewayRestart(cmd *cobra.Command, args []string) {
-	fmt.Println("Restarting goclaw Gateway service...")
+	fmt.Println("Restarting sunclaw Gateway service...")
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -533,13 +533,13 @@ func runGatewayRestart(cmd *cobra.Command, args []string) {
 
 // Service name constants
 const (
-	serviceName        = "goclaw-gateway"
-	macOSDomainStyle   = "com.goclaw.gateway"
+	serviceName        = "sunclaw-gateway"
+	macOSDomainStyle   = "com.sunclaw.gateway"
 	macOSPlistDir      = "Library/LaunchAgents"
-	macOSPlistFile     = "com.goclaw.gateway.plist"
+	macOSPlistFile     = "com.sunclaw.gateway.plist"
 	linuxServiceDir    = ".config/systemd/user"
-	linuxServiceFile   = "goclaw-gateway.service"
-	windowsServiceName = "GoClawGateway"
+	linuxServiceFile   = "sunclaw-gateway.service"
+	windowsServiceName = "SunClawGateway"
 )
 
 // macOS service functions
@@ -563,7 +563,7 @@ func installMacOSService(execPath string) {
 	// Check if service already exists
 	if _, err := os.Stat(plistPath); err == nil {
 		fmt.Printf("Service already installed at %s\n", plistPath)
-		fmt.Println("Use 'goclaw gateway uninstall' first to remove it")
+		fmt.Println("Use 'sunclaw gateway uninstall' first to remove it")
 		os.Exit(1)
 	}
 
@@ -592,9 +592,9 @@ func installMacOSService(execPath string) {
     <key>WorkingDirectory</key>
     <string>{{.WorkDir}}</string>
     <key>StandardOutPath</key>
-    <string>{{.HomeDir}}/.goclaw/logs/gateway.stdout.log</string>
+    <string>{{.HomeDir}}/.sunclaw/logs/gateway.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>{{.HomeDir}}/.goclaw/logs/gateway.stderr.log</string>
+    <string>{{.HomeDir}}/.sunclaw/logs/gateway.stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -614,7 +614,7 @@ func installMacOSService(execPath string) {
 	}
 
 	// Ensure log directory exists
-	logDir := filepath.Join(homeDir, ".goclaw/logs")
+	logDir := filepath.Join(homeDir, ".sunclaw/logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Cannot create log directory %s: %v\n", logDir, err)
 		os.Exit(1)
@@ -661,7 +661,7 @@ func installMacOSService(execPath string) {
 	fmt.Printf("  Port: %d\n", gatewayPort)
 	fmt.Printf("  Logs: %s/gateway.stdout.log\n", logDir)
 	fmt.Printf("  Logs: %s/gateway.stderr.log\n", logDir)
-	fmt.Println("\nUse 'goclaw gateway start' to start the service")
+	fmt.Println("\nUse 'sunclaw gateway start' to start the service")
 }
 
 func uninstallMacOSService() {
@@ -704,7 +704,7 @@ func startMacOSService() {
 
 	// Check if service exists
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		fmt.Println("Service not installed. Use 'goclaw gateway install' first")
+		fmt.Println("Service not installed. Use 'sunclaw gateway install' first")
 		os.Exit(1)
 	}
 
@@ -726,7 +726,7 @@ func startMacOSService() {
 		fmt.Println("Gateway service started successfully")
 	} else {
 		fmt.Println("Service started, but gateway may not be responding yet")
-		fmt.Println("Check logs: ~/.goclaw/logs/gateway.stdout.log")
+		fmt.Println("Check logs: ~/.sunclaw/logs/gateway.stdout.log")
 	}
 }
 
@@ -788,7 +788,7 @@ func installLinuxService(execPath string) {
 	// Check if service already exists
 	if _, err := os.Stat(servicePath); err == nil {
 		fmt.Printf("Service already installed at %s\n", servicePath)
-		fmt.Println("Use 'goclaw gateway uninstall' first to remove it")
+		fmt.Println("Use 'sunclaw gateway uninstall' first to remove it")
 		os.Exit(1)
 	}
 
@@ -797,7 +797,7 @@ func installLinuxService(execPath string) {
 
 	// Create systemd service content
 	serviceContent := `[Unit]
-Description=goclaw Gateway Service
+Description=sunclaw Gateway Service
 After=network.target
 
 [Service]
@@ -806,8 +806,8 @@ ExecStart={{.ExecPath}} gateway run --port {{.Port}}
 WorkingDirectory={{.WorkDir}}
 Restart=always
 RestartSec=10
-StandardOutput=append:{{.HomeDir}}/.goclaw/logs/gateway.stdout.log
-StandardError=append:{{.HomeDir}}/.goclaw/logs/gateway.stderr.log
+StandardOutput=append:{{.HomeDir}}/.sunclaw/logs/gateway.stdout.log
+StandardError=append:{{.HomeDir}}/.sunclaw/logs/gateway.stderr.log
 
 [Install]
 WantedBy=default.target
@@ -821,7 +821,7 @@ WantedBy=default.target
 	}
 
 	// Ensure log directory exists
-	logDir := filepath.Join(homeDir, ".goclaw/logs")
+	logDir := filepath.Join(homeDir, ".sunclaw/logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Cannot create log directory %s: %v\n", logDir, err)
 		os.Exit(1)

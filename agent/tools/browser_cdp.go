@@ -51,11 +51,9 @@ func (b *BrowserCDPTool) BrowserPrintToPDF(ctx context.Context, params map[strin
 		zap.Bool("print_background", printBackground),
 	)
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		if err := sessionMgr.Start(b.timeout); err != nil {
-			return "", fmt.Errorf("failed to start browser session: %w", err)
-		}
+	sessionMgr, err := b.ensureSession(params, true, true, false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -114,7 +112,12 @@ func (b *BrowserCDPTool) BrowserPrintToPDF(ctx context.Context, params map[strin
 		return "", fmt.Errorf("failed to save PDF: %w", err)
 	}
 
-	return fmt.Sprintf("PDF saved to: %s\nSize: %d bytes", filepath, len(pdfResult.Data)), nil
+	return fmt.Sprintf(
+		"PDF saved to: %s\nWindow mode: %s\nSize: %d bytes",
+		filepath,
+		b.sessionModeLabel(sessionMgr),
+		len(pdfResult.Data),
+	), nil
 }
 
 // BrowserExtractStructuredData Extract structured data from page using schema.org, JSON-LD, or custom selectors
@@ -134,11 +137,9 @@ func (b *BrowserCDPTool) BrowserExtractStructuredData(ctx context.Context, param
 		zap.String("type", extractType),
 	)
 
-	sessionMgr := GetBrowserSession()
-	if !sessionMgr.IsReady() {
-		if err := sessionMgr.Start(b.timeout); err != nil {
-			return "", fmt.Errorf("failed to start browser session: %w", err)
-		}
+	sessionMgr, err := b.ensureSession(params, true, true, false, true)
+	if err != nil {
+		return "", err
 	}
 
 	client, err := sessionMgr.GetClient()
@@ -566,6 +567,7 @@ func (b *BrowserCDPTool) GetCDPTools() []Tool {
 						"type":        "number",
 						"description": "Right margin in inches (default: 0.4)",
 					},
+					"window_mode": browserWindowModeProperty("if no session exists, defaults to headless for background export"),
 				},
 			},
 			b.BrowserPrintToPDF,
@@ -585,6 +587,7 @@ func (b *BrowserCDPTool) GetCDPTools() []Tool {
 						"description": "Type of data to extract: all, schema_org, json_ld, meta (default: all)",
 						"enum":        []string{"all", "schema_org", "json_ld", "meta"},
 					},
+					"window_mode": browserWindowModeProperty("if no session exists, defaults to headless for background extraction"),
 				},
 				"required": []string{"url"},
 			},

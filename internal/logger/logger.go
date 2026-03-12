@@ -27,6 +27,8 @@ var (
 type LogFileConfig struct {
 	// Path 日志文件完整路径
 	Path string
+	// SplitByDay 是否按天拆分日志（如 goclaw-2026-03-11.log）
+	SplitByDay bool
 	// MaxSizeMB 单个文件最大 MB，超出轮转（默认 100）
 	MaxSizeMB int
 	// MaxBackups 保留旧文件数（默认 7）
@@ -42,6 +44,8 @@ type rotatingWriter struct {
 	mu          sync.Mutex
 	cfg         *LogFileConfig
 	file        *os.File
+	currentPath string
+	currentDay  string
 	currentSize int64
 	maxSize     int64 // bytes
 }
@@ -63,11 +67,29 @@ func newRotatingWriter(cfg *LogFileConfig) (*rotatingWriter, error) {
 	return w, nil
 }
 
+func (w *rotatingWriter) resolvePath(t time.Time) string {
+	if !w.cfg.SplitByDay {
+		return w.cfg.Path
+	}
+
+	dir := filepath.Dir(w.cfg.Path)
+	base := filepath.Base(w.cfg.Path)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	day := t.Format("2006-01-02")
+
+	if ext == "" {
+		return filepath.Join(dir, fmt.Sprintf("%s-%s", stem, day))
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", stem, day, ext))
+}
+
 func (w *rotatingWriter) openFile() error {
-	if err := os.MkdirAll(filepath.Dir(w.cfg.Path), 0755); err != nil {
+	path := w.resolvePath(time.Now())
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create log dir: %w", err)
 	}
-	f, err := os.OpenFile(w.cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -77,6 +99,8 @@ func (w *rotatingWriter) openFile() error {
 		return err
 	}
 	w.file = f
+	w.currentPath = path
+	w.currentDay = time.Now().Format("2006-01-02")
 	w.currentSize = info.Size()
 	return nil
 }
@@ -85,7 +109,17 @@ func (w *rotatingWriter) Write(p []byte) (n int, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// 检查是否需要轮转
+	// 按天切分：日期变化时切换到新文件（不重命名旧文件）
+	if w.cfg.SplitByDay {
+		today := time.Now().Format("2006-01-02")
+		if w.currentDay != "" && w.currentDay != today {
+			if err := w.switchDay(); err != nil {
+				_ = err // 切换失败继续写当前文件，避免丢日志
+			}
+		}
+	}
+
+	// 检查是否需要按大小轮转
 	if w.currentSize+int64(len(p)) > w.maxSize {
 		if err := w.rotate(); err != nil {
 			// 轮转失败继续写入当前文件，不丢日志
@@ -107,8 +141,27 @@ func (w *rotatingWriter) Sync() error {
 	return nil
 }
 
+// switchDay closes current file and opens today's file when SplitByDay is enabled.
+func (w *rotatingWriter) switchDay() error {
+	if w.file != nil {
+		_ = w.file.Sync()
+		_ = w.file.Close()
+		w.file = nil
+	}
+	if err := w.openFile(); err != nil {
+		return err
+	}
+	go w.cleanup()
+	return nil
+}
+
 // rotate 将当前日志文件重命名为带时间戳的备份，然后新建日志文件
 func (w *rotatingWriter) rotate() error {
+	currentPath := w.currentPath
+	if currentPath == "" {
+		currentPath = w.resolvePath(time.Now())
+	}
+
 	if w.file != nil {
 		_ = w.file.Sync()
 		_ = w.file.Close()
@@ -116,8 +169,8 @@ func (w *rotatingWriter) rotate() error {
 	}
 
 	timestamp := time.Now().Format("2006-01-02T15-04-05")
-	backupPath := fmt.Sprintf("%s.%s", w.cfg.Path, timestamp)
-	_ = os.Rename(w.cfg.Path, backupPath)
+	backupPath := fmt.Sprintf("%s.%s", currentPath, timestamp)
+	_ = os.Rename(currentPath, backupPath)
 
 	if w.cfg.Compress {
 		go compressFile(backupPath)
@@ -155,7 +208,9 @@ func compressFile(path string) {
 	_ = os.Remove(path) // 压缩成功后删除原备份
 }
 
-// cleanup 删除超出 MaxBackups 数量或超过 MaxAgeDays 的旧日志
+// cleanup 删除旧日志：
+// - SplitByDay=false: 按 MaxBackups + MaxAgeDays 清理轮转备份（兼容旧行为）
+// - SplitByDay=true: 主要按 MaxAgeDays 清理按天文件及其轮转备份
 func (w *rotatingWriter) cleanup() {
 	dir := filepath.Dir(w.cfg.Path)
 	base := filepath.Base(w.cfg.Path)
@@ -165,31 +220,63 @@ func (w *rotatingWriter) cleanup() {
 		return
 	}
 
-	// 收集所有备份文件（原始 + 压缩）
 	type backupFile struct {
 		name    string
 		path    string
 		modTime time.Time
 	}
 	var backups []backupFile
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+
+	if w.cfg.SplitByDay {
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		prefix := stem + "-"
+
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			// 匹配按天日志及其轮转备份，例如：
+			// goclaw-2026-03-11.log
+			// goclaw-2026-03-11.log.2026-03-11T23-59-59
+			// goclaw-2026-03-11.log.2026-03-11T23-59-59.gz
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			if ext != "" && !strings.Contains(name, ext) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			backups = append(backups, backupFile{
+				name:    name,
+				path:    filepath.Join(dir, name),
+				modTime: info.ModTime(),
+			})
 		}
-		name := e.Name()
-		// 匹配 goclaw.log.2006-... 或 goclaw.log.2006-....gz
-		if !strings.HasPrefix(name, base+".") || name == base {
-			continue
+	} else {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			// 匹配 goclaw.log.2006-... 或 goclaw.log.2006-....gz
+			if !strings.HasPrefix(name, base+".") || name == base {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			backups = append(backups, backupFile{
+				name:    name,
+				path:    filepath.Join(dir, name),
+				modTime: info.ModTime(),
+			})
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		backups = append(backups, backupFile{
-			name:    name,
-			path:    filepath.Join(dir, name),
-			modTime: info.ModTime(),
-		})
 	}
 
 	// 按修改时间降序排（最新的在前）
@@ -208,7 +295,15 @@ func (w *rotatingWriter) cleanup() {
 	cutoff := time.Now().AddDate(0, 0, -maxAge)
 
 	for i, b := range backups {
-		// 超出数量限制 或 超出时间限制 → 删除
+		if w.cfg.SplitByDay {
+			// 按天拆分模式优先按天数保留
+			if b.modTime.Before(cutoff) {
+				_ = os.Remove(b.path)
+			}
+			continue
+		}
+
+		// 兼容旧行为：超出数量限制 或 超出时间限制 → 删除
 		if i >= maxBackups || b.modTime.Before(cutoff) {
 			_ = os.Remove(b.path)
 		}
@@ -318,6 +413,7 @@ func doInit(level string, development bool, fileCfg *LogFileConfig) error {
 	if fileCfg != nil && fileCfg.Path != "" {
 		newLog.WithOptions(zap.WithCaller(false)).Info("Log file initialized",
 			zap.String("path", fileCfg.Path),
+			zap.Bool("split_by_day", fileCfg.SplitByDay),
 			zap.Int("max_size_mb", fileCfg.MaxSizeMB),
 			zap.Int("max_backups", fileCfg.MaxBackups),
 			zap.Int("max_age_days", fileCfg.MaxAgeDays),

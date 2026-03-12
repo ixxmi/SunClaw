@@ -359,8 +359,8 @@ func runCronRuns(cmd *cobra.Command, args []string) {
 	}
 
 	if cronRunsID == "" {
-		fmt.Println("Usage: goclaw cron runs --id <job-id>")
-		fmt.Println("       goclaw cron runs --id <job-id> --limit 100")
+		fmt.Println("Usage: sunclaw cron runs --id <job-id>")
+		fmt.Println("       sunclaw cron runs --id <job-id> --limit 100")
 		return
 	}
 
@@ -424,7 +424,7 @@ func runCronRun(cmd *cobra.Command, args []string) {
 	fmt.Printf("Status: %s\n", res["status"])
 
 	// Suggest viewing run logs
-	fmt.Printf("\nView run logs: ./goclaw cron runs --id %s\n", id)
+	fmt.Printf("\nView run logs: ./sunclaw cron runs --id %s\n", id)
 }
 
 func printJob(job map[string]interface{}) {

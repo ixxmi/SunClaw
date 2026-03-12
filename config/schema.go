@@ -29,6 +29,8 @@ type LogConfig struct {
 	Level string `mapstructure:"level" json:"level"`
 	// Dir 日志目录，空则使用 ~/.goclaw/logs
 	Dir string `mapstructure:"dir" json:"dir"`
+	// SplitByDay 是否按天拆分日志文件（如 goclaw-2026-03-11.log）
+	SplitByDay bool `mapstructure:"split_by_day" json:"split_by_day"`
 	// MaxSizeMB 单个日志文件最大 MB，超出后轮转（默认 100）
 	MaxSizeMB int `mapstructure:"max_size_mb" json:"max_size_mb"`
 	// MaxBackups 保留的旧日志文件数量（默认 7）

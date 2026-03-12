@@ -33,9 +33,10 @@ go.work.sum
 
 dist/
 logs/
+workspace/
 
-goclaw
-!goclaw/
+sunclaw
+!sunclaw/
 
 config.json
 google_search_results.json

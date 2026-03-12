@@ -31,9 +31,9 @@ import (
 var Version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:   "goclaw",
+	Use:   "sunclaw",
 	Short: "Go-based AI Agent framework",
-	Long:  `goclaw is a Go language implementation of an AI Agent framework, inspired by nanobot.`,
+	Long:  `sunclaw is a Go language implementation of an AI Agent framework, inspired by nanobot.`,
 }
 
 var versionCmd = &cobra.Command{
@@ -44,7 +44,7 @@ var versionCmd = &cobra.Command{
 
 var startCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the goclaw agent",
+	Short: "Start the sunclaw agent",
 	Run:   runStart,
 }
 
@@ -61,7 +61,7 @@ var configShowCmd = &cobra.Command{
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install goclaw workspace templates",
+	Short: "Install sunclaw workspace templates",
 	Run:   runInstall,
 }
 
@@ -161,18 +161,19 @@ func runStart(cmd *cobra.Command, args []string) {
 		level = "info"
 	}
 
-	// 确定日志文件路径：config.log.dir / 默认 ~/.goclaw/logs
+	// 确定日志文件路径：config.log.dir / 默认 ~/.sunclaw/logs
 	logDir := cfg.Log.Dir
 	if logDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
-			logDir = filepath.Join(home, ".goclaw", "logs")
+			logDir = filepath.Join(home, ".sunclaw", "logs")
 		}
 	}
 
 	var fileCfg *logger.LogFileConfig
 	if logDir != "" {
 		fileCfg = &logger.LogFileConfig{
-			Path:       filepath.Join(logDir, "goclaw.log"),
+			Path:       filepath.Join(logDir, "sunclaw.log"),
+			SplitByDay: cfg.Log.SplitByDay,
 			MaxSizeMB:  cfg.Log.MaxSizeMB,
 			MaxBackups: cfg.Log.MaxBackups,
 			MaxAgeDays: cfg.Log.MaxAgeDays,
@@ -186,7 +187,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	logger.Info("Starting goclaw agent")
+	logger.Info("Starting sunclaw agent")
 
 	// 验证配置
 	if err := config.Validate(cfg); err != nil {
@@ -216,7 +217,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err != nil {
 		logger.Fatal("Failed to get home directory", zap.Error(err))
 	}
-	sessionDir := homeDir + "/.goclaw/sessions"
+	sessionDir := homeDir + "/.sunclaw/sessions"
 	sessionMgr, err := session.NewManager(sessionDir)
 	if err != nil {
 		logger.Fatal("Failed to create session manager", zap.Error(err))
@@ -235,13 +236,13 @@ func runStart(cmd *cobra.Command, args []string) {
 	// 加载顺序（后加载的同名技能会覆盖前面的）：
 	// 1. ./skills/ (当前目录，最高优先级)
 	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
+	// 3. ~/.sunclaw/skills/ (用户全局目录)
+	sunclawDir := homeDir + "/.sunclaw"
+	globalSkillsDir := sunclawDir + "/skills"
 	workspaceSkillsDir := workspaceDir + "/skills"
 	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）

@@ -97,7 +97,7 @@ func runAgent(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	workspace := homeDir + "/.goclaw/workspace"
+	workspace := homeDir + "/.sunclaw/workspace"
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create workspace: %v\n", err)
 		os.Exit(1)
@@ -108,7 +108,7 @@ func runAgent(cmd *cobra.Command, args []string) {
 	defer messageBus.Close()
 
 	// Create session manager
-	sessionDir := homeDir + "/.goclaw/sessions"
+	sessionDir := homeDir + "/.sunclaw/sessions"
 	sessionMgr, err := session.NewManager(sessionDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create session manager: %v\n", err)
@@ -186,19 +186,19 @@ func runAgent(cmd *cobra.Command, args []string) {
 	// 加载顺序（后加载的同名技能会覆盖前面的）：
 	// 1. ./skills/ (当前目录，最高优先级)
 	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
+	// 3. ~/.sunclaw/skills/ (用户全局目录)
 	var homeDirErr error
 	homeDir, homeDirErr = os.UserHomeDir()
 	if homeDirErr != nil && agentVerbose {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to get home directory: %v\n", homeDirErr)
 		homeDir = os.Getenv("HOME")
 	}
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
+	sunclawDir := homeDir + "/.sunclaw"
+	globalSkillsDir := sunclawDir + "/skills"
 	workspaceSkillsDir := workspace + "/skills"
 	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
+	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
 		globalSkillsDir,    // 最先加载（最低优先级）
 		workspaceSkillsDir, // 其次加载
 		currentSkillsDir,   // 最后加载（最高优先级）

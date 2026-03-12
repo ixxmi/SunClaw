@@ -17,8 +17,8 @@ import (
 // LogsCmd 日志查看命令
 var LogsCmd = &cobra.Command{
 	Use:   "logs",
-	Short: "View goclaw logs",
-	Long:  `View and follow goclaw application logs with color formatting and filtering.`,
+	Short: "View sunclaw logs",
+	Long:  `View and follow sunclaw application logs with color formatting and filtering.`,
 	Run:   runLogs,
 }
 
@@ -95,18 +95,17 @@ func detectLogPath() string {
 
 	// Common log file locations (platform-agnostic)
 	candidates := []string{
-		filepath.Join(home, ".goclaw", "logs", "goclaw.log"),
-		filepath.Join(home, ".goclaw", "goclaw.log"),
-		"goclaw.log",
-		"logs/goclaw.log",
+		filepath.Join(home, ".sunclaw", "logs", "sunclaw.log"),
+		filepath.Join(home, ".sunclaw", "sunclaw.log"),
+		"sunclaw.log",
+		"logs/sunclaw.log",
 	}
 
 	// On Unix-like systems, also check system log directory
 	// Note: /var/log doesn't exist on Windows
 	if home != "" {
-		// Check if running on Unix-like system by trying to access /var
 		if _, err := os.Stat("/var/log"); err == nil {
-			candidates = append(candidates, filepath.Join("/var", "log", "goclaw.log"))
+			candidates = append(candidates, filepath.Join("/var", "log", "sunclaw.log"))
 		}
 	}
 
@@ -116,8 +115,33 @@ func detectLogPath() string {
 		}
 	}
 
+	// Fallback: try daily-split files and choose the latest modified one
+	dailyPatterns := []string{
+		filepath.Join(home, ".sunclaw", "logs", "sunclaw-*.log"),
+		"logs/sunclaw-*.log",
+		"sunclaw-*.log",
+	}
+	var latestPath string
+	var latestMod time.Time
+	for _, pattern := range dailyPatterns {
+		matches, _ := filepath.Glob(pattern)
+		for _, m := range matches {
+			info, err := os.Stat(m)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if latestPath == "" || info.ModTime().After(latestMod) {
+				latestPath = m
+				latestMod = info.ModTime()
+			}
+		}
+	}
+	if latestPath != "" {
+		return latestPath
+	}
+
 	// Return default path even if it doesn't exist
-	return filepath.Join(home, ".goclaw", "logs", "goclaw.log")
+	return filepath.Join(home, ".sunclaw", "logs", "sunclaw.log")
 }
 
 // viewLogs 查看日志（不跟踪）

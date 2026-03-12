@@ -180,7 +180,7 @@ func getApprovalsConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(homeDir, ".goclaw", "approvals.yaml"), nil
+	return filepath.Join(homeDir, ".sunclaw", "approvals.yaml"), nil
 }
 
 // loadApprovalsConfig loads the approvals configuration

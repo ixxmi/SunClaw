@@ -62,6 +62,15 @@ func Load(configPath string) (*Config, error) {
 
 // setDefaults 设置默认配置值
 func setDefaults(v *viper.Viper) {
+	// 日志默认配置
+	v.SetDefault("log.level", "info")
+	v.SetDefault("log.dir", "")
+	v.SetDefault("log.split_by_day", false)
+	v.SetDefault("log.max_size_mb", 100)
+	v.SetDefault("log.max_backups", 7)
+	v.SetDefault("log.max_age_days", 30)
+	v.SetDefault("log.compress", true)
+
 	// Agent 默认配置
 	v.SetDefault("agents.defaults.model", "openrouter:anthropic/claude-opus-4-5")
 	v.SetDefault("agents.defaults.max_iterations", 15)
