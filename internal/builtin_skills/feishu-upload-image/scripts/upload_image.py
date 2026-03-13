@@ -99,9 +99,9 @@ class FeishuImageUploader:
 
 
 def load_config() -> tuple[str, str]:
-    """Load Feishu credentials from goclaw config file (~/.goclaw/config.json)"""
-    # Try to load from goclaw config file ~/.goclaw/config.json
-    config_path = Path.home() / ".goclaw" / "config.json"
+    """Load Feishu credentials from goclaw config file (~/.goclaw/config.yaml)"""
+    # Try to load from goclaw config file ~/.goclaw/config.yaml
+    config_path = Path.home() / ".goclaw" / "config.yaml"
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
@@ -119,7 +119,7 @@ def load_config() -> tuple[str, str]:
 
     if not app_id or not app_secret:
         print("Error: Feishu credentials not found.")
-        print("Configure in ~/.goclaw/config.json under channels.feishu:")
+        print("Configure in ~/.goclaw/config.yaml under channels.feishu:")
         print('  {')
         print('    "channels": {')
         print('      "feishu": {')

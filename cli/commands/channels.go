@@ -311,7 +311,7 @@ func outputChannelsText(activeChannels []ChannelInfo, allChannels []ChannelInfo)
 	}
 
 	fmt.Println("\nTip:")
-	fmt.Println("  1. Edit ~/.sunclaw/config.json to configure channels")
+	fmt.Println("  1. Edit ~/.sunclaw/config.yaml to configure channels")
 	fmt.Println("  2. Run 'sunclaw start' to start the agent with channels enabled")
 	fmt.Println("  3. Use 'sunclaw channels status [name]' to check specific channel status")
 }

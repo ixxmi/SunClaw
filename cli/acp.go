@@ -58,7 +58,7 @@ func runAcpDoctor(cmd *cobra.Command, cfg *config.Config) {
 	// Check if ACP is enabled
 	if !cfg.ACP.Enabled {
 		fmt.Println("ACP is disabled in configuration")
-		fmt.Println("Set acp.enabled = true in config.json to enable")
+		fmt.Println("Set acp.enabled = true in config.yaml to enable")
 		return
 	}
 	fmt.Println("ACP is enabled")

@@ -150,11 +150,6 @@ func runTUI(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// 确保内置技能被复制到用户目录
-	if err := internal.EnsureBuiltinSkills(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
-	}
-
 	// Load configuration
 	cfg, err := config.Load("")
 	if err != nil {
@@ -206,7 +201,15 @@ func runTUI(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	workspace := homeDir + "/.goclaw/workspace"
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
+	}
 
 	// Create message bus
 	messageBus := bus.NewMessageBus(100)
@@ -235,21 +238,8 @@ func runTUI(cmd *cobra.Command, args []string) {
 	}
 	defer provider.Close()
 
-	// Create skills loader
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.goclaw/skills/ (用户全局目录)
-	goclawDir := homeDir + "/.goclaw"
-	globalSkillsDir := goclawDir + "/skills"
-	workspaceSkillsDir := workspace + "/skills"
-	currentSkillsDir := "./skills"
-
-	skillsLoader := agent.NewSkillsLoader(goclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
+	// Create skills loader from workspace/skills only.
+	skillsLoader := agent.NewWorkspaceSkillsLoader(workspace)
 	if err := skillsLoader.Discover(); err != nil {
 		logger.Warn("Failed to discover skills", zap.Error(err))
 	} else {

@@ -100,6 +100,11 @@ func NewSkillsLoader(workspace string, skillsDirs []string) *SkillsLoader {
 	}
 }
 
+// NewWorkspaceSkillsLoader 创建仅从 workspace/skills 加载的技能加载器
+func NewWorkspaceSkillsLoader(workspace string) *SkillsLoader {
+	return NewSkillsLoader(workspace, []string{filepath.Join(workspace, "skills")})
+}
+
 // SetAutoInstall 设置是否启用自动安装
 func (l *SkillsLoader) SetAutoInstall(enabled bool) {
 	l.autoInstall = enabled

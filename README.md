@@ -72,7 +72,7 @@ go build -o goclaw .
 
 首次运行时，如果本地不存在配置文件，程序会自动生成：
 
-- `~/.goclaw/config.json`
+- `~/.goclaw/config.yaml`
 - `~/.goclaw/skills/`
 
 你也可以先运行交互式初始化：
@@ -142,7 +142,7 @@ go build -o goclaw .
 
 完整配置可参考：
 
-- `config.json`
+- `config.yaml`
 - `internal/config.example.json`
 
 ### 5. 启动服务
@@ -269,12 +269,12 @@ goclaw/
 
 默认在：
 
-- `~/.goclaw/config.json`
+- `~/.goclaw/config.yaml`
 
 可通过命令行参数覆盖：
 
 ```bash
-./goclaw start --config /path/to/config.json
+./goclaw start --config /path/to/config.yaml
 ```
 
 ### 4. 如何把 SunClaw 接到企业微信或飞书？

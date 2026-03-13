@@ -135,16 +135,36 @@ func init() {
 	skillsCmd.AddCommand(skillsInstallDepsCmd)
 }
 
-func runSkillsList(cmd *cobra.Command, args []string) {
-	// 确保内置技能被复制到用户目录
-	if err := internal.EnsureBuiltinSkills(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
+func discoverWorkspaceSkills(workspace string, autoInstall bool) (*agent.SkillsLoader, error) {
+	loader := agent.NewWorkspaceSkillsLoader(workspace)
+	if autoInstall {
+		loader.SetAutoInstall(true)
 	}
+	if err := loader.Discover(); err != nil {
+		return nil, err
+	}
+	return loader, nil
+}
 
+func getSkillsConfigPath(workspace string) string {
+	return filepath.Join(workspace, "skills", "skills.yaml")
+}
+
+func runSkillsList(cmd *cobra.Command, args []string) {
 	// 加载配置
-	_, err := config.Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
 
 	// 初始化日志
@@ -154,27 +174,8 @@ func runSkillsList(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 创建技能加载器
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.sunclaw/skills/ (用户全局目录)
-	homeDir, err := os.UserHomeDir()
+	skillsLoader, err := discoverWorkspaceSkills(workspace, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
-		os.Exit(1)
-	}
-	sunclawDir := homeDir + "/.sunclaw"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := sunclawDir + "/workspace/skills"
-	currentSkillsDir := "./skills"
-
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
-	if err := skillsLoader.Discover(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to discover skills: %v\n", err)
 		os.Exit(1)
 	}
@@ -230,9 +231,15 @@ func runSkillsValidate(cmd *cobra.Command, args []string) {
 	skillName := args[0]
 
 	// 加载配置
-	_, err := config.Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
+		os.Exit(1)
 	}
 
 	// 初始化日志
@@ -242,27 +249,12 @@ func runSkillsValidate(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 创建技能加载器
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.sunclaw/skills/ (用户全局目录)
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
-		os.Exit(1)
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
-	sunclawDir := homeDir + "/.sunclaw"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := sunclawDir + "/workspace/skills"
-	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
-	if err := skillsLoader.Discover(); err != nil {
+	skillsLoader, err := discoverWorkspaceSkills(workspace, false)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to discover skills: %v\n", err)
 		os.Exit(1)
 	}
@@ -384,27 +376,18 @@ func runSkillsTest(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 创建技能加载器
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.sunclaw/skills/ (用户全局目录)
-	homeDir, err := os.UserHomeDir()
+	workspace, err := config.GetWorkspacePath(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	sunclawDir := homeDir + "/.sunclaw"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := sunclawDir + "/workspace/skills"
-	currentSkillsDir := "./skills"
 
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
-	if err := skillsLoader.Discover(); err != nil {
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
+	}
+
+	skillsLoader, err := discoverWorkspaceSkills(workspace, false)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to discover skills: %v\n", err)
 		os.Exit(1)
 	}
@@ -459,7 +442,7 @@ func runSkillsInstall(cmd *cobra.Command, args []string) {
 	source := args[0]
 
 	// 加载配置
-	_, err := config.Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
 	}
@@ -471,13 +454,14 @@ func runSkillsInstall(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 目标目录
-	homeDir, err := os.UserHomeDir()
+	workspace, err := config.GetWorkspacePath(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.sunclaw/skills"
+
+	// 目标目录
+	userSkillsDir := filepath.Join(workspace, "skills")
 	if err := os.MkdirAll(userSkillsDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create skills directory: %v\n", err)
 		os.Exit(1)
@@ -605,12 +589,16 @@ func runSkillsUpdate(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	homeDir, err := os.UserHomeDir()
+	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.sunclaw/skills"
+	userSkillsDir := filepath.Join(workspace, "skills")
 	skillPath := filepath.Join(userSkillsDir, skillName)
 
 	// 检查是否是 Git 仓库
@@ -644,12 +632,16 @@ func runSkillsUninstall(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	homeDir, err := os.UserHomeDir()
+	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.sunclaw/skills"
+	userSkillsDir := filepath.Join(workspace, "skills")
 	skillPath := filepath.Join(userSkillsDir, skillName)
 
 	// 检查技能是否存在
@@ -690,12 +682,12 @@ func runSkillsConfigShow(cmd *cobra.Command, args []string) {
 	fmt.Println("===================")
 
 	// 检查是否有专门的 skills 配置文件
-	homeDir, err := os.UserHomeDir()
+	workspace, err := config.GetWorkspacePath(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	skillsConfigPath := homeDir + "/.sunclaw/skills.yaml"
+	skillsConfigPath := getSkillsConfigPath(workspace)
 	if _, err := os.Stat(skillsConfigPath); err == nil {
 		fmt.Printf("\nConfig file: %s\n", skillsConfigPath)
 		// TODO: 解析并显示 skills.yaml 内容
@@ -732,13 +724,16 @@ func runSkillsConfigSet(cmd *cobra.Command, args []string) {
 	configType := parts[0]
 	skillKey := parts[1]
 
-	homeDir, err := os.UserHomeDir()
+	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	userSkillsDir := homeDir + "/.sunclaw"
-	skillsConfigPath := filepath.Join(userSkillsDir, "skills.yaml")
+	skillsConfigPath := getSkillsConfigPath(workspace)
 
 	// TODO: 实现 skills.yaml 的读写
 	fmt.Printf("Setting configuration: %s = %s\n", key, value)
@@ -757,27 +752,22 @@ func runSkillsInstallDeps(cmd *cobra.Command, args []string) {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 创建工作区
-	homeDir, err := os.UserHomeDir()
+	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Failed to load config: %v\n", err)
+	}
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	sunclawDir := homeDir + "/.sunclaw"
-	workspace := sunclawDir + "/workspace"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := workspace + "/skills"
-	currentSkillsDir := "./skills"
 
-	// 创建技能加载器并启用自动安装
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
-	skillsLoader.SetAutoInstall(true)
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
+	}
 
-	if err := skillsLoader.Discover(); err != nil {
+	skillsLoader, err := discoverWorkspaceSkills(workspace, true)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to discover skills: %v\n", err)
 		os.Exit(1)
 	}

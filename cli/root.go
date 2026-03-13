@@ -129,11 +129,6 @@ func Execute() error {
 
 // runStart 启动 Agent
 func runStart(cmd *cobra.Command, args []string) {
-	// 确保内置技能被复制到用户目录
-	if err := internal.EnsureBuiltinSkills(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
-	}
-
 	// 确保配置文件存在
 	configCreated, err := internal.EnsureConfig()
 	if err != nil {
@@ -200,6 +195,11 @@ func runStart(cmd *cobra.Command, args []string) {
 		logger.Fatal("Failed to get workspace path", zap.Error(err))
 	}
 
+	// 确保内置技能被复制到工作空间目录
+	if err := internal.EnsureBuiltinSkills(workspaceDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
+	}
+
 	// 创建 workspace 管理器并确保文件存在
 	workspaceMgr := workspace.NewManager(workspaceDir)
 	if err := workspaceMgr.Ensure(); err != nil {
@@ -232,21 +232,8 @@ func runStart(cmd *cobra.Command, args []string) {
 	// 创建工具注册表
 	toolRegistry := agent.NewToolRegistry()
 
-	// 创建技能加载器
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.sunclaw/skills/ (用户全局目录)
-	sunclawDir := homeDir + "/.sunclaw"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := workspaceDir + "/skills"
-	currentSkillsDir := "./skills"
-
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
+	// 创建技能加载器，只从 workspace/skills 加载
+	skillsLoader := agent.NewWorkspaceSkillsLoader(workspaceDir)
 	if err := skillsLoader.Discover(); err != nil {
 		logger.Warn("Failed to discover skills", zap.Error(err))
 	} else {

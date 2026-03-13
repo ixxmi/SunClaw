@@ -204,7 +204,7 @@ docker-run:
 	@echo "$(COLOR_BLUE)Running Docker container...$(COLOR_RESET)"
 	docker run --rm -it \
 		-p 8080:8080 \
-		-v $(PWD)/config.json:/home/sunclaw/.sunclaw/config.json:ro \
+		-v $(PWD)/config.yaml:/home/sunclaw/.sunclaw/config.yaml:ro \
 		$(DOCKER_IMAGE):latest
 
 ## docker-compose-up: Start services with docker-compose

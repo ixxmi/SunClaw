@@ -1,13 +1,13 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 var globalConfig *Config
@@ -31,7 +31,7 @@ func Load(configPath string) (*Config, error) {
 		v.AddConfigPath(configDir)
 		v.AddConfigPath(".")
 		v.SetConfigName("config")
-		v.SetConfigType("json")
+		v.SetConfigType("yaml")
 	}
 
 	// 设置环境变量前缀
@@ -108,8 +108,8 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// 转换为 JSON（带缩进）
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	// 转换为 YAML
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -133,12 +133,12 @@ func GetDefaultConfigPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-	return filepath.Join(home, ".goclaw", "config.json"), nil
+	return filepath.Join(home, ".goclaw", "config.yaml"), nil
 }
 
 // GetWorkspacePath 获取 workspace 目录路径
 func GetWorkspacePath(cfg *Config) (string, error) {
-	if cfg.Workspace.Path != "" {
+	if cfg != nil && cfg.Workspace.Path != "" {
 		// 使用配置中的自定义路径
 		return cfg.Workspace.Path, nil
 	}
@@ -148,6 +148,24 @@ func GetWorkspacePath(cfg *Config) (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 	return filepath.Join(home, ".goclaw", "workspace"), nil
+}
+
+// GetSkillsPath 获取技能目录路径
+func GetSkillsPath(cfg *Config) (string, error) {
+	workspace, err := GetWorkspacePath(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(workspace, "skills"), nil
+}
+
+// GetMemoryPath 获取记忆目录路径
+func GetMemoryPath(cfg *Config) (string, error) {
+	workspace, err := GetWorkspacePath(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(workspace, "memory"), nil
 }
 
 // Validate 验证配置 (使用新的验证器)

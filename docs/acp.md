@@ -17,7 +17,7 @@ ACP is a standardized communication protocol between AI agents and development e
 
 ## Configuration
 
-Add ACP configuration to your `config.json`:
+Add ACP configuration to your `config.yaml`:
 
 ```json
 {

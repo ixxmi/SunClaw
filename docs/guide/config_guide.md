@@ -346,8 +346,8 @@ export GOCLAW_WS_AUTH_TOKEN="secure-token"
 ### Configuration File Locations
 
 goclaw searches for config in this order:
-1. `~/.goclaw/config.json` (highest priority)
-2. `./config.json` (current directory)
+1. `~/.goclaw/config.yaml` (highest priority)
+2. `./config.yaml` (current directory)
 3. Path specified with `--config` flag
 
 ### Validation

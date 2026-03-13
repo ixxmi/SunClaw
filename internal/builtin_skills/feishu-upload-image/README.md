@@ -4,7 +4,7 @@ Upload images to Feishu/Lark and get the `image_key` for use in messages.
 
 ## Configuration
 
-The script reads Feishu credentials from your goclaw config file: `~/.goclaw/config.json`
+The script reads Feishu credentials from your goclaw config file: `~/.goclaw/config.yaml`
 
 Configure under `channels.feishu`:
 

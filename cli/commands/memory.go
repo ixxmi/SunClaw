@@ -76,22 +76,12 @@ func init() {
 
 // getWorkspace 获取工作区路径
 func getWorkspace() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
 	cfg, err := config.Load("")
 	if err != nil {
-		// 使用默认工作区
-		return filepath.Join(home, ".sunclaw", "workspace"), nil
+		cfg = nil
 	}
 
-	if cfg.Workspace.Path != "" {
-		return cfg.Workspace.Path, nil
-	}
-
-	return filepath.Join(home, ".sunclaw", "workspace"), nil
+	return config.GetWorkspacePath(cfg)
 }
 
 // getSearchManager 获取搜索管理器
@@ -272,14 +262,20 @@ func runMemoryIndex(cmd *cobra.Command, args []string) {
 
 // runBuiltinIndex 执行 builtin 索引
 func runBuiltinIndex(workspace string, cfg *config.Config) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
-		os.Exit(1)
+	memoryDir := filepath.Join(workspace, "memory")
+	dbPath := cfg.Memory.Builtin.DatabasePath
+	if dbPath == "" {
+		dbPath = filepath.Join(memoryDir, "store.db")
 	}
 
-	memoryDir := filepath.Join(workspace, "memory")
-	dbPath := filepath.Join(home, ".goclaw", "memory", "store.db")
+	if err := os.MkdirAll(memoryDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create memory directory: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create memory database directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Load config for API key
 	apiKey := cfg.Providers.OpenAI.APIKey
@@ -289,7 +285,7 @@ func runBuiltinIndex(workspace string, cfg *config.Config) {
 
 	if apiKey == "" {
 		fmt.Fprintf(os.Stderr, "Error: No embedding provider API key found in config.\n")
-		fmt.Fprintf(os.Stderr, "Please configure OpenAI or OpenRouter API key in ~/.goclaw/config.json\n")
+		fmt.Fprintf(os.Stderr, "Please configure OpenAI or OpenRouter API key in ~/.goclaw/config.yaml\n")
 		os.Exit(1)
 	}
 

@@ -66,20 +66,26 @@ func runOnboard(cmd *cobra.Command, args []string) {
 		fmt.Println("  ✓ Config file already exists")
 	}
 
-	// Ensure built-in skills exist
-	if err := internal.EnsureBuiltinSkills(); err != nil {
-		fmt.Fprintf(os.Stderr, "  Warning: Failed to ensure built-in skills: %v\n", err)
-	} else {
-		fmt.Println("  ✓ Built-in skills ready")
-	}
-	fmt.Println()
-
 	// 2. Load existing config
 	cfg, err := config.Load("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+
+	workspacePath, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get workspace path: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Ensure built-in skills exist in workspace/skills
+	if err := internal.EnsureBuiltinSkills(workspacePath); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: Failed to ensure built-in skills: %v\n", err)
+	} else {
+		fmt.Println("  ✓ Built-in skills ready")
+	}
+	fmt.Println()
 
 	// 3. Interactive or non-interactive setup
 	if cmd.Flags().Changed("api-key") {

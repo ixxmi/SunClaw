@@ -40,14 +40,17 @@ type QMDSearchManager struct {
 
 // NewBuiltinSearchManager 创建 builtin 搜索管理器
 func NewBuiltinSearchManager(cfg config.MemoryConfig, workspace string) (MemorySearchManager, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get home directory: %w", err)
+	if workspace == "" {
+		var err error
+		workspace, err = config.GetWorkspacePath(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get workspace path: %w", err)
+		}
 	}
 
 	dbPath := cfg.Builtin.DatabasePath
 	if dbPath == "" {
-		dbPath = filepath.Join(home, ".goclaw", "memory", "store.db")
+		dbPath = filepath.Join(workspace, "memory", "store.db")
 	}
 
 	// 确保数据库目录存在

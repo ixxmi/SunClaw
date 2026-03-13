@@ -12,6 +12,7 @@ import (
 	"github.com/smallnest/goclaw/agent/tools"
 	"github.com/smallnest/goclaw/bus"
 	"github.com/smallnest/goclaw/config"
+	"github.com/smallnest/goclaw/internal"
 	"github.com/smallnest/goclaw/internal/logger"
 	"github.com/smallnest/goclaw/providers"
 	"github.com/smallnest/goclaw/session"
@@ -97,10 +98,18 @@ func runAgent(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
 		os.Exit(1)
 	}
-	workspace := homeDir + "/.sunclaw/workspace"
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
+		os.Exit(1)
+	}
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create workspace: %v\n", err)
 		os.Exit(1)
+	}
+
+	if err := internal.EnsureBuiltinSkills(workspace); err != nil && agentVerbose {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
 
 	// Create message bus
@@ -182,27 +191,8 @@ func runAgent(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to register use_skill: %v\n", err)
 	}
 
-	// Create skills loader
-	// 加载顺序（后加载的同名技能会覆盖前面的）：
-	// 1. ./skills/ (当前目录，最高优先级)
-	// 2. ${WORKSPACE}/skills/ (工作区目录)
-	// 3. ~/.sunclaw/skills/ (用户全局目录)
-	var homeDirErr error
-	homeDir, homeDirErr = os.UserHomeDir()
-	if homeDirErr != nil && agentVerbose {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to get home directory: %v\n", homeDirErr)
-		homeDir = os.Getenv("HOME")
-	}
-	sunclawDir := homeDir + "/.sunclaw"
-	globalSkillsDir := sunclawDir + "/skills"
-	workspaceSkillsDir := workspace + "/skills"
-	currentSkillsDir := "./skills"
-
-	skillsLoader := agent.NewSkillsLoader(sunclawDir, []string{
-		globalSkillsDir,    // 最先加载（最低优先级）
-		workspaceSkillsDir, // 其次加载
-		currentSkillsDir,   // 最后加载（最高优先级）
-	})
+	// Create skills loader from workspace/skills only.
+	skillsLoader := agent.NewWorkspaceSkillsLoader(workspace)
 	if skillsErr := skillsLoader.Discover(); skillsErr != nil && agentVerbose {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to discover skills: %v\n", skillsErr)
 	}
