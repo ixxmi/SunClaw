@@ -43,7 +43,7 @@ type FeishuChannel struct {
 	// bot open_id for mention checking
 	botOpenId string
 	// pairing store for DM access control
-	pairingStore    *pairing.PairingStore
+	pairingStore     *pairing.PairingStore
 	cronOutputChatID string // cron output target chat ID
 }
 
@@ -97,7 +97,7 @@ func NewFeishuChannel(cfg config.FeishuChannelConfig, bus *bus.MessageBus) (*Fei
 		httpClient:        client,
 		typingReactions:   make(map[string]string),
 		pairingStore:      pairingStore,
-		cronOutputChatID:   cfg.CronOutputChatID,
+		cronOutputChatID:  cfg.CronOutputChatID,
 	}, nil
 }
 
@@ -534,12 +534,22 @@ func (c *FeishuChannel) Send(msg *bus.OutboundMessage) error {
 	}
 
 	var err error
-	// 优先发送图片消息
+	// 统一媒体处理：image 走原生图片发送；file/video/audio 降级为文本链接
 	if len(msg.Media) > 0 {
 		for _, media := range msg.Media {
-			if media.Type == "image" {
+			media.Type = NormalizeMediaType(media.Type)
+			switch media.Type {
+			case UnifiedMediaImage:
 				if err = c.sendImageMessage(msg, media, receiveIDType); err != nil {
 					logger.Error("Failed to send image message", zap.Error(err))
+				}
+			case UnifiedMediaFile, UnifiedMediaVideo, UnifiedMediaAudio:
+				if strings.TrimSpace(media.URL) != "" {
+					if strings.TrimSpace(msg.Content) == "" {
+						msg.Content = "附件：\n" + media.URL
+					} else {
+						msg.Content = msg.Content + "\n\n附件：\n" + media.URL
+					}
 				}
 			}
 		}
@@ -827,7 +837,6 @@ func (c *FeishuChannel) sendCardMessage(msg *bus.OutboundMessage, receiveIDType 
 	return nil
 }
 
-
 // Stop 停止飞书通道
 func (c *FeishuChannel) Stop() error {
 	logger.Info("Stopping Feishu channel")
@@ -985,4 +994,3 @@ func jsonEscape(s string) string {
 func (c *FeishuChannel) GetCronOutputChatID() string {
 	return c.cronOutputChatID
 }
-

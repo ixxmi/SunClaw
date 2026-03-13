@@ -14,75 +14,93 @@ import (
 	"go.uber.org/zap"
 )
 
-// WhatsAppChannel WhatsApp 通道
-type WhatsAppChannel struct {
+// IMessageChannel iMessage 通道（通过 bridge 接入）
+type IMessageChannel struct {
 	*BaseChannelImpl
 	bridgeURL string
 	client    *http.Client
 }
 
-// WhatsAppConfig WhatsApp 配置
-type WhatsAppConfig struct {
+// IMessageConfig iMessage 配置
+type IMessageConfig struct {
 	BaseChannelConfig
 	BridgeURL string `mapstructure:"bridge_url" json:"bridge_url"`
 }
 
-// NewWhatsAppChannel 创建 WhatsApp 通道
-func NewWhatsAppChannel(cfg WhatsAppConfig, bus *bus.MessageBus) (*WhatsAppChannel, error) {
-	return &WhatsAppChannel{
-		BaseChannelImpl: NewBaseChannelImpl("whatsapp", "default", cfg.BaseChannelConfig, bus),
-		bridgeURL:       cfg.BridgeURL,
+// IMessageBridgeMessage bridge 返回的 iMessage 消息结构
+type IMessageBridgeMessage struct {
+	ID        string `json:"id"`
+	From      string `json:"from"`
+	ChatID    string `json:"chat_id"`
+	Text      string `json:"text"`
+	Type      string `json:"type"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// NewIMessageChannel 创建 iMessage 通道
+func NewIMessageChannel(accountID string, cfg IMessageConfig, bus *bus.MessageBus) (*IMessageChannel, error) {
+	return &IMessageChannel{
+		BaseChannelImpl: NewBaseChannelImpl("imessage", accountID, cfg.BaseChannelConfig, bus),
+		bridgeURL:       strings.TrimRight(cfg.BridgeURL, "/"),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}, nil
 }
 
-// Start 启动 WhatsApp 通道
-func (c *WhatsAppChannel) Start(ctx context.Context) error {
+// Start 启动 iMessage 通道
+func (c *IMessageChannel) Start(ctx context.Context) error {
 	if err := c.BaseChannelImpl.Start(ctx); err != nil {
 		return err
 	}
 
 	if c.bridgeURL == "" {
-		logger.Info("WhatsApp bridge URL not configured, channel disabled")
+		logger.Info("iMessage bridge URL not configured, channel disabled",
+			zap.String("account_id", c.AccountID()),
+		)
 		return nil
 	}
 
-	logger.Info("Starting WhatsApp channel",
+	logger.Info("Starting iMessage channel",
+		zap.String("account_id", c.AccountID()),
 		zap.String("bridge_url", c.bridgeURL),
 	)
 
-	// 启动消息轮询
 	go c.pollMessages(ctx)
-
 	return nil
 }
 
 // pollMessages 轮询消息
-func (c *WhatsAppChannel) pollMessages(ctx context.Context) {
+func (c *IMessageChannel) pollMessages(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("WhatsApp channel stopped by context")
+			logger.Info("iMessage channel stopped by context",
+				zap.String("account_id", c.AccountID()),
+			)
 			return
 		case <-c.WaitForStop():
-			logger.Info("WhatsApp channel stopped")
+			logger.Info("iMessage channel stopped",
+				zap.String("account_id", c.AccountID()),
+			)
 			return
 		case <-ticker.C:
 			if err := c.fetchMessages(ctx); err != nil {
-				logger.Error("Failed to fetch WhatsApp messages", zap.Error(err))
+				logger.Error("Failed to fetch iMessage messages",
+					zap.String("account_id", c.AccountID()),
+					zap.Error(err),
+				)
 			}
 		}
 	}
 }
 
 // fetchMessages 获取消息
-func (c *WhatsAppChannel) fetchMessages(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.bridgeURL+"/messages", nil)
+func (c *IMessageChannel) fetchMessages(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.bridgeURL+"/messages", nil)
 	if err != nil {
 		return err
 	}
@@ -102,16 +120,17 @@ func (c *WhatsAppChannel) fetchMessages(ctx context.Context) error {
 		return err
 	}
 
-	var messages []WhatsAppMessage
+	var messages []IMessageBridgeMessage
 	if err := json.Unmarshal(body, &messages); err != nil {
 		return err
 	}
 
 	for _, msg := range messages {
 		if err := c.handleMessage(ctx, &msg); err != nil {
-			logger.Error("Failed to handle WhatsApp message",
-				zap.Error(err),
+			logger.Error("Failed to handle iMessage message",
+				zap.String("account_id", c.AccountID()),
 				zap.String("message_id", msg.ID),
+				zap.Error(err),
 			)
 		}
 	}
@@ -120,19 +139,18 @@ func (c *WhatsAppChannel) fetchMessages(ctx context.Context) error {
 }
 
 // handleMessage 处理消息
-func (c *WhatsAppChannel) handleMessage(ctx context.Context, msg *WhatsAppMessage) error {
-	// 检查权限
+func (c *IMessageChannel) handleMessage(ctx context.Context, msg *IMessageBridgeMessage) error {
 	if !c.IsAllowed(msg.From) {
 		return nil
 	}
 
-	// 构建入站消息
 	inboundMsg := &bus.InboundMessage{
-		ID:       msg.ID,
-		Channel:  c.Name(),
-		SenderID: msg.From,
-		ChatID:   msg.ChatID,
-		Content:  msg.Text,
+		ID:        msg.ID,
+		Channel:   c.Name(),
+		AccountID: c.AccountID(),
+		SenderID:  msg.From,
+		ChatID:    msg.ChatID,
+		Content:   msg.Text,
 		Metadata: map[string]interface{}{
 			"message_type": msg.Type,
 			"timestamp":    msg.Timestamp,
@@ -144,9 +162,9 @@ func (c *WhatsAppChannel) handleMessage(ctx context.Context, msg *WhatsAppMessag
 }
 
 // Send 发送消息
-func (c *WhatsAppChannel) Send(msg *bus.OutboundMessage) error {
+func (c *IMessageChannel) Send(msg *bus.OutboundMessage) error {
 	if !c.IsRunning() {
-		return fmt.Errorf("whatsapp channel is not running")
+		return fmt.Errorf("imessage channel is not running")
 	}
 
 	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
@@ -156,7 +174,6 @@ func (c *WhatsAppChannel) Send(msg *bus.OutboundMessage) error {
 		UnifiedMediaAudio: true,
 	})
 
-	// 构建请求数据
 	data := map[string]interface{}{
 		"chat_id": msg.ChatID,
 		"text":    content,
@@ -167,14 +184,12 @@ func (c *WhatsAppChannel) Send(msg *bus.OutboundMessage) error {
 		return err
 	}
 
-	// 发送请求
-	req, err := http.NewRequest("POST", c.bridgeURL+"/send", strings.NewReader(string(jsonData)))
+	req, err := http.NewRequest(http.MethodPost, c.bridgeURL+"/send", strings.NewReader(string(jsonData)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// 实际发送请求
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
@@ -185,20 +200,11 @@ func (c *WhatsAppChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	logger.Info("WhatsApp message sent",
+	logger.Info("iMessage message sent",
+		zap.String("account_id", c.AccountID()),
 		zap.String("chat_id", msg.ChatID),
 		zap.Int("content_length", len(content)),
 	)
 
 	return nil
-}
-
-// WhatsAppMessage WhatsApp 消息
-type WhatsAppMessage struct {
-	ID        string `json:"id"`
-	From      string `json:"from"`
-	ChatID    string `json:"chat_id"`
-	Text      string `json:"text"`
-	Type      string `json:"type"`
-	Timestamp int64  `json:"timestamp"`
 }

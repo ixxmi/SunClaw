@@ -396,6 +396,59 @@ func (m *Manager) SetupFromConfig(cfg *config.Config) error {
 		}
 	}
 
+	// iMessage 通道
+	if cfg.Channels.IMessage.Enabled {
+		if len(cfg.Channels.IMessage.Accounts) > 0 {
+			// 多账号配置
+			for accountID, accountCfg := range cfg.Channels.IMessage.Accounts {
+				if accountCfg.Enabled && accountCfg.BridgeURL != "" {
+					imCfg := IMessageConfig{
+						BaseChannelConfig: BaseChannelConfig{
+							Enabled:    accountCfg.Enabled,
+							AccountID:  accountID,
+							Name:       accountCfg.Name,
+							AllowedIDs: accountCfg.AllowedIDs,
+						},
+						BridgeURL: accountCfg.BridgeURL,
+					}
+
+					channel, err := NewIMessageChannel(accountID, imCfg, m.bus)
+					if err != nil {
+						logger.Error("Failed to create iMessage channel",
+							zap.String("account_id", accountID),
+							zap.Error(err))
+					} else {
+						channelName := buildChannelName("imessage", accountID)
+						if err := m.RegisterWithName(channel, channelName); err != nil {
+							logger.Error("Failed to register iMessage channel",
+								zap.String("account_id", accountID),
+								zap.Error(err))
+						}
+					}
+				}
+			}
+		} else if cfg.Channels.IMessage.BridgeURL != "" {
+			// 单账号配置（向后兼容）
+			imCfg := IMessageConfig{
+				BaseChannelConfig: BaseChannelConfig{
+					Enabled:    cfg.Channels.IMessage.Enabled,
+					AccountID:  "default",
+					AllowedIDs: cfg.Channels.IMessage.AllowedIDs,
+				},
+				BridgeURL: cfg.Channels.IMessage.BridgeURL,
+			}
+
+			channel, err := NewIMessageChannel("default", imCfg, m.bus)
+			if err != nil {
+				logger.Error("Failed to create iMessage channel", zap.Error(err))
+			} else {
+				if err := m.Register(channel); err != nil {
+					logger.Error("Failed to register iMessage channel", zap.Error(err))
+				}
+			}
+		}
+	}
+
 	// 飞书通道
 	if cfg.Channels.Feishu.Enabled {
 		if len(cfg.Channels.Feishu.Accounts) > 0 {

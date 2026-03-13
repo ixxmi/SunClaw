@@ -167,6 +167,13 @@ func (c *TeamsChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("teams channel is not running")
 	}
 
+	msg.Content = AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 优先使用配置的 webhook URL
 	targetURL := c.webhookURL
 

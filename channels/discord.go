@@ -215,26 +215,34 @@ func (c *DiscordChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("discord session is not initialized")
 	}
 
+	content := msg.Content
+
 	// 创建消息发送
-	discordMsg := &discordgo.MessageSend{
-		Content: msg.Content,
+	discordMsg := &discordgo.MessageSend{}
+
+	// 统一媒体处理：图片走 embed，其余降级为文本链接
+	if len(msg.Media) > 0 {
+		content = AppendMediaURLsToContent(content, msg.Media, map[string]bool{
+			UnifiedMediaFile:  true,
+			UnifiedMediaVideo: true,
+			UnifiedMediaAudio: true,
+		})
+
+		for _, media := range msg.Media {
+			if NormalizeMediaType(media.Type) == UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
+				discordMsg.Embeds = append(discordMsg.Embeds, &discordgo.MessageEmbed{
+					Image: &discordgo.MessageEmbedImage{URL: media.URL},
+				})
+			}
+		}
 	}
+
+	discordMsg.Content = content
 
 	// 处理回复
 	if msg.ReplyTo != "" {
 		discordMsg.Reference = &discordgo.MessageReference{
 			MessageID: msg.ReplyTo,
-		}
-	}
-
-	// 处理媒体
-	if len(msg.Media) > 0 {
-		for _, media := range msg.Media {
-			if media.Type == "image" && media.URL != "" {
-				discordMsg.Files = append(discordMsg.Files, &discordgo.File{
-					Name: "image",
-				})
-			}
 		}
 	}
 
@@ -246,7 +254,7 @@ func (c *DiscordChannel) Send(msg *bus.OutboundMessage) error {
 
 	logger.Info("Discord message sent",
 		zap.String("channel_id", msg.ChatID),
-		zap.Int("content_length", len(msg.Content)),
+		zap.Int("content_length", len(content)),
 	)
 
 	return nil

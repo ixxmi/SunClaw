@@ -575,9 +575,16 @@ func (c *QQChannel) Send(msg *bus.OutboundMessage) error {
 	// 获取或递增 msg_seq
 	msgSeq := c.getNextMsgSeq(msg.ChatID)
 
+	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 构建消息
 	messageToSend := &dto.MessageToCreate{
-		Content:   msg.Content,
+		Content:   content,
 		Timestamp: time.Now().UnixMilli(),
 	}
 

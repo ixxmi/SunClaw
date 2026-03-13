@@ -118,6 +118,7 @@ type BindingMatch struct {
 type ChannelsConfig struct {
 	Telegram TelegramChannelConfig `mapstructure:"telegram" json:"telegram"`
 	WhatsApp WhatsAppChannelConfig `mapstructure:"whatsapp" json:"whatsapp"`
+	IMessage IMessageChannelConfig `mapstructure:"imessage" json:"imessage"`
 	Feishu   FeishuChannelConfig   `mapstructure:"feishu" json:"feishu"`
 	DingTalk DingTalkChannelConfig `mapstructure:"dingtalk" json:"dingtalk"`
 	QQ       QQChannelConfig       `mapstructure:"qq" json:"qq"`
@@ -166,6 +167,15 @@ type TelegramChannelConfig struct {
 
 // WhatsAppChannelConfig WhatsApp 通道配置
 type WhatsAppChannelConfig struct {
+	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
+	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
+	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	// 多账号配置（新格式）
+	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
+}
+
+// IMessageChannelConfig iMessage 通道配置
+type IMessageChannelConfig struct {
 	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
 	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
 	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`

@@ -381,6 +381,13 @@ func (c *WeWorkChannel) getAccessToken() (string, error) {
 // Send 发送消息
 // 优先级：AI Bot response_url > 普通应用消息 API（access_token）
 func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
+	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 检查是否有 AI Bot response_url 缓存（AI Bot 消息必须通过 response_url 回复）
 	c.mu.Lock()
 	var responseURL string
@@ -399,7 +406,7 @@ func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
 		logger.Debug("WeWork Send via AI Bot response_url",
 			zap.String("chat_id", msg.ChatID),
 			zap.String("response_url", truncateWeWorkLog(responseURL, 80)))
-		if err := c.sendAiBotReply(responseURL, msg.Content); err != nil {
+		if err := c.sendAiBotReply(responseURL, content); err != nil {
 			logger.Error("Failed to send AI Bot reply", zap.Error(err))
 			return err
 		}
@@ -420,7 +427,7 @@ func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
 		"msgtype": "text",
 		"agentid": c.agentID,
 		"text": map[string]string{
-			"content": msg.Content,
+			"content": content,
 		},
 	}
 
@@ -449,7 +456,7 @@ func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
 
 	logger.Info("WeWork message sent",
 		zap.String("chat_id", msg.ChatID),
-		zap.Int("content_length", len(msg.Content)),
+		zap.Int("content_length", len(content)),
 	)
 
 	return nil

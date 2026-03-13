@@ -173,6 +173,13 @@ func (c *GoogleChatChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("google chat channel is not running")
 	}
 
+	msg.Content = AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 优先使用 webhook URL 发送
 	if webhookURL, ok := msg.Metadata["webhookUrl"].(string); ok && webhookURL != "" {
 		return c.SendWithWebhook(webhookURL, msg)

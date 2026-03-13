@@ -117,10 +117,19 @@ func (c *DingTalkChannel) Send(msg *bus.OutboundMessage) error {
 
 	logger.Info("DingTalk message to send",
 		zap.String("chat_id", msg.ChatID),
-		zap.Int("content_length", len(msg.Content)))
+		zap.Int("content_length", len(msg.Content)),
+		zap.Int("media_count", len(msg.Media)))
+
+	// 统一媒体策略：钉钉当前通过文本+链接降级
+	text := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
 
 	// Use session webhook to send reply
-	return c.SendDirectReply(sessionWebhook, msg.Content)
+	return c.SendDirectReply(sessionWebhook, text)
 }
 
 // SendStream 发送流式消息 (DingTalk 不支持，收集后一次性发送)

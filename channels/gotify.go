@@ -158,9 +158,16 @@ func (c *GotifyChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("gotify channel is not running")
 	}
 
+	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 构建 Gotify 消息
 	gotifyMsg := map[string]interface{}{
-		"message":  msg.Content,
+		"message":  content,
 		"priority": c.priority,
 	}
 
@@ -204,7 +211,7 @@ func (c *GotifyChannel) Send(msg *bus.OutboundMessage) error {
 
 	logger.Debug("Gotify message sent successfully",
 		zap.String("account_id", c.AccountID()),
-		zap.Int("content_length", len(msg.Content)),
+		zap.Int("content_length", len(content)),
 	)
 
 	return nil

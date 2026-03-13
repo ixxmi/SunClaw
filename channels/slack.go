@@ -239,25 +239,33 @@ func (c *SlackChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("slack client is not initialized")
 	}
 
+	content := msg.Content
+
 	// 构建消息选项
-	options := []slack.MsgOption{
-		slack.MsgOptionText(msg.Content, false),
-	}
+	options := []slack.MsgOption{}
 
-	// 处理回复
-	if msg.ReplyTo != "" {
-		options = append(options, slack.MsgOptionTS(msg.ReplyTo))
-	}
-
-	// 处理媒体
+	// 统一媒体处理：优先图片附件，其余降级为文本链接
 	if len(msg.Media) > 0 {
+		content = AppendMediaURLsToContent(content, msg.Media, map[string]bool{
+			UnifiedMediaFile:  true,
+			UnifiedMediaVideo: true,
+			UnifiedMediaAudio: true,
+		})
+
 		for _, media := range msg.Media {
-			if media.Type == "image" && media.URL != "" {
+			if NormalizeMediaType(media.Type) == UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
 				options = append(options, slack.MsgOptionAttachments(slack.Attachment{
 					ImageURL: media.URL,
 				}))
 			}
 		}
+	}
+
+	options = append(options, slack.MsgOptionText(content, false))
+
+	// 处理回复
+	if msg.ReplyTo != "" {
+		options = append(options, slack.MsgOptionTS(msg.ReplyTo))
 	}
 
 	// 发送消息
@@ -268,7 +276,7 @@ func (c *SlackChannel) Send(msg *bus.OutboundMessage) error {
 
 	logger.Info("Slack message sent",
 		zap.String("channel_id", msg.ChatID),
-		zap.Int("content_length", len(msg.Content)),
+		zap.Int("content_length", len(content)),
 	)
 
 	return nil

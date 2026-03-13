@@ -182,9 +182,16 @@ func (c *InfoflowChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("invalid chat_id: %w", err)
 	}
 
+	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+		UnifiedMediaVideo: true,
+		UnifiedMediaAudio: true,
+	})
+
 	// 发送文本消息
 	// 如流支持 Markdown 格式，所以直接发送
-	err = c.sender.SendMsg2Group(groupID, infoflow.CreateText(msg.Content))
+	err = c.sender.SendMsg2Group(groupID, infoflow.CreateText(content))
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
@@ -192,7 +199,7 @@ func (c *InfoflowChannel) Send(msg *bus.OutboundMessage) error {
 	logger.Info("Message sent via Infoflow",
 		zap.String("account_id", c.AccountID()),
 		zap.String("chat_id", msg.ChatID),
-		zap.Int("content_length", len(msg.Content)))
+		zap.Int("content_length", len(content)))
 
 	return nil
 }

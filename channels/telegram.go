@@ -268,7 +268,23 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 		logger.Debug("Failed to send typing indicator", zap.Error(err))
 	}
 
-	// 创建消息
+	// 统一媒体发送：Telegram 支持 image/file
+	if media, ok := SelectFirstSupportedMedia(msg.Media, map[string]bool{
+		UnifiedMediaImage: true,
+		UnifiedMediaFile:  true,
+	}); ok {
+		if err := c.sendUnifiedMediaMessage(chatID, media, msg.Content, msg.ReplyTo); err == nil {
+			logger.Info("Telegram media message sent",
+				zap.Int64("chat_id", chatID),
+				zap.String("media_type", media.Type),
+			)
+			return nil
+		} else {
+			logger.Warn("Failed to send telegram media, fallback to text", zap.Error(err))
+		}
+	}
+
+	// 仅文本发送
 	tgMsg := telegrambot.NewMessage(chatID, msg.Content)
 
 	// 解析回复
@@ -281,7 +297,6 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 		}
 	}
 
-	// 发送消息
 	_, err = c.bot.Send(tgMsg)
 	if err != nil {
 		return fmt.Errorf("failed to send telegram message: %w", err)
@@ -293,6 +308,62 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 	)
 
 	return nil
+}
+
+func (c *TelegramChannel) sendUnifiedMediaMessage(chatID int64, media bus.Media, caption, replyTo string) error {
+	replyToID := 0
+	if replyTo != "" {
+		if parsed, err := strconv.Atoi(replyTo); err == nil {
+			replyToID = parsed
+		}
+	}
+
+	t := NormalizeMediaType(media.Type)
+	if t == UnifiedMediaImage {
+		var cfg telegrambot.PhotoConfig
+		if strings.TrimSpace(media.Base64) == "" && strings.TrimSpace(media.URL) != "" {
+			cfg = telegrambot.NewPhoto(chatID, telegrambot.FileURL(media.URL))
+		} else {
+			data, err := MaterializeMediaData(nil, media, 20<<20)
+			if err != nil {
+				return err
+			}
+			cfg = telegrambot.NewPhoto(chatID, telegrambot.FileBytes{
+				Name:  InferMediaFileName(media, "image.jpg"),
+				Bytes: data,
+			})
+		}
+		cfg.Caption = caption
+		if replyToID > 0 {
+			cfg.ReplyToMessageID = replyToID
+		}
+		_, err := c.bot.Send(cfg)
+		return err
+	}
+
+	if t == UnifiedMediaFile {
+		var cfg telegrambot.DocumentConfig
+		if strings.TrimSpace(media.Base64) == "" && strings.TrimSpace(media.URL) != "" {
+			cfg = telegrambot.NewDocument(chatID, telegrambot.FileURL(media.URL))
+		} else {
+			data, err := MaterializeMediaData(nil, media, 50<<20)
+			if err != nil {
+				return err
+			}
+			cfg = telegrambot.NewDocument(chatID, telegrambot.FileBytes{
+				Name:  InferMediaFileName(media, "attachment"),
+				Bytes: data,
+			})
+		}
+		cfg.Caption = caption
+		if replyToID > 0 {
+			cfg.ReplyToMessageID = replyToID
+		}
+		_, err := c.bot.Send(cfg)
+		return err
+	}
+
+	return fmt.Errorf("unsupported telegram media type: %s", media.Type)
 }
 
 // SendTypingIndicator 发送正在输入指示器
