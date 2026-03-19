@@ -157,3 +157,106 @@ func TestValidatorMissingProvider(t *testing.T) {
 		t.Error("expected error when no provider is configured")
 	}
 }
+
+func TestValidateWeWorkWebhookMode(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeWork(&ChannelsConfig{
+		WeWork: WeWorkChannelConfig{
+			Enabled: true,
+			Mode:    "webhook",
+			CorpID:  "corp-id",
+			AgentID: "agent-id",
+			Secret:  "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected webhook config to be valid, got %v", err)
+	}
+}
+
+func TestValidateWeWorkWebSocketMode(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeWork(&ChannelsConfig{
+		WeWork: WeWorkChannelConfig{
+			Enabled:   true,
+			Mode:      "websocket",
+			BotID:     "bot-id",
+			BotSecret: "bot-secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected websocket config to be valid, got %v", err)
+	}
+}
+
+func TestValidateWeWorkWebSocketModeMissingSecret(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeWork(&ChannelsConfig{
+		WeWork: WeWorkChannelConfig{
+			Enabled: true,
+			Mode:    "websocket",
+			BotID:   "bot-id",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected websocket config without bot_secret to be invalid")
+	}
+}
+
+func TestValidateWeWorkAccountWebhookModeUsesAppSecret(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeWork(&ChannelsConfig{
+		WeWork: WeWorkChannelConfig{
+			Accounts: map[string]ChannelAccountConfig{
+				"corp-a": {
+					Enabled:   true,
+					Mode:      "webhook",
+					CorpID:    "corp-id",
+					AgentID:   "agent-id",
+					AppSecret: "secret-value",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected multi-account webhook config to be valid, got %v", err)
+	}
+}
+
+func TestValidateWeWorkAccountWebhookModeMissingSecret(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeWork(&ChannelsConfig{
+		WeWork: WeWorkChannelConfig{
+			Accounts: map[string]ChannelAccountConfig{
+				"corp-a": {
+					Enabled: true,
+					Mode:    "webhook",
+					CorpID:  "corp-id",
+					AgentID: "agent-id",
+				},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected multi-account webhook config without secret to be invalid")
+	}
+}
+
+func TestValidateWhatsAppRejectsNonAbsoluteBridgeURL(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWhatsApp(&ChannelsConfig{
+		WhatsApp: WhatsAppChannelConfig{
+			Enabled:   true,
+			BridgeURL: "localhost:3000",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected whatsapp bridge_url without scheme to be invalid")
+	}
+}

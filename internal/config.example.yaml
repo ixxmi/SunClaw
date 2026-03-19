@@ -1,0 +1,177 @@
+acp:
+    agent_args: []
+    agent_env: []
+    agent_path: /abs/path/to/acp-agent
+    allowed_agents:
+        - main
+        - coding
+    backend: acp-go-sdk
+    default_agent: main
+    enabled: false
+    idle_timeout_ms: 300000
+    max_concurrent_sessions: 5
+agents:
+    defaults:
+        max_iterations: 15
+        max_tokens: 4096
+        model: YOUR_DEFAULT_MODEL_HERE
+        temperature: 0.7
+channels:
+    dingtalk:
+        allowed_ids: []
+        client_id: ""
+        enabled: false
+        secret: ""
+    feishu:
+        app_id: ""
+        app_secret: ""
+        domain: feishu
+        enabled: false
+        group_policy: open
+    gotify:
+        accounts:
+            app1:
+                allowed_ids: []
+                app_token: ""
+                enabled: false
+                name: Gotify App 1
+                priority: 5
+                server_url: https://gotify.example.com
+        allowed_ids: []
+        app_token: ""
+        enabled: false
+        priority: 5
+        server_url: https://gotify.example.com
+    infoflow:
+        accounts:
+            bot1:
+                aes_key: ""
+                allowed_ids: []
+                enabled: false
+                name: Infoflow Bot 1
+                token: ""
+                webhook_port: 18766
+                webhook_url: ""
+        aes_key: ""
+        allowed_ids: []
+        enabled: false
+        token: ""
+        webhook_port: 18766
+        webhook_url: ""
+    qq:
+        allowed_ids: []
+        app_id: ""
+        app_secret: ""
+        enabled: false
+    telegram:
+        allowed_ids: []
+        enabled: false
+        token: ""
+    wework:
+        agent_id: ""
+        corp_id: ""
+        enabled: false
+        encoding_aes_key: ""
+        secret: ""
+        token: ""
+    whatsapp:
+        allowed_ids: []
+        bridge_url: ""
+        enabled: false
+gateway:
+    host: localhost
+    port: 8080
+    read_timeout: 30
+    websocket:
+        auth_token: ""
+        enable_auth: false
+        host: localhost
+        path: /ws
+        ping_interval: 30s
+        pong_timeout: 60s
+        port: 28789
+        read_timeout: 60s
+        write_timeout: 10s
+    write_timeout: 30
+log:
+    compress: true
+    dir: ""
+    level: info
+    max_age_days: 30
+    max_backups: 7
+    max_size_mb: 100
+    split_by_day: false
+memory:
+    backend: builtin
+    builtin:
+        auto_index: true
+        database_path: ""
+        enabled: true
+    qmd:
+        command: qmd
+        enabled: false
+        include_default: true
+        limits:
+            max_results: 6
+            max_snippet_chars: 700
+            timeout_ms: 4000
+        paths:
+            - name: notes
+              path: ~/notes
+              pattern: '**/*.md'
+            - name: docs
+              path: ~/Documents
+              pattern: '**/*.md'
+        sessions:
+            enabled: false
+            export_dir: ~/.goclaw/sessions/export
+            retention_days: 30
+        update:
+            command_timeout: 30s
+            embed_interval: 60m
+            interval: 5m
+            on_boot: true
+            update_timeout: 120s
+providers:
+    anthropic:
+        api_key: ""
+        base_url: ""
+        timeout: 600
+    openai:
+        api_key: YOUR_OPENAI_API_KEY_HERE
+        base_url: https://api.deepseek.com
+        timeout: 600
+    openrouter:
+        api_key: ""
+        base_url: ""
+        max_retries: 3
+        timeout: 600
+tools:
+    browser:
+        enabled: true
+        headless: true
+        relay_mode: auto
+        relay_url: ws://127.0.0.1:18789
+        timeout: 30
+    cron:
+        enabled: true
+        store_path: ~/.goclaw/cron/jobs.json
+    filesystem:
+        allowed_paths: []
+        denied_paths: []
+    shell:
+        allowed_cmds: []
+        denied_cmds:
+            - rm -rf
+            - dd
+            - mkfs
+            - format
+        enabled: true
+        timeout: 30
+        working_dir: ""
+    web:
+        search_api_key: ""
+        search_engine: travily
+        timeout: 10
+workspace:
+    path: ""

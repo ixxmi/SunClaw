@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,6 +153,23 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// ReloadFromConfig rebuilds channel registrations from config and starts them on the current runtime context.
+func (m *Manager) ReloadFromConfig(ctx context.Context, cfg *config.Config) error {
+	if err := m.Stop(); err != nil {
+		logger.Warn("Failed to stop channels during reload", zap.Error(err))
+	}
+
+	m.mu.Lock()
+	m.channels = make(map[string]BaseChannel)
+	m.mu.Unlock()
+
+	if err := m.SetupFromConfig(cfg); err != nil {
+		return err
+	}
+
+	return m.Start(ctx)
+}
+
 // Get 获取通道
 func (m *Manager) Get(name string) (BaseChannel, bool) {
 	m.mu.RLock()
@@ -231,6 +249,7 @@ func (m *Manager) DispatchOutbound(ctx context.Context) error {
 
 			logger.Debug("Outbound message received",
 				zap.String("channel", msg.Channel),
+				zap.String("account_id", msg.AccountID),
 				zap.String("chat_id", msg.ChatID),
 				zap.Int("content_length", len(msg.Content)))
 
@@ -253,15 +272,17 @@ func (m *Manager) DispatchOutbound(ctx context.Context) error {
 			// 如果仍然没有 chat_id，跳过此消息
 			if msg.ChatID == "" {
 				logger.Warn("Outbound message has no chat_id, skipping",
-					zap.String("channel", msg.Channel))
+					zap.String("channel", msg.Channel),
+					zap.String("account_id", msg.AccountID))
 				continue
 			}
 
 			// 查找对应的通道
-			channel, ok := m.Get(msg.Channel)
+			channel, resolvedName, ok := m.resolveOutboundChannel(msg)
 			if !ok {
 				logger.Warn("Channel not found for outbound message",
 					zap.String("channel", msg.Channel),
+					zap.String("account_id", msg.AccountID),
 				)
 				continue
 			}
@@ -270,11 +291,15 @@ func (m *Manager) DispatchOutbound(ctx context.Context) error {
 			if err := channel.Send(msg); err != nil {
 				logger.Error("Failed to send message via channel",
 					zap.String("channel", msg.Channel),
+					zap.String("resolved_channel", resolvedName),
+					zap.String("account_id", msg.AccountID),
 					zap.Error(err),
 				)
 			} else {
 				logger.Debug("Message sent successfully via channel",
 					zap.String("channel", msg.Channel),
+					zap.String("resolved_channel", resolvedName),
+					zap.String("account_id", msg.AccountID),
 					zap.String("chat_id", msg.ChatID))
 			}
 		}
@@ -536,16 +561,29 @@ func (m *Manager) SetupFromConfig(cfg *config.Config) error {
 
 	// 企业微信通道
 	if cfg.Channels.WeWork.Enabled {
+		registeredWeWorkAccount := false
 		if len(cfg.Channels.WeWork.Accounts) > 0 {
 			// 多账号配置
 			for accountID, accountCfg := range cfg.Channels.WeWork.Accounts {
-				if accountCfg.Enabled && accountCfg.CorpID != "" {
+				mode := strings.TrimSpace(strings.ToLower(accountCfg.Mode))
+				if mode == "" {
+					mode = "webhook"
+				}
+				enabled := accountCfg.Enabled && ((mode == "websocket" && accountCfg.BotID != "") || (mode != "websocket" && accountCfg.CorpID != ""))
+				if enabled {
 					wwCfg := config.WeWorkChannelConfig{
-						Enabled:    accountCfg.Enabled,
-						CorpID:     accountCfg.CorpID,
-						AgentID:    accountCfg.AgentID,
-						Secret:     accountCfg.AppSecret,
-						AllowedIDs: accountCfg.AllowedIDs,
+						Enabled:        accountCfg.Enabled,
+						Mode:           mode,
+						CorpID:         accountCfg.CorpID,
+						AgentID:        accountCfg.AgentID,
+						Secret:         accountCfg.AppSecret,
+						BotID:          accountCfg.BotID,
+						BotSecret:      accountCfg.BotSecret,
+						WebSocketURL:   accountCfg.WebSocketURL,
+						Token:          accountCfg.Token,
+						EncodingAESKey: accountCfg.EncodingAESKey,
+						WebhookPort:    accountCfg.WebhookPort,
+						AllowedIDs:     accountCfg.AllowedIDs,
 					}
 					channel, err := NewWeWorkChannel(accountID, wwCfg, m.bus)
 					if err != nil {
@@ -558,18 +596,29 @@ func (m *Manager) SetupFromConfig(cfg *config.Config) error {
 							logger.Error("Failed to register WeWork channel",
 								zap.String("account_id", accountID),
 								zap.Error(err))
+						} else {
+							registeredWeWorkAccount = true
 						}
 					}
 				}
 			}
-		} else if cfg.Channels.WeWork.CorpID != "" {
-			// 单账号配置（向后兼容）
-			channel, err := NewWeWorkChannel("default", cfg.Channels.WeWork, m.bus)
-			if err != nil {
-				logger.Error("Failed to create WeWork channel", zap.Error(err))
-			} else {
-				if err := m.Register(channel); err != nil {
-					logger.Error("Failed to register WeWork channel", zap.Error(err))
+		}
+
+		if !registeredWeWorkAccount {
+			mode := strings.TrimSpace(strings.ToLower(cfg.Channels.WeWork.Mode))
+			if mode == "" {
+				mode = "webhook"
+			}
+			enabled := (mode == "websocket" && cfg.Channels.WeWork.BotID != "") || (mode != "websocket" && cfg.Channels.WeWork.CorpID != "")
+			if enabled {
+				// 单账号配置（向后兼容）
+				channel, err := NewWeWorkChannel("default", cfg.Channels.WeWork, m.bus)
+				if err != nil {
+					logger.Error("Failed to create WeWork channel", zap.Error(err))
+				} else {
+					if err := m.Register(channel); err != nil {
+						logger.Error("Failed to register WeWork channel", zap.Error(err))
+					}
 				}
 			}
 		}
@@ -743,6 +792,56 @@ func buildChannelName(channelType, accountID string) string {
 		return channelType
 	}
 	return channelType + ":" + accountID
+}
+
+func baseChannelName(channelName string) string {
+	if idx := strings.Index(channelName, ":"); idx > 0 {
+		return channelName[:idx]
+	}
+	return channelName
+}
+
+func (m *Manager) resolveOutboundChannel(msg *bus.OutboundMessage) (BaseChannel, string, bool) {
+	if msg == nil {
+		return nil, "", false
+	}
+
+	channelName := strings.TrimSpace(msg.Channel)
+	if channelName == "" {
+		return nil, "", false
+	}
+
+	accountID := strings.TrimSpace(msg.AccountID)
+	baseName := baseChannelName(channelName)
+
+	candidates := make([]string, 0, 3)
+	if strings.Contains(channelName, ":") {
+		candidates = append(candidates, channelName)
+	} else if accountID != "" && accountID != "default" {
+		candidates = append(candidates, buildChannelName(baseName, accountID))
+	}
+	candidates = append(candidates, channelName)
+	if baseName != "" && baseName != channelName {
+		candidates = append(candidates, baseName)
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		channel, ok := m.Get(candidate)
+		if ok {
+			return channel, candidate, true
+		}
+	}
+
+	return nil, "", false
 }
 
 // RegisterWithName 使用指定名称注册通道

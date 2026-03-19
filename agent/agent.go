@@ -275,7 +275,7 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 		logger.Error("Agent execution failed", zap.Error(err))
 
 		// Send error response
-		a.publishError(ctx, msg.Channel, msg.ChatID, err)
+		a.publishError(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), err)
 		return
 	}
 
@@ -289,7 +289,7 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 
 	// Publish response
 	if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
-		a.publishToBus(ctx, msg.Channel, msg.ChatID, *replyMsg)
+		a.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg)
 	}
 }
 
@@ -315,13 +315,33 @@ func (a *Agent) publishResponse(ctx context.Context, msg AgentMessage) {
 }
 
 // publishError publishes an error message
-func (a *Agent) publishError(ctx context.Context, channel, chatID string, err error) {
+func buildOutboundMetadataFromInbound(msg *bus.InboundMessage) map[string]interface{} {
+	if msg == nil || msg.Metadata == nil {
+		return nil
+	}
+
+	metadata := make(map[string]interface{}, 2)
+	if chatType, ok := msg.Metadata["chat_type"]; ok {
+		metadata["chat_type"] = chatType
+	}
+	if threadID, ok := msg.Metadata["thread_id"]; ok {
+		metadata["thread_id"] = threadID
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func (a *Agent) publishError(ctx context.Context, channel, accountID, chatID string, metadata map[string]interface{}, err error) {
 	errorMsg := fmt.Sprintf("An error occurred: %v", err)
 
 	outbound := &bus.OutboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		Content:   errorMsg,
+		Metadata:  metadata,
 		Timestamp: time.Now(),
 	}
 
@@ -329,13 +349,15 @@ func (a *Agent) publishError(ctx context.Context, channel, chatID string, err er
 }
 
 // publishToBus publishes a message to the bus
-func (a *Agent) publishToBus(ctx context.Context, channel, chatID string, msg AgentMessage) {
+func (a *Agent) publishToBus(ctx context.Context, channel, accountID, chatID string, metadata map[string]interface{}, msg AgentMessage) {
 	content := extractTextContent(msg)
 
 	outbound := &bus.OutboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		Content:   content,
+		Metadata:  metadata,
 		Timestamp: time.Now(),
 	}
 

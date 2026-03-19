@@ -85,6 +85,17 @@ type Payload struct {
 	Message string `json:"message,omitempty"`
 }
 
+// ConversationContext defines the original chat context for a scheduled job.
+// When present, agent-turn jobs are re-injected into the same channel/account/chat
+// so the eventual reply can be delivered proactively back to the requester.
+type ConversationContext struct {
+	Channel   string                 `json:"channel,omitempty"`
+	AccountID string                 `json:"account_id,omitempty"`
+	ChatID    string                 `json:"chat_id,omitempty"`
+	SenderID  string                 `json:"sender_id,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // JobState represents the current state of a job
 type JobState struct {
 	Enabled           bool       `json:"enabled"`
@@ -100,16 +111,17 @@ type JobState struct {
 
 // Job represents a scheduled cron job
 type Job struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name"`
-	Schedule      Schedule      `json:"schedule"`
-	SessionTarget SessionTarget `json:"session_target"`
-	WakeMode      WakeMode      `json:"wake_mode"`
-	Payload       Payload       `json:"payload"`
-	Delivery      *Delivery     `json:"delivery,omitempty"`
-	State         JobState      `json:"state"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID            string               `json:"id"`
+	Name          string               `json:"name"`
+	Schedule      Schedule             `json:"schedule"`
+	SessionTarget SessionTarget        `json:"session_target"`
+	WakeMode      WakeMode             `json:"wake_mode"`
+	Payload       Payload              `json:"payload"`
+	Conversation  *ConversationContext `json:"conversation,omitempty"`
+	Delivery      *Delivery            `json:"delivery,omitempty"`
+	State         JobState             `json:"state"`
+	CreatedAt     time.Time            `json:"created_at"`
+	UpdatedAt     time.Time            `json:"updated_at"`
 }
 
 // IsRunning checks if the job is currently running
@@ -174,8 +186,12 @@ func (j *Job) CalculateNextRun(from time.Time) (time.Time, error) {
 
 	switch j.Schedule.Type {
 	case ScheduleTypeAt:
-		// One-shot jobs don't have next runs
-		next = time.Time{}
+		if j.Schedule.At.IsZero() {
+			return time.Time{}, fmt.Errorf("invalid at schedule: time is empty")
+		}
+		if j.Schedule.At.After(from) {
+			next = j.Schedule.At
+		}
 	case ScheduleTypeEvery:
 		if j.Schedule.EveryDuration <= 0 {
 			return time.Time{}, fmt.Errorf("invalid every schedule: duration must be > 0")

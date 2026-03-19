@@ -48,13 +48,24 @@ func (t *MessageTool) SendMessage(ctx context.Context, params map[string]interfa
 
 	// 获取目标通道
 	channel := t.currentChan
+	if ch := contextString(ctx, "channel"); ch != "" {
+		channel = ch
+	}
 	if ch, ok := params["channel"].(string); ok && ch != "" {
 		channel = ch
 	}
 
 	chatID := t.currentChat
+	if cid := contextString(ctx, "chat_id"); cid != "" {
+		chatID = cid
+	}
 	if cid, ok := params["chat_id"].(string); ok && cid != "" {
 		chatID = cid
+	}
+
+	accountID := contextString(ctx, "account_id")
+	if aid, ok := params["account_id"].(string); ok && strings.TrimSpace(aid) != "" {
+		accountID = strings.TrimSpace(aid)
 	}
 
 	if channel == "" || chatID == "" {
@@ -64,6 +75,7 @@ func (t *MessageTool) SendMessage(ctx context.Context, params map[string]interfa
 	// 发送消息
 	msg := &bus.OutboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		Content:   content,
 		Timestamp: time.Now(),
@@ -74,6 +86,17 @@ func (t *MessageTool) SendMessage(ctx context.Context, params map[string]interfa
 	}
 
 	return fmt.Sprintf("Message sent to %s:%s", channel, chatID), nil
+}
+
+func contextString(ctx context.Context, key string) string {
+	if ctx == nil {
+		return ""
+	}
+	value, ok := ctx.Value(key).(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 // isFilteredContent 检查内容是否应该被过滤
@@ -156,6 +179,10 @@ func (t *MessageTool) GetTools() []Tool {
 					"chat_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Target chat ID (default: current)",
+					},
+					"account_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Target account ID (default: current inbound account)",
 					},
 				},
 				"required": []string{"content"},

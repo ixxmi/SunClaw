@@ -337,10 +337,12 @@ func runStart(cmd *cobra.Command, args []string) {
 		logger.Info("Registering cron tools",
 			zap.Bool("cron_service_nil", cronService == nil))
 		cronTool := tools.NewCronTool(cronService)
-		tools := cronTool.GetTools()
+		registeredTools := cronTool.GetTools()
+		reminderTool := tools.NewReminderTool(cronService)
+		registeredTools = append(registeredTools, reminderTool.GetTools()...)
 		logger.Info("CronTool.GetTools returned",
-			zap.Int("count", len(tools)))
-		for _, tool := range tools {
+			zap.Int("count", len(registeredTools)))
+		for _, tool := range registeredTools {
 			if err := toolRegistry.RegisterExisting(tool); err != nil {
 				logger.Warn("Failed to register tool", zap.String("tool", tool.Name()), zap.Error(err))
 			} else {
@@ -391,10 +393,7 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// 创建网关服务器
 	gatewayServer := gateway.NewServer(cfg, messageBus, channelMgr, sessionMgr, cronService, acpMgr)
-	if err := gatewayServer.Start(ctx); err != nil {
-		logger.Warn("Failed to start gateway server", zap.Error(err))
-	}
-	defer func() { _ = gatewayServer.Stop() }()
+	gatewayServer.SetConfigPath(configPath)
 
 	// 创建 AgentManager
 	agentManager := agent.NewAgentManager(&agent.NewAgentManagerConfig{
@@ -413,6 +412,16 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err := agentManager.SetupFromConfig(cfg, contextBuilder); err != nil {
 		logger.Fatal("Failed to setup agent manager", zap.Error(err))
 	}
+	gatewayServer.SetConfigApplier(func(ctx context.Context, nextCfg *config.Config) error {
+		if err := channelMgr.ReloadFromConfig(ctx, nextCfg); err != nil {
+			return err
+		}
+		return agentManager.ReloadBindings(nextCfg)
+	})
+	if err := gatewayServer.Start(ctx); err != nil {
+		logger.Warn("Failed to start gateway server", zap.Error(err))
+	}
+	defer func() { _ = gatewayServer.Stop() }()
 
 	// 处理信号
 	sigChan := make(chan os.Signal, 1)

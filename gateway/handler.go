@@ -26,6 +26,10 @@ type Handler struct {
 	cfg        *config.Config
 }
 
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.cfg = cfg
+}
+
 // NewHandler 创建处理器
 func NewHandler(messageBus *bus.MessageBus, sessionMgr *session.Manager, channelMgr *channels.Manager, cronSvc *cron.Service, acpMgr interface{}, cfg *config.Config) *Handler {
 	h := &Handler{
@@ -304,8 +308,11 @@ func (h *Handler) registerChannelMethods() {
 			return nil, fmt.Errorf("content parameter is required")
 		}
 
+		accountID, _ := params["account_id"].(string)
+
 		msg := &bus.OutboundMessage{
 			Channel:   channel,
+			AccountID: accountID,
 			ChatID:    chatID,
 			Content:   content,
 			Timestamp: time.Now(),
@@ -316,10 +323,11 @@ func (h *Handler) registerChannelMethods() {
 		}
 
 		return map[string]interface{}{
-			"status":  "sent",
-			"msg_id":  msg.ID,
-			"channel": channel,
-			"chat_id": chatID,
+			"status":     "sent",
+			"msg_id":     msg.ID,
+			"channel":    channel,
+			"account_id": accountID,
+			"chat_id":    chatID,
 		}, nil
 	})
 

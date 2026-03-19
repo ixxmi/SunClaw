@@ -294,11 +294,13 @@ func (v *Validator) validateChannels(cfg *Config) error {
 	validators := []func(*ChannelsConfig) error{
 		v.validateTelegram,
 		v.validateWhatsApp,
+		v.validateIMessage,
 		v.validateFeishu,
 		v.validateQQ,
 		v.validateWeWork,
 		v.validateDingTalk,
 		v.validateInfoflow,
+		v.validateGotify,
 	}
 
 	for _, validator := range validators {
@@ -310,8 +312,51 @@ func (v *Validator) validateChannels(cfg *Config) error {
 	return nil
 }
 
+func validateChannelAccountID(channel, accountID string) error {
+	if strings.TrimSpace(accountID) == "" {
+		return errors.InvalidConfig(fmt.Sprintf("%s account ID cannot be empty", channel))
+	}
+	return nil
+}
+
+func validateRequiredChannelValue(label, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.InvalidConfig(fmt.Sprintf("%s is required", label))
+	}
+	return nil
+}
+
+func validateAbsoluteURL(label, raw string) error {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	if err != nil {
+		return errors.Wrap(err, errors.ErrCodeInvalidConfig, fmt.Sprintf("invalid %s", label))
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return errors.InvalidConfig(fmt.Sprintf("%s must be an absolute URL", label))
+	}
+	return nil
+}
+
 // validateTelegram validates Telegram channel configuration
 func (v *Validator) validateTelegram(channels *ChannelsConfig) error {
+	if len(channels.Telegram.Accounts) > 0 {
+		for accountID, account := range channels.Telegram.Accounts {
+			if err := validateChannelAccountID("telegram", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("telegram account %s token", accountID),
+				account.Token,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.Telegram.Enabled {
 		return nil
 	}
@@ -325,16 +370,81 @@ func (v *Validator) validateTelegram(channels *ChannelsConfig) error {
 
 // validateWhatsApp validates WhatsApp channel configuration
 func (v *Validator) validateWhatsApp(channels *ChannelsConfig) error {
+	if len(channels.WhatsApp.Accounts) > 0 {
+		for accountID, account := range channels.WhatsApp.Accounts {
+			if err := validateChannelAccountID("whatsapp", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("whatsapp account %s bridge_url", accountID),
+				account.BridgeURL,
+			); err != nil {
+				return err
+			}
+			if err := validateAbsoluteURL(
+				fmt.Sprintf("whatsapp account %s bridge_url", accountID),
+				account.BridgeURL,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.WhatsApp.Enabled {
 		return nil
 	}
 
-	if channels.WhatsApp.BridgeURL == "" {
-		return errors.InvalidConfig("whatsapp bridge_url is required when enabled")
+	if err := validateRequiredChannelValue("whatsapp bridge_url", channels.WhatsApp.BridgeURL); err != nil {
+		return err
 	}
 
-	if _, err := url.Parse(channels.WhatsApp.BridgeURL); err != nil {
-		return errors.Wrap(err, errors.ErrCodeInvalidConfig, "invalid whatsapp bridge_url")
+	if err := validateAbsoluteURL("whatsapp bridge_url", channels.WhatsApp.BridgeURL); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateIMessage validates iMessage channel configuration
+func (v *Validator) validateIMessage(channels *ChannelsConfig) error {
+	if len(channels.IMessage.Accounts) > 0 {
+		for accountID, account := range channels.IMessage.Accounts {
+			if err := validateChannelAccountID("imessage", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("imessage account %s bridge_url", accountID),
+				account.BridgeURL,
+			); err != nil {
+				return err
+			}
+			if err := validateAbsoluteURL(
+				fmt.Sprintf("imessage account %s bridge_url", accountID),
+				account.BridgeURL,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if !channels.IMessage.Enabled {
+		return nil
+	}
+
+	if err := validateRequiredChannelValue("imessage bridge_url", channels.IMessage.BridgeURL); err != nil {
+		return err
+	}
+
+	if err := validateAbsoluteURL("imessage bridge_url", channels.IMessage.BridgeURL); err != nil {
+		return err
 	}
 
 	return nil
@@ -342,24 +452,49 @@ func (v *Validator) validateWhatsApp(channels *ChannelsConfig) error {
 
 // validateFeishu validates Feishu channel configuration
 func (v *Validator) validateFeishu(channels *ChannelsConfig) error {
+	if len(channels.Feishu.Accounts) > 0 {
+		for accountID, account := range channels.Feishu.Accounts {
+			if err := validateChannelAccountID("feishu", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("feishu account %s app_id", accountID),
+				account.AppID,
+			); err != nil {
+				return err
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("feishu account %s app_secret", accountID),
+				account.AppSecret,
+			); err != nil {
+				return err
+			}
+			if err := validateOptionalPort(fmt.Sprintf("feishu account %s webhook_port", accountID), account.WebhookPort); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.Feishu.Enabled {
 		return nil
 	}
 
-	if channels.Feishu.AppID == "" {
-		return errors.InvalidConfig("feishu app_id is required when enabled")
+	if err := validateRequiredChannelValue("feishu app_id", channels.Feishu.AppID); err != nil {
+		return err
 	}
 
-	if channels.Feishu.AppSecret == "" {
-		return errors.InvalidConfig("feishu app_secret is required when enabled")
+	if err := validateRequiredChannelValue("feishu app_secret", channels.Feishu.AppSecret); err != nil {
+		return err
 	}
 
 	// verification_token is optional (for webhook mode)
 	// webhook_port is optional (defaults to 8765 if not set)
-	if channels.Feishu.WebhookPort != 0 {
-		if channels.Feishu.WebhookPort < 1024 || channels.Feishu.WebhookPort > 65535 {
-			return errors.InvalidConfig("feishu webhook_port must be between 1024 and 65535")
-		}
+	if err := validateOptionalPort("feishu webhook_port", channels.Feishu.WebhookPort); err != nil {
+		return err
 	}
 
 	return nil
@@ -367,16 +502,40 @@ func (v *Validator) validateFeishu(channels *ChannelsConfig) error {
 
 // validateQQ validates QQ channel configuration
 func (v *Validator) validateQQ(channels *ChannelsConfig) error {
+	if len(channels.QQ.Accounts) > 0 {
+		for accountID, account := range channels.QQ.Accounts {
+			if err := validateChannelAccountID("qq", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("qq account %s app_id", accountID),
+				account.AppID,
+			); err != nil {
+				return err
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("qq account %s app_secret", accountID),
+				account.AppSecret,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.QQ.Enabled {
 		return nil
 	}
 
-	if channels.QQ.AppID == "" {
-		return errors.InvalidConfig("qq app_id is required when enabled")
+	if err := validateRequiredChannelValue("qq app_id", channels.QQ.AppID); err != nil {
+		return err
 	}
 
-	if channels.QQ.AppSecret == "" {
-		return errors.InvalidConfig("qq app_secret is required when enabled")
+	if err := validateRequiredChannelValue("qq app_secret", channels.QQ.AppSecret); err != nil {
+		return err
 	}
 
 	return nil
@@ -384,41 +543,139 @@ func (v *Validator) validateQQ(channels *ChannelsConfig) error {
 
 // validateWeWork validates WeWork channel configuration
 func (v *Validator) validateWeWork(channels *ChannelsConfig) error {
+	if len(channels.WeWork.Accounts) > 0 {
+		for accountID, account := range channels.WeWork.Accounts {
+			if err := validateChannelAccountID("wework", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			mode := normalizeWeWorkMode(account.Mode)
+			switch mode {
+			case "webhook":
+				if err := validateRequiredChannelValue(
+					fmt.Sprintf("wework account %s corp_id", accountID),
+					account.CorpID,
+				); err != nil {
+					return err
+				}
+				if err := validateRequiredChannelValue(
+					fmt.Sprintf("wework account %s app_secret", accountID),
+					account.AppSecret,
+				); err != nil {
+					return err
+				}
+				if err := validateRequiredChannelValue(
+					fmt.Sprintf("wework account %s agent_id", accountID),
+					account.AgentID,
+				); err != nil {
+					return err
+				}
+				if err := validateOptionalPort(fmt.Sprintf("wework account %s webhook_port", accountID), account.WebhookPort); err != nil {
+					return err
+				}
+			case "websocket":
+				if err := validateRequiredChannelValue(
+					fmt.Sprintf("wework account %s bot_id", accountID),
+					account.BotID,
+				); err != nil {
+					return err
+				}
+				if err := validateRequiredChannelValue(
+					fmt.Sprintf("wework account %s bot_secret", accountID),
+					account.BotSecret,
+				); err != nil {
+					return err
+				}
+			default:
+				return errors.InvalidConfig(fmt.Sprintf("wework account %s mode must be webhook or websocket", accountID))
+			}
+		}
+		return nil
+	}
+
 	if !channels.WeWork.Enabled {
 		return nil
 	}
 
-	if channels.WeWork.CorpID == "" {
-		return errors.InvalidConfig("wework corp_id is required when enabled")
-	}
+	mode := normalizeWeWorkMode(channels.WeWork.Mode)
+	switch mode {
+	case "webhook":
+		if err := validateRequiredChannelValue("wework corp_id", channels.WeWork.CorpID); err != nil {
+			return err
+		}
 
-	if channels.WeWork.Secret == "" {
-		return errors.InvalidConfig("wework secret is required when enabled")
-	}
+		if err := validateRequiredChannelValue("wework secret", channels.WeWork.Secret); err != nil {
+			return err
+		}
 
-	if channels.WeWork.AgentID == "" {
-		return errors.InvalidConfig("wework agent_id is required when enabled")
-	}
+		if err := validateRequiredChannelValue("wework agent_id", channels.WeWork.AgentID); err != nil {
+			return err
+		}
 
-	if channels.WeWork.WebhookPort < 1024 || channels.WeWork.WebhookPort > 65535 {
-		return errors.InvalidConfig("wework webhook_port must be between 1024 and 65535")
+		if err := validateOptionalPort("wework webhook_port", channels.WeWork.WebhookPort); err != nil {
+			return err
+		}
+	case "websocket":
+		if err := validateRequiredChannelValue("wework bot_id", channels.WeWork.BotID); err != nil {
+			return err
+		}
+
+		if err := validateRequiredChannelValue("wework bot_secret", channels.WeWork.BotSecret); err != nil {
+			return err
+		}
+	default:
+		return errors.InvalidConfig("wework mode must be webhook or websocket")
 	}
 
 	return nil
 }
 
+func normalizeWeWorkMode(mode string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(mode))
+	if trimmed == "" {
+		return "webhook"
+	}
+	return trimmed
+}
+
 // validateDingTalk validates DingTalk channel configuration
 func (v *Validator) validateDingTalk(channels *ChannelsConfig) error {
+	if len(channels.DingTalk.Accounts) > 0 {
+		for accountID, account := range channels.DingTalk.Accounts {
+			if err := validateChannelAccountID("dingtalk", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("dingtalk account %s client_id", accountID),
+				account.ClientID,
+			); err != nil {
+				return err
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("dingtalk account %s client_secret", accountID),
+				account.ClientSecret,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.DingTalk.Enabled {
 		return nil
 	}
 
-	if channels.DingTalk.ClientID == "" {
-		return errors.InvalidConfig("dingtalk client_id is required when enabled")
+	if err := validateRequiredChannelValue("dingtalk client_id", channels.DingTalk.ClientID); err != nil {
+		return err
 	}
 
-	if channels.DingTalk.ClientSecret == "" {
-		return errors.InvalidConfig("dingtalk client_secret is required when enabled")
+	if err := validateRequiredChannelValue("dingtalk client_secret", channels.DingTalk.ClientSecret); err != nil {
+		return err
 	}
 
 	return nil
@@ -426,22 +683,120 @@ func (v *Validator) validateDingTalk(channels *ChannelsConfig) error {
 
 // validateInfoflow validates Infoflow channel configuration
 func (v *Validator) validateInfoflow(channels *ChannelsConfig) error {
+	if len(channels.Infoflow.Accounts) > 0 {
+		for accountID, account := range channels.Infoflow.Accounts {
+			if err := validateChannelAccountID("infoflow", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("infoflow account %s webhook_url", accountID),
+				account.WebhookURL,
+			); err != nil {
+				return err
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("infoflow account %s token", accountID),
+				account.Token,
+			); err != nil {
+				return err
+			}
+			if err := validateAbsoluteURL(
+				fmt.Sprintf("infoflow account %s webhook_url", accountID),
+				account.WebhookURL,
+			); err != nil {
+				return err
+			}
+			if err := validateOptionalPort(fmt.Sprintf("infoflow account %s webhook_port", accountID), account.WebhookPort); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if !channels.Infoflow.Enabled {
 		return nil
 	}
 
-	if channels.Infoflow.WebhookURL == "" {
-		return errors.InvalidConfig("infoflow webhook_url is required when enabled")
+	if err := validateRequiredChannelValue("infoflow webhook_url", channels.Infoflow.WebhookURL); err != nil {
+		return err
 	}
 
-	if _, err := url.Parse(channels.Infoflow.WebhookURL); err != nil {
-		return errors.Wrap(err, errors.ErrCodeInvalidConfig, "invalid infoflow webhook_url")
+	if err := validateAbsoluteURL("infoflow webhook_url", channels.Infoflow.WebhookURL); err != nil {
+		return err
 	}
 
-	if channels.Infoflow.WebhookPort < 1024 || channels.Infoflow.WebhookPort > 65535 {
-		return errors.InvalidConfig("infoflow webhook_port must be between 1024 and 65535")
+	if err := validateRequiredChannelValue("infoflow token", channels.Infoflow.Token); err != nil {
+		return err
 	}
 
+	if err := validateOptionalPort("infoflow webhook_port", channels.Infoflow.WebhookPort); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateGotify validates Gotify channel configuration
+func (v *Validator) validateGotify(channels *ChannelsConfig) error {
+	if len(channels.Gotify.Accounts) > 0 {
+		for accountID, account := range channels.Gotify.Accounts {
+			if err := validateChannelAccountID("gotify", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("gotify account %s server_url", accountID),
+				account.ServerURL,
+			); err != nil {
+				return err
+			}
+			if err := validateRequiredChannelValue(
+				fmt.Sprintf("gotify account %s app_token", accountID),
+				account.AppToken,
+			); err != nil {
+				return err
+			}
+			if err := validateAbsoluteURL(
+				fmt.Sprintf("gotify account %s server_url", accountID),
+				account.ServerURL,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if !channels.Gotify.Enabled {
+		return nil
+	}
+
+	if err := validateRequiredChannelValue("gotify server_url", channels.Gotify.ServerURL); err != nil {
+		return err
+	}
+
+	if err := validateRequiredChannelValue("gotify app_token", channels.Gotify.AppToken); err != nil {
+		return err
+	}
+
+	if err := validateAbsoluteURL("gotify server_url", channels.Gotify.ServerURL); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateOptionalPort(label string, port int) error {
+	if port == 0 {
+		return nil
+	}
+	if port < 1024 || port > 65535 {
+		return errors.InvalidConfig(fmt.Sprintf("%s must be between 1024 and 65535", label))
+	}
 	return nil
 }
 

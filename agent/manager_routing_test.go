@@ -25,6 +25,29 @@ func TestBuildSessionKey_NormalizesEmptyAccountIDAndIncludesThread(t *testing.T)
 	}
 }
 
+func TestOutboundReplyTarget_PrefersPlatformMessageID(t *testing.T) {
+	msg := &bus.InboundMessage{
+		ID: "e2e49089-3bfa-4978-8afa-275f36b46abb",
+		Metadata: map[string]interface{}{
+			"message_id": 12345,
+		},
+	}
+
+	if got := outboundReplyTarget(msg); got != "12345" {
+		t.Fatalf("outboundReplyTarget()=%q, want %q", got, "12345")
+	}
+}
+
+func TestOutboundReplyTarget_IgnoresInternalUUIDWithoutPlatformMessageID(t *testing.T) {
+	msg := &bus.InboundMessage{
+		ID: "e2e49089-3bfa-4978-8afa-275f36b46abb",
+	}
+
+	if got := outboundReplyTarget(msg); got != "" {
+		t.Fatalf("outboundReplyTarget()=%q, want empty string", got)
+	}
+}
+
 func TestResolveInboundRoute_PrefersSessionRouteOverBinding(t *testing.T) {
 	reviewer := &Agent{}
 	defaultAgent := &Agent{}
@@ -128,10 +151,11 @@ func TestRouteInbound_AgentSwitchIsThreadScoped(t *testing.T) {
 	}
 
 	msg := &bus.InboundMessage{
-		ID:      "msg-switch-1",
-		Channel: "slack",
-		ChatID:  "C123",
-		Content: "/agent reviewer",
+		ID:        "msg-switch-1",
+		Channel:   "slack",
+		AccountID: "acc-1",
+		ChatID:    "C123",
+		Content:   "/agent reviewer",
 		Metadata: map[string]interface{}{
 			"thread_id": "thread-1",
 		},
@@ -146,6 +170,9 @@ func TestRouteInbound_AgentSwitchIsThreadScoped(t *testing.T) {
 	case outbound := <-sub.Channel:
 		if outbound == nil {
 			t.Fatalf("expected outbound switch ack")
+		}
+		if outbound.AccountID != "acc-1" {
+			t.Fatalf("expected outbound account_id acc-1, got %q", outbound.AccountID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for switch ack")

@@ -20,6 +20,7 @@ import (
 	"github.com/smallnest/goclaw/bus"
 	"github.com/smallnest/goclaw/channels"
 	"github.com/smallnest/goclaw/config"
+	"github.com/smallnest/goclaw/cron"
 	"github.com/smallnest/goclaw/gateway"
 	"github.com/smallnest/goclaw/internal/logger"
 	"github.com/smallnest/goclaw/session"
@@ -202,9 +203,23 @@ func runGateway(cmd *cobra.Command, args []string) {
 		logger.Fatal("Failed to create session manager", zap.Error(err))
 	}
 
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	channelMgr := channels.NewManager(messageBus)
 	if err := channelMgr.SetupFromConfig(cfg); err != nil {
 		logger.Warn("Failed to setup channels from config", zap.Error(err))
+	}
+
+	cronService, err := cron.NewService(cron.DefaultCronConfig(), messageBus)
+	if err != nil {
+		logger.Warn("Failed to create cron service", zap.Error(err))
+	} else {
+		if err := cronService.Start(ctx); err != nil {
+			logger.Warn("Failed to start cron service", zap.Error(err))
+		}
+		defer func() { _ = cronService.Stop() }()
 	}
 
 	// Create ACP manager if enabled
@@ -217,7 +232,13 @@ func runGateway(cmd *cobra.Command, args []string) {
 
 	// Create gateway server
 	// NewServer reads from cfg.Gateway.WebSocket, so we only override if CLI flags are explicitly provided
-	gatewayServer := gateway.NewServer(cfg, messageBus, channelMgr, sessionMgr, nil, acpMgr)
+	gatewayServer := gateway.NewServer(cfg, messageBus, channelMgr, sessionMgr, cronService, acpMgr)
+	if defaultConfigPath, err := config.GetDefaultConfigPath(); err == nil {
+		gatewayServer.SetConfigPath(defaultConfigPath)
+	}
+	gatewayServer.SetConfigApplier(func(ctx context.Context, nextCfg *config.Config) error {
+		return channelMgr.ReloadFromConfig(ctx, nextCfg)
+	})
 
 	// Only override WebSocket config if CLI flags are explicitly provided
 	// If no CLI flags are set, use config file settings (already loaded by NewServer)
@@ -241,10 +262,6 @@ func runGateway(cmd *cobra.Command, args []string) {
 
 		gatewayServer.SetWebSocketConfig(wsConfig)
 	}
-
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -300,6 +317,7 @@ func runGateway(cmd *cobra.Command, args []string) {
 	fmt.Printf("Gateway listening on %s:%d\n", displayHost, displayPort)
 	fmt.Printf("WebSocket: ws://%s:%d/ws\n", displayHost, displayPort)
 	fmt.Printf("Health: http://%s:%d/health\n", displayHost, displayPort)
+	fmt.Printf("Dashboard: http://%s:%d/admin/\n", displayHost, displayPort)
 
 	if gatewayAuth || gatewayToken != "" || gatewayPassword != "" {
 		fmt.Println("Authentication: enabled")

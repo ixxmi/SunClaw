@@ -64,6 +64,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		"use_skill":              "加载专项技能（最高优先级，先于其他工具检查）",
 		"message":                "发送消息和频道动作（投票、反应、按钮等）",
 		"cron":                   "管理内置定时任务（add/list/rm/enable/disable/run/status）",
+		"reminder":               "在当前会话中安排未来主动提醒或延迟回复",
 		"session_status":         "查看会话用量/时间/模型状态",
 		"sessions_spawn":         "派发子 Agent 异步执行子任务（完成后自动回报结果）",
 		"memory_search":          "搜索记忆库中的历史内容",
@@ -189,6 +190,7 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 		"use_skill":              "Load a specialized skill. SKILLS HAVE HIGHEST PRIORITY - always check Skills section first",
 		"message":                "Send messages and channel actions (polls, reactions, buttons)",
 		"cron":                   "Manage goclaw's built-in cron/scheduler service. This is the ONLY WAY to manage scheduled tasks. DO NOT use system 'crontab' commands. Supports: add (create), list/ls (view all), rm/remove (delete), enable, disable, run (execute immediately), status, runs (history)",
+		"reminder":               "Schedule future proactive follow-ups back into the current chat, including delayed replies and timed reminders",
 		"session_status":         "Show session usage/time/model state (use for 'what model are we using?' questions)",
 	}
 
@@ -204,7 +206,7 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 		// 网络
 		"web_search", "web_fetch",
 		// 技能和消息
-		"use_skill", "message", "cron", "session_status",
+		"use_skill", "message", "cron", "reminder", "session_status",
 	}
 
 	var toolLines []string

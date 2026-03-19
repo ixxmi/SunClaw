@@ -147,8 +147,12 @@ func (s *Service) AddJob(job *Job) error {
 
 	// Calculate initial next run time
 	if job.State.Enabled {
-		if _, err := job.CalculateNextRun(now); err != nil {
+		nextRun, err := job.CalculateNextRun(now)
+		if err != nil {
 			return fmt.Errorf("failed to calculate next run: %w", err)
+		}
+		if job.Schedule.Type == ScheduleTypeAt && nextRun.IsZero() {
+			return fmt.Errorf("failed to calculate next run: at schedule must be in the future")
 		}
 	}
 
@@ -188,8 +192,12 @@ func (s *Service) UpdateJob(id string, update func(*Job) error) error {
 
 	// Recalculate next run time
 	if job.State.Enabled {
-		if _, err := job.CalculateNextRun(time.Now()); err != nil {
+		nextRun, err := job.CalculateNextRun(time.Now())
+		if err != nil {
 			return fmt.Errorf("failed to calculate next run: %w", err)
+		}
+		if job.Schedule.Type == ScheduleTypeAt && nextRun.IsZero() {
+			return fmt.Errorf("failed to calculate next run: at schedule must be in the future")
 		}
 	}
 

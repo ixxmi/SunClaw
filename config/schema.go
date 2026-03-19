@@ -131,16 +131,21 @@ type ChannelsConfig struct {
 type ChannelAccountConfig struct {
 	Enabled           bool     `mapstructure:"enabled" json:"enabled"`
 	Name              string   `mapstructure:"name" json:"name"`                             // 账号显示名称
+	Mode              string   `mapstructure:"mode" json:"mode"`                             // 通道接入模式（如 webhook / websocket）
 	Token             string   `mapstructure:"token" json:"token"`                           // Telegram token
 	AppID             string   `mapstructure:"app_id" json:"app_id"`                         // QQ/Feishu/WeWork app_id
 	AppSecret         string   `mapstructure:"app_secret" json:"app_secret"`                 // QQ/Feishu app_secret
 	CorpID            string   `mapstructure:"corp_id" json:"corp_id"`                       // 企业微信 corp_id
 	AgentID           string   `mapstructure:"agent_id" json:"agent_id"`                     // 企业微信 agent_id
+	BotID             string   `mapstructure:"bot_id" json:"bot_id"`                         // 企业微信智能机器人 bot_id
+	BotSecret         string   `mapstructure:"bot_secret" json:"bot_secret"`                 // 企业微信智能机器人长连接密钥
 	ClientID          string   `mapstructure:"client_id" json:"client_id"`                   // 钉钉 client_id
 	ClientSecret      string   `mapstructure:"client_secret" json:"client_secret"`           // 钉钉 client_secret
 	BridgeURL         string   `mapstructure:"bridge_url" json:"bridge_url"`                 // WhatsApp bridge url
 	WebhookURL        string   `mapstructure:"webhook_url" json:"webhook_url"`               // Infoflow/Feishu webhook url
+	WebSocketURL      string   `mapstructure:"websocket_url" json:"websocket_url"`           // WebSocket 接入地址
 	AESKey            string   `mapstructure:"aes_key" json:"aes_key"`                       // Infoflow AES key
+	EncodingAESKey    string   `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`     // 企业微信 EncodingAESKey
 	EncryptKey        string   `mapstructure:"encrypt_key" json:"encrypt_key"`               // Feishu encrypt key
 	VerificationToken string   `mapstructure:"verification_token" json:"verification_token"` // Feishu verification token
 	WebhookPort       int      `mapstructure:"webhook_port" json:"webhook_port"`             // Infoflow/Feishu webhook port
@@ -214,9 +219,13 @@ type QQChannelConfig struct {
 // WeWorkChannelConfig 企业微信通道配置
 type WeWorkChannelConfig struct {
 	Enabled        bool     `mapstructure:"enabled" json:"enabled"`
+	Mode           string   `mapstructure:"mode" json:"mode"` // webhook / websocket
 	CorpID         string   `mapstructure:"corp_id" json:"corp_id"`
 	AgentID        string   `mapstructure:"agent_id" json:"agent_id"`
 	Secret         string   `mapstructure:"secret" json:"secret"`
+	BotID          string   `mapstructure:"bot_id" json:"bot_id"`
+	BotSecret      string   `mapstructure:"bot_secret" json:"bot_secret"`
+	WebSocketURL   string   `mapstructure:"websocket_url" json:"websocket_url"`
 	Token          string   `mapstructure:"token" json:"token"`
 	EncodingAESKey string   `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`
 	WebhookPort    int      `mapstructure:"webhook_port" json:"webhook_port"`

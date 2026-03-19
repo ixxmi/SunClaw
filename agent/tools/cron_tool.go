@@ -226,6 +226,9 @@ func (t *CronTool) execAdd(ctx context.Context, args []string) (string, error) {
 			Enabled: true,
 		},
 	}
+	if payload.Type == cron.PayloadTypeAgentTurn {
+		job.Conversation = buildConversationContextFromToolContext(ctx)
+	}
 
 	if err := t.service.AddJob(job); err != nil {
 		return "", fmt.Errorf("failed to add job: %w", err)

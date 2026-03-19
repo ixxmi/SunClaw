@@ -84,7 +84,8 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 		return err
 	}
 
-	logger.Info("Starting Telegram channel")
+	logger.Info("Starting Telegram channel",
+		zap.String("account_id", c.AccountID()))
 
 	// 获取 bot 信息
 	bot, err := c.bot.GetMe()
@@ -97,10 +98,27 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 		zap.String("bot_id", strconv.FormatInt(bot.ID, 10)),
 	)
 
+	// Telegram long polling cannot work while a webhook is configured.
+	// Always clear any stale webhook before starting getUpdates.
+	deleteWebhook := telegrambot.DeleteWebhookConfig{
+		DropPendingUpdates: false,
+	}
+	if _, err := c.bot.Request(deleteWebhook); err != nil {
+		return fmt.Errorf("failed to clear telegram webhook before long polling: %w", err)
+	}
+
 	// 启动消息处理
 	go c.receiveUpdates(ctx)
 
 	return nil
+}
+
+// Stop 停止 Telegram 通道
+func (c *TelegramChannel) Stop() error {
+	if c.bot != nil {
+		c.bot.StopReceivingUpdates()
+	}
+	return c.BaseChannelImpl.Stop()
 }
 
 // receiveUpdates 接收更新
@@ -288,13 +306,8 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 	tgMsg := telegrambot.NewMessage(chatID, msg.Content)
 
 	// 解析回复
-	if msg.ReplyTo != "" {
-		replyToID, err := strconv.Atoi(msg.ReplyTo)
-		if err == nil {
-			tgMsg.ReplyToMessageID = replyToID
-		} else {
-			logger.Warn("Invalid reply_to id for telegram", zap.String("id", msg.ReplyTo), zap.Error(err))
-		}
+	if replyToID, ok := parseTelegramReplyToID(msg.ReplyTo); ok {
+		tgMsg.ReplyToMessageID = replyToID
 	}
 
 	_, err = c.bot.Send(tgMsg)
@@ -311,12 +324,7 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 }
 
 func (c *TelegramChannel) sendUnifiedMediaMessage(chatID int64, media bus.Media, caption, replyTo string) error {
-	replyToID := 0
-	if replyTo != "" {
-		if parsed, err := strconv.Atoi(replyTo); err == nil {
-			replyToID = parsed
-		}
-	}
+	replyToID, _ := parseTelegramReplyToID(replyTo)
 
 	t := NormalizeMediaType(media.Type)
 	if t == UnifiedMediaImage {
@@ -364,6 +372,23 @@ func (c *TelegramChannel) sendUnifiedMediaMessage(chatID int64, media bus.Media,
 	}
 
 	return fmt.Errorf("unsupported telegram media type: %s", media.Type)
+}
+
+func parseTelegramReplyToID(replyTo string) (int, bool) {
+	trimmed := strings.TrimSpace(replyTo)
+	if trimmed == "" {
+		return 0, false
+	}
+
+	replyToID, err := strconv.Atoi(trimmed)
+	if err != nil || replyToID <= 0 {
+		logger.Debug("Ignoring non-numeric telegram reply_to",
+			zap.String("id", trimmed),
+			zap.Error(err))
+		return 0, false
+	}
+
+	return replyToID, true
 }
 
 // SendTypingIndicator 发送正在输入指示器

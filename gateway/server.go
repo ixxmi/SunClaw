@@ -34,9 +34,11 @@ var upgrader = websocket.Upgrader{
 type Server struct {
 	config        *config.Config
 	wsConfig      *WebSocketConfig
+	configPath    string
 	bus           *bus.MessageBus
 	channelMgr    *channels.Manager
 	sessionMgr    *session.Manager
+	cronSvc       *cron.Service
 	server        *http.Server
 	wsServer      *http.Server
 	handler       *Handler
@@ -47,6 +49,8 @@ type Server struct {
 	enableAuth    bool
 	authToken     string
 	acpMgr        interface{} // ACP manager - will be set if ACP is enabled
+	runtimeCtx    context.Context
+	configApplier func(context.Context, *config.Config) error
 }
 
 // WebSocketConfig WebSocket 配置
@@ -69,18 +73,33 @@ type WebSocketConfig struct {
 
 // NewServer 创建网关服务器
 func NewServer(cfg *config.Config, messageBus *bus.MessageBus, channelMgr *channels.Manager, sessionMgr *session.Manager, cronSvc *cron.Service, acpMgr interface{}) *Server {
-	// 从配置文件获取 WebSocket 设置，如果未配置则使用默认值
+	wsConfig := buildWebSocketConfig(cfg)
+
+	return &Server{
+		config:      cfg,
+		wsConfig:    wsConfig,
+		bus:         messageBus,
+		channelMgr:  channelMgr,
+		sessionMgr:  sessionMgr,
+		cronSvc:     cronSvc,
+		handler:     NewHandler(messageBus, sessionMgr, channelMgr, cronSvc, acpMgr, cfg),
+		connections: make(map[string]*Connection),
+		acpMgr:      acpMgr,
+	}
+}
+
+func buildWebSocketConfig(cfg *config.Config) *WebSocketConfig {
 	wsPort := cfg.Gateway.WebSocket.Port
 	if wsPort == 0 {
-		wsPort = 28789 // 默认端口
+		wsPort = 28789
 	}
 	wsHost := cfg.Gateway.WebSocket.Host
 	if wsHost == "" {
-		wsHost = "0.0.0.0" // 默认监听地址
+		wsHost = "0.0.0.0"
 	}
 	wsPath := cfg.Gateway.WebSocket.Path
 	if wsPath == "" {
-		wsPath = "/ws" // 默认路径
+		wsPath = "/ws"
 	}
 	pingInterval := cfg.Gateway.WebSocket.PingInterval
 	if pingInterval == 0 {
@@ -99,26 +118,17 @@ func NewServer(cfg *config.Config, messageBus *bus.MessageBus, channelMgr *chann
 		writeTimeout = 10 * time.Second
 	}
 
-	return &Server{
-		config: cfg,
-		wsConfig: &WebSocketConfig{
-			Host:           wsHost,
-			Port:           wsPort,
-			Path:           wsPath,
-			EnableAuth:     cfg.Gateway.WebSocket.EnableAuth,
-			AuthToken:      cfg.Gateway.WebSocket.AuthToken,
-			PingInterval:   pingInterval,
-			PongTimeout:    pongTimeout,
-			ReadTimeout:    readTimeout,
-			WriteTimeout:   writeTimeout,
-			MaxMessageSize: 10 * 1024 * 1024, // 10MB
-		},
-		bus:         messageBus,
-		channelMgr:  channelMgr,
-		sessionMgr:  sessionMgr,
-		handler:     NewHandler(messageBus, sessionMgr, channelMgr, cronSvc, acpMgr, cfg),
-		connections: make(map[string]*Connection),
-		acpMgr:      acpMgr,
+	return &WebSocketConfig{
+		Host:           wsHost,
+		Port:           wsPort,
+		Path:           wsPath,
+		EnableAuth:     cfg.Gateway.WebSocket.EnableAuth,
+		AuthToken:      cfg.Gateway.WebSocket.AuthToken,
+		PingInterval:   pingInterval,
+		PongTimeout:    pongTimeout,
+		ReadTimeout:    readTimeout,
+		WriteTimeout:   writeTimeout,
+		MaxMessageSize: 10 * 1024 * 1024,
 	}
 }
 
@@ -131,6 +141,49 @@ func (s *Server) SetWebSocketConfig(cfg *WebSocketConfig) {
 	s.authToken = cfg.AuthToken
 }
 
+func (s *Server) SetConfigPath(configPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configPath = configPath
+}
+
+func (s *Server) SetConfigApplier(applier func(context.Context, *config.Config) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configApplier = applier
+}
+
+func (s *Server) ConfigPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configPath
+}
+
+func (s *Server) ApplyConfig(cfg *config.Config) error {
+	s.mu.Lock()
+	s.config = cfg
+	s.wsConfig = buildWebSocketConfig(cfg)
+	s.enableAuth = s.wsConfig.EnableAuth
+	s.authToken = s.wsConfig.AuthToken
+	runtimeCtx := s.runtimeCtx
+	applier := s.configApplier
+	if s.handler != nil {
+		s.handler.SetConfig(cfg)
+	}
+	s.mu.Unlock()
+
+	if applier != nil {
+		if runtimeCtx == nil {
+			return fmt.Errorf("runtime context is not ready")
+		}
+		if err := applier(runtimeCtx, cfg); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Start 启动服务器
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -139,6 +192,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("server already running")
 	}
 	s.running = true
+	s.runtimeCtx = ctx
 	s.mu.Unlock()
 
 	// 启动 HTTP 服务器
@@ -176,6 +230,15 @@ func (s *Server) startHTTPServer(ctx context.Context) error {
 
 	// Channels API 端点
 	mux.HandleFunc("/api/channels", s.handleChannelsAPI)
+
+	// Dashboard API 端点
+	mux.HandleFunc("/api/dashboard", s.handleDashboardAPI)
+
+	// Control config API
+	mux.HandleFunc("/api/control-config", s.handleControlConfigAPI)
+
+	// Dashboard UI
+	s.mountDashboardUI(mux)
 
 	// 飞书 webhook 端点
 	mux.HandleFunc("/webhook/feishu", s.handleFeishuWebhook)
@@ -219,6 +282,15 @@ func (s *Server) startWebSocketServer(ctx context.Context) error {
 	// Channels API 端点
 	mux.HandleFunc("/api/channels", s.handleChannelsAPI)
 
+	// Dashboard API 端点
+	mux.HandleFunc("/api/dashboard", s.handleDashboardAPI)
+
+	// Control config API
+	mux.HandleFunc("/api/control-config", s.handleControlConfigAPI)
+
+	// Dashboard UI
+	s.mountDashboardUI(mux)
+
 	// 创建 WebSocket 服务器
 	s.wsServer = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", s.wsConfig.Host, s.wsConfig.Port),
@@ -250,6 +322,7 @@ func (s *Server) Stop() error {
 		return nil
 	}
 	s.running = false
+	s.runtimeCtx = nil
 	s.mu.Unlock()
 
 	// 关闭所有 WebSocket 连接

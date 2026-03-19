@@ -97,6 +97,7 @@ func (b *MessageBus) PublishOutbound(ctx context.Context, msg *OutboundMessage) 
 	logger.Info("Publishing outbound message to bus",
 		zap.String("id", msg.ID),
 		zap.String("channel", msg.Channel),
+		zap.String("account_id", msg.AccountID),
 		zap.String("chat_id", msg.ChatID),
 		zap.Int("content_length", len(msg.Content)),
 		zap.Int("outbound_queue_size", len(b.outbound)))
@@ -135,6 +136,7 @@ func (b *MessageBus) ConsumeOutbound(ctx context.Context) (*OutboundMessage, err
 		logger.Debug("Outbound message consumed from bus",
 			zap.String("id", msg.ID),
 			zap.String("channel", msg.Channel),
+			zap.String("account_id", msg.AccountID),
 			zap.String("chat_id", msg.ChatID),
 			zap.Int("content_length", len(msg.Content)))
 		return msg, nil

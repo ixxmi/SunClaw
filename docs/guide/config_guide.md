@@ -231,6 +231,7 @@ When a profile fails:
   "channels": {
     "wework": {
       "enabled": true,
+      "mode": "webhook",
       "corp_id": "your-corp-id",
       "agent_id": "your-agent-id",
       "secret": "your-secret",
@@ -238,6 +239,23 @@ When a profile fails:
       "encoding_aes_key": "your-aes-key",
       "webhook_port": 8082,
       "allowed_ids": ["user-id", "department-id"]
+    }
+  }
+}
+```
+
+WebSocket long-connection mode:
+
+```json
+{
+  "channels": {
+    "wework": {
+      "enabled": true,
+      "mode": "websocket",
+      "bot_id": "your-bot-id",
+      "bot_secret": "your-bot-secret",
+      "websocket_url": "wss://openws.work.weixin.qq.com",
+      "allowed_ids": ["user-id", "group-chat-id"]
     }
   }
 }

@@ -29,6 +29,10 @@ type WeWorkChannel struct {
 	corpID         string
 	agentID        string
 	secret         string
+	mode           string
+	botID          string
+	botSecret      string
+	webSocketURL   string
 	token          string
 	encodingAESKey string
 	webhookPort    int
@@ -39,12 +43,23 @@ type WeWorkChannel struct {
 	mu               sync.Mutex
 	httpClient       *http.Client
 	responseURLCache map[string][]string // chatID -> response_url 队列（FIFO），避免并发覆盖
+	longConn         *weworkLongConnState
 }
 
 // NewWeWorkChannel 创建企业微信通道
 func NewWeWorkChannel(accountID string, cfg config.WeWorkChannelConfig, bus *bus.MessageBus) (*WeWorkChannel, error) {
-	if cfg.CorpID == "" || cfg.Secret == "" || cfg.AgentID == "" {
-		return nil, fmt.Errorf("wework corp_id, secret and agent_id are required")
+	mode := normalizeWeWorkChannelMode(cfg.Mode)
+	switch mode {
+	case "websocket":
+		if cfg.BotID == "" || cfg.BotSecret == "" {
+			return nil, fmt.Errorf("wework bot_id and bot_secret are required in websocket mode")
+		}
+	case "webhook":
+		if cfg.CorpID == "" || cfg.Secret == "" || cfg.AgentID == "" {
+			return nil, fmt.Errorf("wework corp_id, secret and agent_id are required in webhook mode")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported wework mode: %s", cfg.Mode)
 	}
 
 	baseCfg := BaseChannelConfig{
@@ -62,6 +77,10 @@ func NewWeWorkChannel(accountID string, cfg config.WeWorkChannelConfig, bus *bus
 		corpID:          cfg.CorpID,
 		agentID:         cfg.AgentID,
 		secret:          cfg.Secret,
+		mode:            mode,
+		botID:           cfg.BotID,
+		botSecret:       cfg.BotSecret,
+		webSocketURL:    resolveWeWorkWebSocketURL(cfg.WebSocketURL),
 		token:           cfg.Token,
 		encodingAESKey:  cfg.EncodingAESKey,
 		webhookPort:     port,
@@ -69,6 +88,7 @@ func NewWeWorkChannel(accountID string, cfg config.WeWorkChannelConfig, bus *bus
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		longConn: newWeWorkLongConnState(),
 	}, nil
 }
 
@@ -78,9 +98,13 @@ func (c *WeWorkChannel) Start(ctx context.Context) error {
 		return err
 	}
 
-	logger.Info("Starting WeWork channel")
+	logger.Info("Starting WeWork channel", zap.String("mode", c.mode))
 
-	// 启动 Webhook 服务器
+	if c.mode == "websocket" {
+		go c.startLongConnLoop(ctx)
+		return nil
+	}
+
 	go c.startWebhookServer(ctx)
 
 	return nil
@@ -381,6 +405,10 @@ func (c *WeWorkChannel) getAccessToken() (string, error) {
 // Send 发送消息
 // 优先级：AI Bot response_url > 普通应用消息 API（access_token）
 func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
+	if c.mode == "websocket" {
+		return c.sendLongConnMessage(msg)
+	}
+
 	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
 		UnifiedMediaImage: true,
 		UnifiedMediaFile:  true,
@@ -462,6 +490,22 @@ func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
 	return nil
 }
 
+func normalizeWeWorkChannelMode(mode string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(mode))
+	if trimmed == "" {
+		return "webhook"
+	}
+	return trimmed
+}
+
+func resolveWeWorkWebSocketURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "wss://openws.work.weixin.qq.com"
+	}
+	return trimmed
+}
+
 // extractWeWorkEncrypt 已不再使用（统一改为 JSON 解析），保留备用
 func extractWeWorkEncrypt(body []byte) string {
 	trimmed := bytes.TrimSpace(body)
@@ -499,7 +543,8 @@ type weworkAiBotTextContent struct {
 
 // weworkAiBotImageContent 图片结构体
 type weworkAiBotImageContent struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	AESKey string `json:"aeskey,omitempty"`
 }
 
 // weworkAiBotVoiceContent 语音结构体（已转成文本）
@@ -509,7 +554,8 @@ type weworkAiBotVoiceContent struct {
 
 // weworkAiBotFileContent 文件结构体
 type weworkAiBotFileContent struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	AESKey string `json:"aeskey,omitempty"`
 }
 
 // weworkAiBotMixedItem 图文混排中的单条消息
@@ -543,6 +589,7 @@ type weworkAiBotQuote struct {
 //
 // msgtype 取值：text / image / mixed / voice / file / stream
 type weworkAiBotMessage struct {
+	CreateTime  int64  `json:"create_time,omitempty"`
 	MsgID       string `json:"msgid"`
 	AiBotID     string `json:"aibotid"`
 	ChatID      string `json:"chatid"`   // 仅群聊时存在
@@ -561,6 +608,7 @@ type weworkAiBotMessage struct {
 	Voice  *weworkAiBotVoiceContent  `json:"voice,omitempty"`
 	File   *weworkAiBotFileContent   `json:"file,omitempty"`
 	Stream *weworkAiBotStreamContent `json:"stream,omitempty"`
+	Event  map[string]interface{}    `json:"event,omitempty"`
 
 	// 引用消息（可选，text/mixed 消息时可能附带）
 	Quote *weworkAiBotQuote `json:"quote,omitempty"`

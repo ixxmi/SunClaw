@@ -949,11 +949,11 @@ func (m *AgentManager) handleAgentSwitchCommand(ctx context.Context, cmd *agentS
 
 	// 发布回复消息
 	outbound := &bus.OutboundMessage{
-		Channel: msg.Channel,
-		//AccountID: msg.AccountID,
+		Channel:   msg.Channel,
+		AccountID: msg.AccountID,
 		ChatID:    msg.ChatID,
 		Content:   replyText,
-		ReplyTo:   msg.ID,
+		ReplyTo:   outboundReplyTarget(msg),
 		Timestamp: msg.Timestamp,
 	}
 	return m.bus.PublishOutbound(ctx, outbound)
@@ -969,6 +969,46 @@ func formatAgentIDList(ids []string) string {
 		quoted[i] = "`" + id + "`"
 	}
 	return strings.Join(quoted, ", ")
+}
+
+func outboundReplyTarget(msg *bus.InboundMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	if msg.Metadata != nil {
+		for _, key := range []string{"message_id", "platform_message_id"} {
+			if raw, ok := msg.Metadata[key]; ok {
+				if replyTo := stringifyReplyTarget(raw); replyTo != "" {
+					return replyTo
+				}
+			}
+		}
+	}
+
+	replyTo := strings.TrimSpace(msg.ID)
+	if replyTo == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(replyTo); err == nil {
+		return ""
+	}
+	return replyTo
+}
+
+func stringifyReplyTarget(raw interface{}) string {
+	if raw == nil {
+		return ""
+	}
+
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case fmt.Stringer:
+		return strings.TrimSpace(value.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 func isNewSessionCommand(content string) bool {
@@ -1137,7 +1177,7 @@ func (m *AgentManager) resetSessionContextIfNeeded(ctx context.Context, msg *bus
 		Content:   []ContentBlock{TextContent{Text: fmt.Sprintf("已开启新会话，session_id: %s", newSessionID)}},
 		Timestamp: time.Now().UnixMilli(),
 	}
-	m.publishToBus(ctx, msg.Channel, msg.ChatID, ack, msg.ID)
+	m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), ack, outboundReplyTarget(msg))
 
 	logger.Info("Session context reset by /new command",
 		zap.String("session_key", sessionKey),
@@ -1181,6 +1221,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 		logger.Debug("[Manager] Creating fresh session", zap.String("session_key", sessionKey))
 	}
 	logger.Debug("[Manager] Creating fresh session", zap.String("session_key", sessionKey))
+	replyTo := outboundReplyTarget(msg)
 
 	// 获取或创建会话
 	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
@@ -1278,7 +1319,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 				}
 				m.updateSession(sess, finalMessages, 0)
 				if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
-					m.publishToBus(ctx, msg.Channel, msg.ChatID, *replyMsg, msg.ID)
+					m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 				}
 				return nil
 			}
@@ -1290,7 +1331,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 			logger.Warn("Agent error but publishing last assistant message",
 				zap.Error(err))
 			m.updateSession(sess, finalMessages, len(history))
-			m.publishToBus(ctx, msg.Channel, msg.ChatID, *replyMsg, msg.ID)
+			m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 			return nil
 		}
 
@@ -1303,7 +1344,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 
 	// 发布响应
 	if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
-		m.publishToBus(ctx, msg.Channel, msg.ChatID, *replyMsg, msg.ID)
+		m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 	}
 
 	return nil
@@ -1334,9 +1375,10 @@ func (m *AgentManager) handleDirectCronOneShot(ctx context.Context, msg *bus.Inb
 		Content:   []ContentBlock{TextContent{Text: fmt.Sprintf("收到，开始手工执行一次任务 `%s`。", jobID)}},
 		Timestamp: time.Now().UnixMilli(),
 	}
-	m.publishToBus(ctx, msg.Channel, msg.ChatID, ack, msg.ID)
+	m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), ack, outboundReplyTarget(msg))
 
-	go func(channel, chatID, replyTo, id string) {
+	outboundMetadata := buildOutboundMetadataFromInbound(msg)
+	go func(channel, accountID, chatID, replyTo, id string, metadata map[string]interface{}) {
 		runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		_, runErr := m.tools.Execute(runCtx, "cron", map[string]interface{}{
@@ -1353,8 +1395,8 @@ func (m *AgentManager) handleDirectCronOneShot(ctx context.Context, msg *bus.Inb
 			Content:   []ContentBlock{TextContent{Text: text}},
 			Timestamp: time.Now().UnixMilli(),
 		}
-		m.publishToBus(context.Background(), channel, chatID, done, replyTo)
-	}(msg.Channel, msg.ChatID, msg.ID, jobID)
+		m.publishToBus(context.Background(), channel, accountID, chatID, metadata, done, replyTo)
+	}(msg.Channel, msg.AccountID, msg.ChatID, msg.ID, jobID, outboundMetadata)
 
 	return true, nil
 }
@@ -1510,7 +1552,7 @@ func (m *AgentManager) runAcpThreadBindingTurn(ctx context.Context, sessionKey s
 		Content:   []ContentBlock{TextContent{Text: reply}},
 		Timestamp: time.Now().UnixMilli(),
 	}
-	m.publishToBus(ctx, msg.Channel, msg.ChatID, outbound, msg.ID)
+	m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), outbound, outboundReplyTarget(msg))
 }
 
 func (m *AgentManager) publishAcpThreadBindingError(ctx context.Context, msg *bus.InboundMessage, text string) {
@@ -1522,7 +1564,7 @@ func (m *AgentManager) publishAcpThreadBindingError(ctx context.Context, msg *bu
 		Content:   []ContentBlock{TextContent{Text: text}},
 		Timestamp: time.Now().UnixMilli(),
 	}
-	m.publishToBus(ctx, msg.Channel, msg.ChatID, outbound, msg.ID)
+	m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), outbound, outboundReplyTarget(msg))
 }
 
 // updateSession 更新会话
@@ -1537,14 +1579,16 @@ func (m *AgentManager) updateSession(sess *session.Session, messages []AgentMess
 }
 
 // publishToBus 发布消息到总线
-func (m *AgentManager) publishToBus(ctx context.Context, channel, chatID string, msg AgentMessage, replyTo string) {
+func (m *AgentManager) publishToBus(ctx context.Context, channel, accountID, chatID string, metadata map[string]interface{}, msg AgentMessage, replyTo string) {
 	content := extractTextContent(msg)
 
 	outbound := &bus.OutboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		Content:   content,
 		ReplyTo:   replyTo,
+		Metadata:  metadata,
 		Timestamp: time.Unix(msg.Timestamp/1000, 0),
 	}
 
@@ -1647,6 +1691,41 @@ func (m *AgentManager) Stop() error {
 			logger.Error("Failed to stop agent",
 				zap.String("agent_id", id),
 				zap.Error(err))
+		}
+	}
+
+	return nil
+}
+
+// ReloadBindings replaces runtime channel bindings with the current config values.
+func (m *AgentManager) ReloadBindings(cfg *config.Config) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cfg = cfg
+	m.bindings = make(map[string]*BindingEntry)
+
+	m.defaultAgent = nil
+	m.defaultAgentID = ""
+	for _, agentCfg := range cfg.Agents.List {
+		if !agentCfg.Default {
+			continue
+		}
+		m.defaultAgentID = agentCfg.ID
+		m.defaultAgent = m.agents[agentCfg.ID]
+		break
+	}
+	if m.defaultAgent == nil && m.defaultAgentID == "" {
+		for agentID, agent := range m.agents {
+			m.defaultAgentID = agentID
+			m.defaultAgent = agent
+			break
+		}
+	}
+
+	for _, binding := range cfg.Bindings {
+		if err := m.setupBinding(binding); err != nil {
+			return err
 		}
 	}
 

@@ -130,6 +130,56 @@ func (e *JobExecutor) Execute(ctx context.Context, job *Job) error {
 	return nil
 }
 
+func cloneConversationMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if len(metadata) == 0 {
+		return make(map[string]interface{})
+	}
+	cloned := make(map[string]interface{}, len(metadata)+4)
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func buildScheduledInbound(job *Job) *bus.InboundMessage {
+	msg := &bus.InboundMessage{
+		Channel:  "cron",
+		SenderID: job.ID,
+		Content:  job.Payload.Message,
+		Metadata: map[string]interface{}{
+			"job_id":    job.ID,
+			"job_name":  job.Name,
+			"scheduled": true,
+			"is_cron":   true,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if job.Conversation == nil {
+		return msg
+	}
+
+	if job.Conversation.Channel != "" {
+		msg.Channel = job.Conversation.Channel
+	}
+	msg.AccountID = job.Conversation.AccountID
+	if job.Conversation.ChatID != "" {
+		msg.ChatID = job.Conversation.ChatID
+	}
+	if job.Conversation.SenderID != "" {
+		msg.SenderID = job.Conversation.SenderID
+	}
+
+	metadata := cloneConversationMetadata(job.Conversation.Metadata)
+	metadata["job_id"] = job.ID
+	metadata["job_name"] = job.Name
+	metadata["scheduled"] = true
+	metadata["is_cron"] = true
+	msg.Metadata = metadata
+
+	return msg
+}
+
 // executeSystemEvent executes a system event job
 func (e *JobExecutor) executeSystemEvent(ctx context.Context, job *Job) error {
 	// Publish system event to bus
@@ -153,20 +203,7 @@ func (e *JobExecutor) executeSystemEvent(ctx context.Context, job *Job) error {
 // executeAgentTurn executes an agent turn job
 func (e *JobExecutor) executeAgentTurn(ctx context.Context, job *Job) error {
 	// Publish message to bus for agent processing
-	msg := &bus.InboundMessage{
-		Channel:  "cron",
-		SenderID: job.ID,
-		Content:  job.Payload.Message,
-		Metadata: map[string]interface{}{
-			"job_id":    job.ID,
-			"job_name":  job.Name,
-			"scheduled": true,
-			"is_cron":   true,
-		},
-		Timestamp: time.Now(),
-	}
-
-	return e.bus.PublishInbound(ctx, msg)
+	return e.bus.PublishInbound(ctx, buildScheduledInbound(job))
 }
 
 // deliverResult delivers the job result
