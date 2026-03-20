@@ -75,6 +75,12 @@ func NewTUIAgent(
 		_ = toolRegistry.RegisterExisting(tool)
 	}
 
+	// Register proactive messaging tools
+	messageTool := tools.NewMessageTool(messageBus, workspace, []string{}, []string{})
+	for _, tool := range messageTool.GetTools() {
+		_ = toolRegistry.RegisterExisting(tool)
+	}
+
 	// Register browser tool
 	browserTool := tools.NewBrowserTool(true, 30)
 	for _, tool := range browserTool.GetTools() {

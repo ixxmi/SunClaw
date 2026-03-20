@@ -283,6 +283,14 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// 注册主动消息工具
+	messageTool := tools.NewMessageTool(messageBus, workspaceDir, cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths)
+	for _, tool := range messageTool.GetTools() {
+		if err := toolRegistry.RegisterExisting(tool); err != nil {
+			logger.Warn("Failed to register tool", zap.String("tool", tool.Name()), zap.Error(err))
+		}
+	}
+
 	// 注册浏览器工具（如果启用）
 	if cfg.Tools.Browser.Enabled {
 		browserTool := tools.NewBrowserTool(

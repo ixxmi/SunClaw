@@ -409,10 +409,12 @@ func (b *ContextBuilder) buildMessagingSection() string {
 - Cross-session messaging → use appropriate session tools
 - '[System Message] ...' blocks are internal context and are not user-visible by default
 
-### message tool
-- Use 'message' for proactive sends + channel actions (polls, reactions, etc.)
-- For 'action=send', include 'to' and 'message'
-- If you use 'message' ('action=send') to deliver your user-visible reply, respond with ONLY: SILENT_REPLY (avoid duplicate replies)`
+### proactive messaging tools
+- Use 'send_message' to push proactive text updates to the current chat
+- Use 'send_file' to send an image or file to the current chat; it supports local file paths, remote URLs, or base64 data
+- 'message' is a legacy alias for 'send_message'
+- These tools default to the current channel/chat/account, so only pass routing params when you want to override the current conversation
+- If you use 'send_message', 'send_file', or 'message' to deliver your user-visible reply, respond with ONLY: SILENT_REPLY (avoid duplicate replies)`
 }
 
 // buildSilentReplies 构建静默回复规则

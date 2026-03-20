@@ -173,6 +173,14 @@ func runAgent(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// Register proactive messaging tools
+	messageTool := tools.NewMessageTool(messageBus, workspace, cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths)
+	for _, tool := range messageTool.GetTools() {
+		if err := toolRegistry.RegisterExisting(tool); err != nil && agentVerbose {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to register tool %s: %v\n", tool.Name(), err)
+		}
+	}
+
 	// Register browser tool if enabled
 	if cfg.Tools.Browser.Enabled {
 		browserTool := tools.NewBrowserTool(
