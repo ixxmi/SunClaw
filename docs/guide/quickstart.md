@@ -25,7 +25,7 @@ cd goclaw
 go mod tidy
 
 # 编译二进制文件
-go build -o goclaw .
+go build -o goclaw ./cmd/goclaw
 ```
 
 或者使用 Makefile：

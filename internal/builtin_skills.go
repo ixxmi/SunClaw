@@ -8,7 +8,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/smallnest/goclaw/config"
+	"github.com/smallnest/goclaw/internal/core/config"
 )
 
 //go:embed builtin_skills config.example.yaml

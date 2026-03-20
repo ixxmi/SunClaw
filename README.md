@@ -65,7 +65,7 @@ SunClaw 支持在聊天中直接切换 Agent：
 git clone https://github.com/smallnest/goclaw.git
 cd goclaw
 go mod tidy
-go build -o goclaw .
+go build -o goclaw ./cmd/goclaw
 ```
 
 ### 3. 初始化配置
@@ -143,7 +143,7 @@ go build -o goclaw .
 完整配置可参考：
 
 - `config.yaml`
-- `internal/config.example.json`
+- `internal/config.example.yaml`
 
 ### 5. 启动服务
 
@@ -220,21 +220,37 @@ Skills 加载目录优先级：
 
 ## 项目结构
 
+当前目录已按“入口层 / 装配层 / 核心层 / 平台层”整理，源码主入口统一放到 `cmd/goclaw`。
+
 ```text
 goclaw/
-├── agent/          # Agent 核心逻辑、调度、路由、工具接入
-├── channels/       # 聊天渠道接入
-├── bus/            # 消息总线
-├── config/         # 配置加载与校验
-├── providers/      # 大模型 Provider
-├── session/        # 会话管理
-├── gateway/        # WebSocket Gateway
-├── cli/            # 命令行入口
-├── cron/           # 定时任务调度
-├── memory/         # 记忆与检索
+├── cmd/
+│   └── goclaw/             # 可执行入口
+├── internal/
+│   ├── app/
+│   │   ├── cli/            # CLI 装配层
+│   │   └── gateway/        # Gateway 装配层
+│   ├── core/
+│   │   ├── agent/          # Agent 核心逻辑、调度、工具接入
+│   │   ├── channels/       # 聊天渠道接入
+│   │   ├── bus/            # 消息总线
+│   │   ├── config/         # 配置加载与校验
+│   │   ├── providers/      # 大模型 Provider
+│   │   ├── session/        # 会话管理
+│   │   ├── cron/           # 定时任务调度
+│   │   ├── memory/         # 记忆与检索
+│   │   └── acp/            # ACP 协议与运行时
+│   ├── platform/
+│   │   ├── errors/         # 错误分类与诊断
+│   │   └── pairing/        # 配对流程
+│   ├── logger/             # 日志能力
+│   └── workspace/          # 工作区模板与资源
+├── ui/                     # 管理界面资源
 ├── docs/           # 补充文档
-└── main.go         # 主入口
+└── docker/         # 容器与沙箱配置
 ```
+
+更完整的目录约束见 [docs/project-layout.md](docs/project-layout.md)。
 
 ## 推荐阅读
 

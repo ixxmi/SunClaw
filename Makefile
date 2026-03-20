@@ -11,6 +11,7 @@ GOFMT=gofmt
 GOVET=$(GOCMD) vet
 BINARY_NAME=sunclaw
 BUILD_DIR=.
+APP_PKG=./cmd/goclaw
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 DOCKER_IMAGE=sunclaw
 DOCKER_TAG=$(VERSION)
@@ -45,7 +46,7 @@ help:
 build: ui-build
 	@echo "$(COLOR_BLUE)Building $(BINARY_NAME)...$(COLOR_RESET)"
 	@mkdir -p $(BUILD_DIR)
-	$(GOBUILD) -ldflags="-X 'main.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) .
+	$(GOBUILD) -ldflags="-X 'main.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) $(APP_PKG)
 
 ## ui-build: Build the embedded admin UI bundle
 ui-build: $(UI_DIST)
@@ -153,12 +154,12 @@ install-tools:
 ## run: Run the application
 run: ui-build
 	@echo "$(COLOR_BLUE)Running $(BINARY_NAME)...$(COLOR_RESET)"
-	$(GOCMD) run .
+	$(GOCMD) run $(APP_PKG)
 
 ## install: Install the binary to GOPATH/bin
 install: ui-build
 	@echo "$(COLOR_BLUE)Installing $(BINARY_NAME)...$(COLOR_RESET)"
-	$(GOCMD) install
+	$(GOCMD) install $(APP_PKG)
 
 ## docs: Generate documentation
 docs:
