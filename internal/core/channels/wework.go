@@ -3,15 +3,16 @@ package channels
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -176,27 +177,20 @@ func (c *WeWorkChannel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 尝试提取 encrypt 字段
-	// 有 encrypt → 加密回调（普通自建应用消息），需解密
-	// 无 encrypt → AI Bot 明文 JSON，直接解析
-	var envelope struct {
-		Encrypt string `json:"encrypt"`
-	}
-	_ = json.Unmarshal(trimmedBody, &envelope)
-
 	var plaintext []byte
-	if envelope.Encrypt != "" {
+	encrypt := extractWeWorkEncrypt(trimmedBody)
+	if encrypt != "" {
 		// 验签（使用 msg_signature 参数）
 		if c.token != "" {
-			if !c.verifySignature(c.token, timestamp, nonce, envelope.Encrypt, signature) {
+			if !c.verifySignature(c.token, timestamp, nonce, encrypt, signature) {
 				logger.Warn("Invalid signature for POST",
 					zap.String("received", signature),
-					zap.String("expected", c.computeSignature(c.token, timestamp, nonce, envelope.Encrypt)))
+					zap.String("expected", c.computeSignature(c.token, timestamp, nonce, encrypt)))
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 		}
-		plaintext, err = c.decryptMsg(envelope.Encrypt)
+		plaintext, err = c.decryptMsg(encrypt)
 		if err != nil {
 			logger.Error("Failed to decrypt message", zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
@@ -215,46 +209,231 @@ func (c *WeWorkChannel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 普通自建应用消息（解密后的 JSON）
-	var msg struct {
-		ToUserName   string `json:"tousername"`
-		FromUserName string `json:"fromusername"`
-		CreateTime   int64  `json:"createtime"`
-		MsgType      string `json:"msgtype"`
-		Content      string `json:"content"`
-		MsgID        string `json:"msgid"`
-		AgentID      string `json:"agentid"`
-	}
-	if err := json.Unmarshal(plaintext, &msg); err != nil {
-		logger.Error("Failed to unmarshal message JSON",
+	inMsg, err := c.decodeWebhookInboundMessage(plaintext)
+	if err != nil {
+		logger.Error("Failed to decode WeWork webhook inbound message",
 			zap.Error(err),
 			zap.String("plaintext", truncateWeWorkLog(string(plaintext), 300)))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	if !c.IsAllowed(msg.FromUserName) {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if msg.MsgType == "text" && msg.Content != "" {
-		inMsg := &bus.InboundMessage{
-			ID:        msg.MsgID,
-			Content:   msg.Content,
-			SenderID:  msg.FromUserName,
-			ChatID:    msg.FromUserName,
-			Channel:   c.Name(),
-			AccountID: c.AccountID(),
-			Timestamp: time.Unix(msg.CreateTime, 0),
-			Metadata: map[string]interface{}{
-				"agent_id": msg.AgentID,
-			},
+	if inMsg != nil {
+		if !c.IsAllowed(inMsg.SenderID) {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		_ = c.PublishInbound(context.Background(), inMsg)
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+type weworkWebhookMessageXML struct {
+	XMLName      xml.Name `xml:"xml"`
+	ToUserName   string   `xml:"ToUserName"`
+	FromUserName string   `xml:"FromUserName"`
+	CreateTime   int64    `xml:"CreateTime"`
+	MsgType      string   `xml:"MsgType"`
+	Content      string   `xml:"Content"`
+	MsgID        string   `xml:"MsgId"`
+	AgentID      string   `xml:"AgentID"`
+	PicURL       string   `xml:"PicUrl"`
+	MediaID      string   `xml:"MediaId"`
+	ThumbMediaID string   `xml:"ThumbMediaId"`
+	Format       string   `xml:"Format"`
+	Event        string   `xml:"Event"`
+	EventKey     string   `xml:"EventKey"`
+}
+
+type weworkWebhookMessageJSON struct {
+	ToUserName   string `json:"tousername"`
+	FromUserName string `json:"fromusername"`
+	CreateTime   int64  `json:"createtime"`
+	MsgType      string `json:"msgtype"`
+	Content      string `json:"content"`
+	MsgID        string `json:"msgid"`
+	AgentID      string `json:"agentid"`
+	PicURL       string `json:"picurl"`
+	MediaID      string `json:"mediaid"`
+	ThumbMediaID string `json:"thumbmediaid"`
+	Format       string `json:"format"`
+	Event        string `json:"event"`
+	EventKey     string `json:"eventkey"`
+}
+
+func (c *WeWorkChannel) decodeWebhookInboundMessage(plaintext []byte) (*bus.InboundMessage, error) {
+	trimmed := bytes.TrimSpace(plaintext)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+
+	if trimmed[0] == '<' {
+		var msg weworkWebhookMessageXML
+		if err := xml.Unmarshal(trimmed, &msg); err != nil {
+			return nil, fmt.Errorf("xml unmarshal failed: %w", err)
+		}
+		return c.buildWebhookInboundMessage(msg.FromUserName, msg.CreateTime, msg.MsgType, msg.Content, msg.MsgID, msg.AgentID, msg.PicURL, msg.MediaID, msg.Format)
+	}
+
+	var msg weworkWebhookMessageJSON
+	if err := json.Unmarshal(trimmed, &msg); err != nil {
+		return nil, fmt.Errorf("json unmarshal failed: %w", err)
+	}
+	return c.buildWebhookInboundMessage(msg.FromUserName, msg.CreateTime, msg.MsgType, msg.Content, msg.MsgID, msg.AgentID, msg.PicURL, msg.MediaID, msg.Format)
+}
+
+func (c *WeWorkChannel) buildWebhookInboundMessage(senderID string, createTime int64, msgType, content, msgID, agentID, picURL, mediaID, format string) (*bus.InboundMessage, error) {
+	msgType = strings.TrimSpace(strings.ToLower(msgType))
+	if senderID == "" {
+		return nil, nil
+	}
+
+	inMsg := &bus.InboundMessage{
+		ID:        msgID,
+		Content:   content,
+		SenderID:  senderID,
+		ChatID:    senderID,
+		Channel:   c.Name(),
+		AccountID: c.AccountID(),
+		Timestamp: time.Unix(createTime, 0),
+		Metadata: map[string]interface{}{
+			"agent_id": agentID,
+			"msg_type": msgType,
+		},
+	}
+	if picURL != "" {
+		inMsg.Metadata["pic_url"] = picURL
+	}
+	if mediaID != "" {
+		inMsg.Metadata["media_id"] = mediaID
+	}
+
+	switch msgType {
+	case "text":
+		if strings.TrimSpace(content) == "" {
+			return nil, nil
+		}
+	case "image":
+		inMsg.Content = "[图片]"
+		media, err := c.downloadWebhookMediaByID(UnifiedMediaImage, mediaID, weworkUploadImageMaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		inMsg.Media = []bus.Media{media}
+	case "file":
+		inMsg.Content = "[文件]"
+		media, err := c.downloadWebhookMediaByID(UnifiedMediaFile, mediaID, weworkUploadFileMaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		inMsg.Media = []bus.Media{media}
+	case "voice":
+		inMsg.Content = "[语音]"
+		media, err := c.downloadWebhookMediaByID(UnifiedMediaAudio, mediaID, 2<<20)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(format) != "" && media.MimeType == "" {
+			media.MimeType = "audio/" + strings.ToLower(strings.TrimSpace(format))
+		}
+		inMsg.Media = []bus.Media{media}
+	case "video":
+		inMsg.Content = "[视频]"
+		media, err := c.downloadWebhookMediaByID(UnifiedMediaVideo, mediaID, 10<<20)
+		if err != nil {
+			return nil, err
+		}
+		inMsg.Media = []bus.Media{media}
+	case "event":
+		return nil, nil
+	default:
+		return nil, nil
+	}
+
+	return inMsg, nil
+}
+
+func (c *WeWorkChannel) downloadWebhookMediaByID(kind, mediaID string, maxBytes int64) (bus.Media, error) {
+	if strings.TrimSpace(mediaID) == "" {
+		return bus.Media{}, fmt.Errorf("wework %s message missing media_id", kind)
+	}
+
+	token, err := c.getAccessToken()
+	if err != nil {
+		return bus.Media{}, err
+	}
+
+	downloadURL := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=%s&media_id=%s", url.QueryEscape(token), url.QueryEscape(mediaID))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return bus.Media{}, fmt.Errorf("build media request failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return bus.Media{}, fmt.Errorf("download media failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return bus.Media{}, fmt.Errorf("download media failed with status %d", resp.StatusCode)
+	}
+
+	reader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		reader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return bus.Media{}, fmt.Errorf("read media body failed: %w", err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return bus.Media{}, fmt.Errorf("media exceeds size limit: %d > %d", len(data), maxBytes)
+	}
+
+	var apiErr struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if json.Unmarshal(data, &apiErr) == nil && (apiErr.ErrCode != 0 || apiErr.ErrMsg != "") {
+		return bus.Media{}, fmt.Errorf("wework media get failed: %d %s", apiErr.ErrCode, apiErr.ErrMsg)
+	}
+
+	mimeType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	if idx := strings.Index(mimeType, ";"); idx >= 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = detectWeWorkMediaContentType(data)
+	}
+
+	name := filenameFromDisposition(resp.Header.Get("Content-Disposition"))
+	if name == "" {
+		name = inferWeWorkInboundMediaName(kind, mediaID, mimeType)
+	}
+
+	return bus.Media{
+		Type:     kind,
+		Name:     name,
+		Base64:   base64.StdEncoding.EncodeToString(data),
+		MimeType: mimeType,
+	}, nil
+}
+
+func filenameFromDisposition(disposition string) string {
+	disposition = strings.TrimSpace(disposition)
+	if disposition == "" {
+		return ""
+	}
+
+	_, params, err := mime.ParseMediaType(disposition)
+	if err != nil {
+		return ""
+	}
+	if name := strings.TrimSpace(params["filename*"]); name != "" {
+		return strings.TrimPrefix(name, "UTF-8''")
+	}
+	return strings.TrimSpace(params["filename"])
 }
 
 func (c *WeWorkChannel) decryptMsg(encrypted string) ([]byte, error) {
@@ -271,50 +450,20 @@ func (c *WeWorkChannel) decryptMsg(encrypted string) ([]byte, error) {
 	}
 
 	// Step 1: Base64 解码密文
-	ciphertext, err := base64.StdEncoding.DecodeString(encrypted)
+	ciphertext, err := DecodeBase64Media(encrypted)
 	if err != nil {
-		// 企业微信有时发 RawStdEncoding（无 padding），兼容处理
-		ciphertext, err = base64.RawStdEncoding.DecodeString(encrypted)
-		if err != nil {
-			return nil, fmt.Errorf("base64 decode failed: %w", err)
-		}
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
 	}
 
-	// Step 2: 解码 AES key（EncodingAESKey 是 43 位 Base64，补 "=" 后解码得 32 字节）
-	keyBytes, err := base64.StdEncoding.DecodeString(c.encodingAESKey + "=")
+	// Step 2-4: 解码 AES key、AES-CBC 解密并去掉企业微信 PKCS7 填充
+	keyBytes, err := decodeWeWorkAESKey(c.encodingAESKey)
 	if err != nil {
 		return nil, fmt.Errorf("key decode failed: %w", err)
 	}
-	if len(keyBytes) != 32 {
-		return nil, fmt.Errorf("invalid key length: %d, expected 32", len(keyBytes))
-	}
-
-	// Step 3: AES-CBC 解密
-	// 企业微信规定：IV = AES key 的前 16 字节（不是密文前 16 字节）
-	block, err := aes.NewCipher(keyBytes)
+	plaintext, err := decryptWeWorkCBCPayloadWithKey(ciphertext, keyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("aes cipher failed: %w", err)
+		return nil, err
 	}
-	if len(ciphertext) < aes.BlockSize || len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("invalid ciphertext length: %d", len(ciphertext))
-	}
-
-	iv := keyBytes[:aes.BlockSize] // ← 关键修复：IV 取 key 前16字节
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plaintext := make([]byte, len(ciphertext))
-	mode.CryptBlocks(plaintext, ciphertext)
-
-	// Step 4: 去掉企业微信自定义 PKCS7 填充
-	// 企业微信使用 block size = 32，padding 范围 1~32
-	const weWorkBlockSize = 32
-	if len(plaintext) == 0 {
-		return nil, fmt.Errorf("empty plaintext after decryption")
-	}
-	padding := int(plaintext[len(plaintext)-1])
-	if padding < 1 || padding > weWorkBlockSize {
-		return nil, fmt.Errorf("invalid pkcs7 padding value: %d (block size 32)", padding)
-	}
-	plaintext = plaintext[:len(plaintext)-padding]
 
 	// Step 5: 跳过前 16 字节随机字符串
 	if len(plaintext) < 20 { // 16(random) + 4(length)
@@ -520,6 +669,14 @@ func extractWeWorkEncrypt(body []byte) string {
 			return jsonMsg.Encrypt
 		}
 	}
+	if trimmed[0] == '<' {
+		var xmlMsg struct {
+			Encrypt string `xml:"Encrypt"`
+		}
+		if err := xml.Unmarshal(trimmed, &xmlMsg); err == nil {
+			return xmlMsg.Encrypt
+		}
+	}
 	return ""
 }
 
@@ -558,6 +715,12 @@ type weworkAiBotFileContent struct {
 	AESKey string `json:"aeskey,omitempty"`
 }
 
+// weworkAiBotVideoContent 视频结构体
+type weworkAiBotVideoContent struct {
+	URL    string `json:"url"`
+	AESKey string `json:"aeskey,omitempty"`
+}
+
 // weworkAiBotMixedItem 图文混排中的单条消息
 type weworkAiBotMixedItem struct {
 	MsgType string                   `json:"msgtype"`
@@ -583,11 +746,12 @@ type weworkAiBotQuote struct {
 	Mixed   *weworkAiBotMixedContent `json:"mixed,omitempty"`
 	Voice   *weworkAiBotVoiceContent `json:"voice,omitempty"`
 	File    *weworkAiBotFileContent  `json:"file,omitempty"`
+	Video   *weworkAiBotVideoContent `json:"video,omitempty"`
 }
 
 // weworkAiBotMessage 企业微信 AI Bot 消息（完整结构，覆盖全部消息类型）
 //
-// msgtype 取值：text / image / mixed / voice / file / stream
+// msgtype 取值：text / image / mixed / voice / file / video / stream
 type weworkAiBotMessage struct {
 	CreateTime  int64  `json:"create_time,omitempty"`
 	MsgID       string `json:"msgid"`
@@ -607,6 +771,7 @@ type weworkAiBotMessage struct {
 	Mixed  *weworkAiBotMixedContent  `json:"mixed,omitempty"`
 	Voice  *weworkAiBotVoiceContent  `json:"voice,omitempty"`
 	File   *weworkAiBotFileContent   `json:"file,omitempty"`
+	Video  *weworkAiBotVideoContent  `json:"video,omitempty"`
 	Stream *weworkAiBotStreamContent `json:"stream,omitempty"`
 	Event  map[string]interface{}    `json:"event,omitempty"`
 
@@ -635,6 +800,10 @@ func extractAiBotTextContent(msg *weworkAiBotMessage) string {
 	case "file":
 		if msg.File != nil {
 			content = "[文件] " + msg.File.URL
+		}
+	case "video":
+		if msg.Video != nil {
+			content = "[视频] " + msg.Video.URL
 		}
 	case "mixed":
 		if msg.Mixed != nil {

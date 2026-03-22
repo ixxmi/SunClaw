@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -12,6 +14,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,6 +46,179 @@ var testWeWorkGIFData = []byte{
 	0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
 	0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x4c,
 	0x01, 0x00, 0x3b,
+}
+
+func encryptWeWorkTestMedia(t *testing.T, plaintext []byte, encodedKey string) []byte {
+	t.Helper()
+
+	key, err := decodeWeWorkAESKey(encodedKey)
+	if err != nil {
+		t.Fatalf("decode aes key: %v", err)
+	}
+
+	padding := weworkPKCS7BlockSize - (len(plaintext) % weworkPKCS7BlockSize)
+	if padding == 0 {
+		padding = weworkPKCS7BlockSize
+	}
+
+	padded := append([]byte{}, plaintext...)
+	padded = append(padded, bytes.Repeat([]byte{byte(padding)}, padding)...)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("new aes cipher: %v", err)
+	}
+
+	ciphertext := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, key[:aes.BlockSize]).CryptBlocks(ciphertext, padded)
+	return ciphertext
+}
+
+type weworkRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f weworkRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestWeWorkHandleLongConnImageMessageDecryptsMedia(t *testing.T) {
+	const aesKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+	encrypted := encryptWeWorkTestMedia(t, testWeWorkPNGData, aesKey)
+
+	messageBus := bus.NewMessageBus(4)
+	channel, err := NewWeWorkChannel("bot1", config.WeWorkChannelConfig{
+		Enabled:   true,
+		Mode:      "websocket",
+		BotID:     "bot-id-1",
+		BotSecret: "bot-secret-1",
+	}, messageBus)
+	if err != nil {
+		t.Fatalf("NewWeWorkChannel error: %v", err)
+	}
+	channel.httpClient = &http.Client{
+		Transport: weworkRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(encrypted)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	payload := json.RawMessage(fmt.Sprintf(`{
+		"msgid":"msg-1",
+		"aibotid":"bot-id-1",
+		"create_time":1710000000,
+		"msgtype":"image",
+		"chattype":"single",
+		"from":{"userid":"user-1"},
+		"image":{"url":%q,"aeskey":%q}
+	}`, "https://example.com/image", aesKey))
+
+	channel.handleLongConnMessageCallback("req-1", payload)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	inbound, err := messageBus.ConsumeInbound(ctx)
+	if err != nil {
+		t.Fatalf("ConsumeInbound error: %v", err)
+	}
+	if inbound.Content != "[图片]" {
+		t.Fatalf("expected image placeholder content, got %q", inbound.Content)
+	}
+	if len(inbound.Media) != 1 {
+		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
+	}
+	if inbound.Media[0].Type != UnifiedMediaImage {
+		t.Fatalf("expected media type image, got %q", inbound.Media[0].Type)
+	}
+	if inbound.Media[0].URL != "" {
+		t.Fatalf("expected decrypted image media URL to be empty, got %q", inbound.Media[0].URL)
+	}
+	if inbound.Media[0].MimeType != "image/png" {
+		t.Fatalf("expected image/png mime type, got %q", inbound.Media[0].MimeType)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(inbound.Media[0].Base64)
+	if err != nil {
+		t.Fatalf("decode image base64: %v", err)
+	}
+	if !bytes.Equal(decoded, testWeWorkPNGData) {
+		t.Fatalf("decrypted image bytes mismatch")
+	}
+}
+
+func TestWeWorkHandleLongConnFileMessageDecryptsMedia(t *testing.T) {
+	const aesKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+	raw := []byte("hello from wework file")
+	encrypted := encryptWeWorkTestMedia(t, raw, aesKey)
+
+	messageBus := bus.NewMessageBus(4)
+	channel, err := NewWeWorkChannel("bot1", config.WeWorkChannelConfig{
+		Enabled:   true,
+		Mode:      "websocket",
+		BotID:     "bot-id-1",
+		BotSecret: "bot-secret-1",
+	}, messageBus)
+	if err != nil {
+		t.Fatalf("NewWeWorkChannel error: %v", err)
+	}
+	channel.httpClient = &http.Client{
+		Transport: weworkRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(encrypted)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	payload := json.RawMessage(fmt.Sprintf(`{
+		"msgid":"msg-2",
+		"aibotid":"bot-id-1",
+		"create_time":1710000001,
+		"msgtype":"file",
+		"chattype":"single",
+		"from":{"userid":"user-1"},
+		"file":{"url":%q,"aeskey":%q}
+	}`, "https://example.com/file", aesKey))
+
+	channel.handleLongConnMessageCallback("req-2", payload)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	inbound, err := messageBus.ConsumeInbound(ctx)
+	if err != nil {
+		t.Fatalf("ConsumeInbound error: %v", err)
+	}
+	if inbound.Content != "[文件]" {
+		t.Fatalf("expected file placeholder content, got %q", inbound.Content)
+	}
+	if len(inbound.Media) != 1 {
+		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
+	}
+	if inbound.Media[0].Type != UnifiedMediaFile {
+		t.Fatalf("expected media type file, got %q", inbound.Media[0].Type)
+	}
+	if inbound.Media[0].URL != "" {
+		t.Fatalf("expected decrypted file media URL to be empty, got %q", inbound.Media[0].URL)
+	}
+	if inbound.Media[0].MimeType == "" {
+		t.Fatalf("expected file mime type to be detected")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(inbound.Media[0].Base64)
+	if err != nil {
+		t.Fatalf("decode file base64: %v", err)
+	}
+	if !bytes.Equal(decoded, raw) {
+		t.Fatalf("decrypted file bytes mismatch")
+	}
 }
 
 func TestWeWorkLongConnStatePopReplyContext(t *testing.T) {
@@ -249,6 +425,120 @@ func TestWeWorkRunLongConnSessionReceivesSubscribeAck(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting server exit")
 	}
+}
+
+func TestWeWorkReadLongConnLoopKeepsAckFlowingWhileMessageCallbackBlocks(t *testing.T) {
+	const aesKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+	encrypted := encryptWeWorkTestMedia(t, testWeWorkPNGData, aesKey)
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+
+	messageBus := bus.NewMessageBus(16)
+	channel, err := NewWeWorkChannel("bot1", config.WeWorkChannelConfig{
+		Enabled:   true,
+		Mode:      "websocket",
+		BotID:     "bot-id-1",
+		BotSecret: "bot-secret-1",
+	}, messageBus)
+	if err != nil {
+		t.Fatalf("NewWeWorkChannel error: %v", err)
+	}
+	channel.httpClient = &http.Client{
+		Transport: weworkRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			select {
+			case <-downloadStarted:
+			default:
+				close(downloadStarted)
+			}
+			<-releaseDownload
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(encrypted)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	wsConn, serverErr := newTestWeWorkWebsocketConn(t, func(conn *websocket.Conn) error {
+		frame, err := readWeWorkTestFrame(conn)
+		if err != nil {
+			return err
+		}
+		if frame.Cmd != "ping" {
+			return fmt.Errorf("unexpected first command: %s", frame.Cmd)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"cmd": "aibot_msg_callback",
+			"headers": map[string]string{
+				"req_id": "callback-req-1",
+			},
+			"body": map[string]interface{}{
+				"msgid":       "msg-slow-1",
+				"aibotid":     "bot-id-1",
+				"create_time": 1710000000,
+				"msgtype":     "image",
+				"chattype":    "single",
+				"from": map[string]string{
+					"userid": "user-1",
+				},
+				"image": map[string]string{
+					"url":    "https://example.com/slow-image",
+					"aeskey": aesKey,
+				},
+			},
+		}); err != nil {
+			return err
+		}
+
+		select {
+		case <-downloadStarted:
+		case <-time.After(time.Second):
+			return fmt.Errorf("timed out waiting for message callback download to start")
+		}
+
+		return writeWeWorkTestAck(conn, frame.Headers.ReqID, nil)
+	})
+	defer wsConn.Close()
+	defer func() {
+		select {
+		case <-releaseDownload:
+		default:
+			close(releaseDownload)
+		}
+	}()
+
+	channel.longConn.setConn(wsConn)
+	stopReadLoop, readErrCh := startWeWorkTestReadLoop(channel, wsConn)
+	defer stopReadLoop()
+	defer assertWeWorkTestReadLoopErr(t, readErrCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	if _, err := channel.sendLongConnCommandWithResponse(ctx, "ping", "", nil, true); err != nil {
+		t.Fatalf("sendLongConnCommandWithResponse returned error: %v", err)
+	}
+
+	close(releaseDownload)
+
+	consumeCtx, consumeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer consumeCancel()
+
+	inbound, err := messageBus.ConsumeInbound(consumeCtx)
+	if err != nil {
+		t.Fatalf("ConsumeInbound error: %v", err)
+	}
+	if inbound.Content != "[图片]" {
+		t.Fatalf("expected image placeholder content, got %q", inbound.Content)
+	}
+	if len(inbound.Media) != 1 {
+		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
+	}
+
+	assertWeWorkTestServerErr(t, serverErr)
 }
 
 func TestWeWorkSendLongConnMessageUploadsImageReply(t *testing.T) {
@@ -609,6 +899,111 @@ func TestWeWorkSendLongConnMessageSendsTextThenFileReply(t *testing.T) {
 	assertWeWorkTestServerErr(t, serverErr)
 }
 
+func TestWeWorkSendStreamBatchesRapidChunks(t *testing.T) {
+	wsConn, serverErr := newTestWeWorkWebsocketConn(t, func(conn *websocket.Conn) error {
+		var streamID string
+		expectedContents := []string{"你", "你好，世界"}
+		expectedFinish := []bool{false, true}
+
+		for i := 0; i < len(expectedContents); i++ {
+			frame, err := readWeWorkTestFrame(conn)
+			if err != nil {
+				return err
+			}
+			if frame.Cmd != "aibot_respond_msg" {
+				return fmt.Errorf("unexpected command %d: %s", i+1, frame.Cmd)
+			}
+			if frame.Headers.ReqID != "req-stream-1" {
+				return fmt.Errorf("unexpected req_id %d: %s", i+1, frame.Headers.ReqID)
+			}
+
+			var body struct {
+				MsgType string `json:"msgtype"`
+				Stream  struct {
+					ID      string `json:"id"`
+					Finish  bool   `json:"finish"`
+					Content string `json:"content"`
+				} `json:"stream"`
+			}
+			if err := json.Unmarshal(frame.Body, &body); err != nil {
+				return err
+			}
+			if body.MsgType != "stream" {
+				return fmt.Errorf("unexpected msgtype %d: %s", i+1, body.MsgType)
+			}
+			if body.Stream.Content != expectedContents[i] {
+				return fmt.Errorf("unexpected stream content %d: %q", i+1, body.Stream.Content)
+			}
+			if body.Stream.Finish != expectedFinish[i] {
+				return fmt.Errorf("unexpected stream finish %d: %v", i+1, body.Stream.Finish)
+			}
+			if i == 0 {
+				streamID = body.Stream.ID
+				if streamID == "" {
+					return fmt.Errorf("expected non-empty stream id")
+				}
+			} else if body.Stream.ID != streamID {
+				return fmt.Errorf("expected stable stream id, got %q want %q", body.Stream.ID, streamID)
+			}
+
+			if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, nil); err != nil {
+				return err
+			}
+		}
+
+		if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			return err
+		}
+		var extra weworkLongConnFrame
+		err := conn.ReadJSON(&extra)
+		if err == nil {
+			return fmt.Errorf("unexpected extra stream frame: %+v", extra)
+		}
+		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+			return fmt.Errorf("expected read timeout after batched stream sends, got %v", err)
+		}
+
+		return nil
+	})
+	defer wsConn.Close()
+
+	channel, err := NewWeWorkChannel("bot1", config.WeWorkChannelConfig{
+		Enabled:   true,
+		Mode:      "websocket",
+		BotID:     "bot-id-1",
+		BotSecret: "bot-secret-1",
+	}, bus.NewMessageBus(16))
+	if err != nil {
+		t.Fatalf("NewWeWorkChannel error: %v", err)
+	}
+	channel.longConn.setConn(wsConn)
+	stopReadLoop, readErrCh := startWeWorkTestReadLoop(channel, wsConn)
+	defer stopReadLoop()
+	defer assertWeWorkTestReadLoopErr(t, readErrCh)
+	channel.longConn.storeReplyContext(&weworkReplyContext{
+		MessageID: "msg-stream-1",
+		ReqID:     "req-stream-1",
+		Kind:      weworkLongConnReplyKindMessage,
+		ChatID:    "chat-1",
+		ChatType:  "group",
+	})
+
+	stream := make(chan *bus.StreamMessage, 4)
+	go func() {
+		stream <- &bus.StreamMessage{ChatID: "chat-1", Content: "你"}
+		stream <- &bus.StreamMessage{ChatID: "chat-1", Content: "好"}
+		stream <- &bus.StreamMessage{ChatID: "chat-1", Content: "，世界"}
+		stream <- &bus.StreamMessage{ChatID: "chat-1", IsComplete: true}
+		close(stream)
+	}()
+
+	if err := channel.SendStream("chat-1", stream); err != nil {
+		t.Fatalf("SendStream returned error: %v", err)
+	}
+
+	assertWeWorkTestServerErr(t, serverErr)
+}
+
 func TestWeWorkUploadLongConnMediaRejectsUnsupportedImageFormat(t *testing.T) {
 	convertedMedia, convertedData, err := normalizeWeWorkUploadImage(bus.Media{
 		Type: UnifiedMediaImage,
@@ -668,7 +1063,7 @@ func TestWeWorkUploadLongConnMediaRejectsUnsupportedImageFormat(t *testing.T) {
 		t.Fatalf("NewWeWorkChannel error: %v", err)
 	}
 
-	_, err = channel.uploadLongConnMedia(context.Background(), bus.Media{
+	_, _, err = channel.uploadLongConnMedia(context.Background(), bus.Media{
 		Type:   UnifiedMediaImage,
 		Name:   "invalid.gif",
 		Base64: base64.StdEncoding.EncodeToString([]byte("GIF89a-invalid")),
@@ -801,7 +1196,7 @@ func TestWeWorkUploadLongConnMediaRetriesWithSmallerImageOnInit40009(t *testing.
 	defer stopReadLoop()
 	defer assertWeWorkTestReadLoopErr(t, readErrCh)
 
-	mediaID, err := channel.uploadLongConnMedia(context.Background(), bus.Media{
+	_, mediaID, err := channel.uploadLongConnMedia(context.Background(), bus.Media{
 		Type:   UnifiedMediaImage,
 		Name:   "large.png",
 		Base64: largeImageBase64,
@@ -810,6 +1205,105 @@ func TestWeWorkUploadLongConnMediaRetriesWithSmallerImageOnInit40009(t *testing.
 		t.Fatalf("uploadLongConnMedia returned error: %v", err)
 	}
 	if mediaID != "media-retry-1" {
+		t.Fatalf("unexpected mediaID: %s", mediaID)
+	}
+
+	assertWeWorkTestServerErr(t, serverErr)
+}
+
+func TestWeWorkUploadLongConnMediaDowngradesSVGImageToFile(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#f00"/></svg>`
+
+	wsConn, serverErr := newTestWeWorkWebsocketConn(t, func(conn *websocket.Conn) error {
+		frame, err := readWeWorkTestFrame(conn)
+		if err != nil {
+			return err
+		}
+		if frame.Cmd != "aibot_upload_media_init" {
+			return fmt.Errorf("unexpected first command: %s", frame.Cmd)
+		}
+		var initBody struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			TotalSize   int    `json:"total_size"`
+			TotalChunks int    `json:"total_chunks"`
+		}
+		if err := json.Unmarshal(frame.Body, &initBody); err != nil {
+			return err
+		}
+		if initBody.Type != UnifiedMediaFile {
+			return fmt.Errorf("expected downgraded init type file, got %s", initBody.Type)
+		}
+		if initBody.Filename != "avatar.svg" {
+			return fmt.Errorf("expected downgraded filename avatar.svg, got %s", initBody.Filename)
+		}
+		if initBody.TotalSize != len(svg) {
+			return fmt.Errorf("unexpected init total_size: %d", initBody.TotalSize)
+		}
+		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
+			"upload_id": "upload-svg-1",
+		}); err != nil {
+			return err
+		}
+
+		frame, err = readWeWorkTestFrame(conn)
+		if err != nil {
+			return err
+		}
+		if frame.Cmd != "aibot_upload_media_chunk" {
+			return fmt.Errorf("unexpected second command: %s", frame.Cmd)
+		}
+		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, nil); err != nil {
+			return err
+		}
+
+		frame, err = readWeWorkTestFrame(conn)
+		if err != nil {
+			return err
+		}
+		if frame.Cmd != "aibot_upload_media_finish" {
+			return fmt.Errorf("unexpected third command: %s", frame.Cmd)
+		}
+		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
+			"type":       UnifiedMediaFile,
+			"media_id":   "media-svg-1",
+			"created_at": "1380000000",
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	defer wsConn.Close()
+
+	channel, err := NewWeWorkChannel("bot1", config.WeWorkChannelConfig{
+		Enabled:   true,
+		Mode:      "websocket",
+		BotID:     "bot-id-1",
+		BotSecret: "bot-secret-1",
+	}, bus.NewMessageBus(16))
+	if err != nil {
+		t.Fatalf("NewWeWorkChannel error: %v", err)
+	}
+	channel.longConn.setConn(wsConn)
+	stopReadLoop, readErrCh := startWeWorkTestReadLoop(channel, wsConn)
+	defer stopReadLoop()
+	defer assertWeWorkTestReadLoopErr(t, readErrCh)
+
+	effectiveMedia, mediaID, err := channel.uploadLongConnMedia(context.Background(), bus.Media{
+		Type:   UnifiedMediaImage,
+		Name:   "avatar.png",
+		Base64: base64.StdEncoding.EncodeToString([]byte(svg)),
+	})
+	if err != nil {
+		t.Fatalf("uploadLongConnMedia returned error: %v", err)
+	}
+	if effectiveMedia.Type != UnifiedMediaFile {
+		t.Fatalf("expected effective media type file, got %s", effectiveMedia.Type)
+	}
+	if effectiveMedia.Name != "avatar.svg" {
+		t.Fatalf("expected effective media name avatar.svg, got %s", effectiveMedia.Name)
+	}
+	if mediaID != "media-svg-1" {
 		t.Fatalf("unexpected mediaID: %s", mediaID)
 	}
 

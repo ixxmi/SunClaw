@@ -13,6 +13,7 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -27,16 +28,20 @@ import (
 )
 
 const (
-	weworkLongConnReplyKindMessage  = "message"
-	weworkLongConnReplyKindWelcome  = "welcome"
-	weworkUploadChunkSize           = 512 << 10
-	weworkUploadMaxChunks           = 100
-	weworkUploadMinBytes            = 5
-	weworkUploadImageSourceMaxBytes = 20 << 20
-	weworkUploadImageMaxBytes       = 10 << 20
-	weworkUploadFileMaxBytes        = 20 << 20
-	weworkUploadImageSafeMaxBytes   = 2 << 20
-	weworkUploadImageRetryMaxBytes  = 1 << 20
+	weworkLongConnReplyKindMessage   = "message"
+	weworkLongConnReplyKindWelcome   = "welcome"
+	weworkLongConnAckTimeout         = 10 * time.Second
+	weworkLongConnStreamSendInterval = 300 * time.Millisecond
+	weworkUploadChunkSize            = 512 << 10
+	weworkUploadMaxChunks            = 100
+	weworkUploadMinBytes             = 5
+	weworkUploadImageSourceMaxBytes  = 20 << 20
+	weworkUploadImageMaxBytes        = 10 << 20
+	weworkUploadVideoMaxBytes        = 10 << 20
+	weworkUploadFileMaxBytes         = 20 << 20
+	weworkUploadImageSafeMaxBytes    = 2 << 20
+	weworkUploadImageRetryMaxBytes   = 1 << 20
+	weworkMediaDecryptPaddingBytes   = 32
 )
 
 var errWeWorkDisconnectedEvent = fmt.Errorf("wework websocket disconnected by newer connection")
@@ -162,6 +167,12 @@ func (s *weworkLongConnState) resolveAck(reqID string, resp weworkLongConnRespon
 	ch <- resp
 	close(ch)
 	return true
+}
+
+func (s *weworkLongConnState) pendingAckCount() int {
+	s.ackMu.Lock()
+	defer s.ackMu.Unlock()
+	return len(s.pending)
 }
 
 func (s *weworkLongConnState) storeReplyContext(ctx *weworkReplyContext) {
@@ -357,18 +368,40 @@ func (c *WeWorkChannel) readLongConnLoop(ctx context.Context, conn *websocket.Co
 
 		if frame.Cmd == "" {
 			if frame.Headers.ReqID != "" {
-				c.longConn.resolveAck(frame.Headers.ReqID, weworkLongConnResponse{
+				resolved := c.longConn.resolveAck(frame.Headers.ReqID, weworkLongConnResponse{
 					ErrCode: frame.ErrCode,
 					ErrMsg:  frame.ErrMsg,
 					Body:    frame.Body,
 				})
+				logger.Debug("Received WeWork websocket ack",
+					zap.String("req_id", frame.Headers.ReqID),
+					zap.Int("errcode", frame.ErrCode),
+					zap.String("errmsg", truncateWeWorkLog(frame.ErrMsg, 200)),
+					zap.Bool("resolved", resolved),
+					zap.Int("pending_acks", c.longConn.pendingAckCount()))
 			}
 			continue
 		}
 
 		switch frame.Cmd {
 		case "aibot_msg_callback":
-			c.handleLongConnMessageCallback(frame.Headers.ReqID, frame.Body)
+			msg, chatID, ok := c.prepareLongConnMessageCallback(frame.Headers.ReqID, frame.Body)
+			if !ok {
+				continue
+			}
+			go func(reqID, chatID string, msg *weworkAiBotMessage) {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("Panic while handling WeWork websocket message callback",
+							zap.Any("panic", r),
+							zap.String("req_id", reqID),
+							zap.String("chat_id", chatID),
+							zap.String("msgid", msg.MsgID),
+							zap.Stack("stack"))
+					}
+				}()
+				c.handlePreparedLongConnMessageCallback(reqID, chatID, msg)
+			}(frame.Headers.ReqID, chatID, msg)
 		case "aibot_event_callback":
 			if err := c.handleLongConnEventCallback(frame.Headers.ReqID, frame.Body); err != nil {
 				return err
@@ -431,7 +464,7 @@ func (c *WeWorkChannel) sendLongConnCommandWithResponse(ctx context.Context, cmd
 	}
 
 	c.longConn.writeMu.Lock()
-	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(weworkLongConnAckTimeout))
 	err := conn.WriteJSON(payload)
 	c.longConn.writeMu.Unlock()
 	if err != nil {
@@ -441,17 +474,23 @@ func (c *WeWorkChannel) sendLongConnCommandWithResponse(ctx context.Context, cmd
 		return weworkLongConnResponse{}, fmt.Errorf("write wework websocket command failed: %w", err)
 	}
 
+	logger.Debug("Sent WeWork websocket command",
+		zap.String("cmd", cmd),
+		zap.String("req_id", reqID),
+		zap.Bool("wait_ack", waitAck),
+		zap.Int("pending_acks", c.longConn.pendingAckCount()))
+
 	if !waitAck {
 		return weworkLongConnResponse{}, nil
 	}
 
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.NewTimer(weworkLongConnAckTimeout)
 	defer timer.Stop()
 
 	select {
 	case ack, ok := <-ackCh:
 		if !ok {
-			return weworkLongConnResponse{}, fmt.Errorf("wework websocket ack channel closed")
+			return weworkLongConnResponse{}, fmt.Errorf("wework websocket ack channel closed for req_id=%s", reqID)
 		}
 		if ack.ErrCode != 0 {
 			return ack, &weworkLongConnCommandError{
@@ -466,35 +505,44 @@ func (c *WeWorkChannel) sendLongConnCommandWithResponse(ctx context.Context, cmd
 		return weworkLongConnResponse{}, ctx.Err()
 	case <-timer.C:
 		c.longConn.unregisterAck(reqID)
-		return weworkLongConnResponse{}, fmt.Errorf("wework websocket command %s timed out", cmd)
+		pendingAcks := c.longConn.pendingAckCount()
+		logger.Warn("WeWork websocket command timed out waiting for ack",
+			zap.String("cmd", cmd),
+			zap.String("req_id", reqID),
+			zap.Duration("waited", weworkLongConnAckTimeout),
+			zap.Int("pending_acks", pendingAcks))
+		return weworkLongConnResponse{}, fmt.Errorf("wework websocket command %s timed out (req_id=%s, waited=%s, pending_acks=%d)", cmd, reqID, weworkLongConnAckTimeout, pendingAcks)
 	}
 }
 
 func (c *WeWorkChannel) handleLongConnMessageCallback(reqID string, raw json.RawMessage) {
+	msg, chatID, ok := c.prepareLongConnMessageCallback(reqID, raw)
+	if !ok {
+		return
+	}
+	c.handlePreparedLongConnMessageCallback(reqID, chatID, msg)
+}
+
+func (c *WeWorkChannel) prepareLongConnMessageCallback(reqID string, raw json.RawMessage) (*weworkAiBotMessage, string, bool) {
 	var msg weworkAiBotMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		logger.Error("Failed to decode WeWork websocket message callback",
 			zap.Error(err),
 			zap.String("payload", truncateWeWorkLog(string(raw), 300)))
-		return
+		return nil, "", false
 	}
 
 	if msg.MsgType == "stream" {
-		return
-	}
-
-	content := extractAiBotTextContent(&msg)
-	if content == "" {
-		return
+		return nil, "", false
 	}
 
 	chatID := resolveWeWorkChatID(&msg)
 	if chatID == "" {
-		return
+		return nil, "", false
 	}
 
 	if msg.From.UserID != "" && !c.IsAllowed(msg.From.UserID) {
-		return
+		return nil, "", false
 	}
 
 	c.longConn.storeReplyContext(&weworkReplyContext{
@@ -505,6 +553,15 @@ func (c *WeWorkChannel) handleLongConnMessageCallback(reqID string, raw json.Raw
 		ChatType:  msg.ChatType,
 		CreatedAt: time.Now(),
 	})
+
+	return &msg, chatID, true
+}
+
+func (c *WeWorkChannel) handlePreparedLongConnMessageCallback(reqID, chatID string, msg *weworkAiBotMessage) {
+	content, media := c.extractLongConnMessageContentAndMedia(msg)
+	if content == "" && len(media) == 0 {
+		return
+	}
 
 	inMsg := &bus.InboundMessage{
 		ID:        msg.MsgID,
@@ -520,12 +577,194 @@ func (c *WeWorkChannel) handleLongConnMessageCallback(reqID string, raw json.Raw
 			"msg_type":  msg.MsgType,
 			"req_id":    reqID,
 		},
+		Media: media,
 	}
 
 	if err := c.PublishInbound(context.Background(), inMsg); err != nil {
 		logger.Error("Failed to publish WeWork websocket inbound message",
 			zap.Error(err),
 			zap.String("msgid", msg.MsgID))
+	}
+}
+
+func warnWeWorkReplyContextAging(cmd string, replyCtx *weworkReplyContext) {
+	if replyCtx == nil || replyCtx.ReqID == "" || replyCtx.CreatedAt.IsZero() {
+		return
+	}
+
+	age := time.Since(replyCtx.CreatedAt)
+	if age < 8*time.Second {
+		return
+	}
+
+	logger.Warn("WeWork reply context is aging and may expire",
+		zap.String("cmd", cmd),
+		zap.String("req_id", replyCtx.ReqID),
+		zap.String("chat_id", replyCtx.ChatID),
+		zap.String("message_id", replyCtx.MessageID),
+		zap.String("kind", replyCtx.Kind),
+		zap.Duration("age", age))
+}
+
+func (c *WeWorkChannel) extractLongConnMessageContentAndMedia(msg *weworkAiBotMessage) (string, []bus.Media) {
+	if msg == nil {
+		return "", nil
+	}
+
+	var parts []string
+	var media []bus.Media
+
+	appendPart := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+
+	addEncryptedMedia := func(kind, label, mediaURL, aesKey string, maxBytes int64) {
+		appendPart(label)
+
+		item := bus.Media{Type: kind}
+		if strings.TrimSpace(mediaURL) == "" {
+			return
+		}
+		if strings.TrimSpace(aesKey) == "" {
+			item.URL = mediaURL
+			media = append(media, item)
+			return
+		}
+
+		data, mimeType, err := c.downloadAndDecryptLongConnMedia(mediaURL, aesKey, maxBytes)
+		if err != nil {
+			logger.Warn("Failed to download/decrypt WeWork websocket media",
+				zap.Error(err),
+				zap.String("msgid", msg.MsgID),
+				zap.String("msg_type", msg.MsgType),
+				zap.String("media_type", kind))
+			return
+		}
+
+		item.Base64 = base64.StdEncoding.EncodeToString(data)
+		item.MimeType = mimeType
+		item.Name = inferWeWorkInboundMediaName(kind, mediaURL, mimeType)
+		media = append(media, item)
+	}
+
+	switch msg.MsgType {
+	case "text":
+		if msg.Text != nil {
+			appendPart(msg.Text.Content)
+		}
+	case "voice":
+		if msg.Voice != nil {
+			appendPart(msg.Voice.Content)
+		}
+	case "image":
+		if msg.Image != nil {
+			addEncryptedMedia(UnifiedMediaImage, "[图片]", msg.Image.URL, msg.Image.AESKey, weworkUploadImageMaxBytes)
+		}
+	case "file":
+		if msg.File != nil {
+			addEncryptedMedia(UnifiedMediaFile, "[文件]", msg.File.URL, msg.File.AESKey, weworkUploadFileMaxBytes)
+		}
+	case "video":
+		if msg.Video != nil {
+			addEncryptedMedia(UnifiedMediaVideo, "[视频]", msg.Video.URL, msg.Video.AESKey, weworkUploadVideoMaxBytes)
+		}
+	case "mixed":
+		if msg.Mixed != nil {
+			for _, item := range msg.Mixed.MsgItems {
+				switch item.MsgType {
+				case "text":
+					if item.Text != nil {
+						appendPart(item.Text.Content)
+					}
+				case "image":
+					if item.Image != nil {
+						addEncryptedMedia(UnifiedMediaImage, "[图片]", item.Image.URL, item.Image.AESKey, weworkUploadImageMaxBytes)
+					}
+				}
+			}
+		}
+	default:
+		appendPart(extractAiBotTextContent(msg))
+	}
+
+	return strings.Join(parts, "\n"), media
+}
+
+func (c *WeWorkChannel) downloadAndDecryptLongConnMedia(mediaURL, aesKey string, maxBytes int64) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, mediaURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("build media request failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("download media failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("download media failed with status %d", resp.StatusCode)
+	}
+
+	encryptedLimit := maxBytes
+	if encryptedLimit > 0 {
+		encryptedLimit += weworkMediaDecryptPaddingBytes
+	}
+
+	reader := io.Reader(resp.Body)
+	if encryptedLimit > 0 {
+		reader = io.LimitReader(resp.Body, encryptedLimit+1)
+	}
+
+	ciphertext, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", fmt.Errorf("read media body failed: %w", err)
+	}
+	if encryptedLimit > 0 && int64(len(ciphertext)) > encryptedLimit {
+		return nil, "", fmt.Errorf("encrypted media exceeds size limit: %d > %d", len(ciphertext), encryptedLimit)
+	}
+
+	plaintext, err := decryptWeWorkCBCPayload(ciphertext, aesKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("decrypt media failed: %w", err)
+	}
+	if maxBytes > 0 && int64(len(plaintext)) > maxBytes {
+		return nil, "", fmt.Errorf("decrypted media exceeds size limit: %d > %d", len(plaintext), maxBytes)
+	}
+
+	return plaintext, detectWeWorkMediaContentType(plaintext), nil
+}
+
+func inferWeWorkInboundMediaName(kind, mediaURL, mimeType string) string {
+	fallback := "attachment"
+	switch kind {
+	case UnifiedMediaImage:
+		fallback = "image"
+	case UnifiedMediaFile:
+		fallback = "file"
+	case UnifiedMediaVideo:
+		fallback = "video"
+	}
+
+	name := InferMediaFileName(bus.Media{Type: kind, URL: mediaURL}, fallback)
+	if filepath.Ext(name) != "" {
+		return name
+	}
+
+	switch mimeType {
+	case "image/png":
+		return name + ".png"
+	case "image/jpeg":
+		return name + ".jpg"
+	case "image/gif":
+		return name + ".gif"
+	case "video/mp4":
+		return name + ".mp4"
+	default:
+		return name
 	}
 }
 
@@ -607,6 +846,7 @@ func (c *WeWorkChannel) sendLongConnMessage(msg *bus.OutboundMessage) error {
 		reqID := ""
 		if replyCtx != nil {
 			reqID = replyCtx.ReqID
+			warnWeWorkReplyContextAging(customCmd, replyCtx)
 		}
 		return c.sendLongConnCommand(context.Background(), customCmd, reqID, customBody, true)
 	}
@@ -694,6 +934,28 @@ func (c *WeWorkChannel) SendStream(chatID string, stream <-chan *bus.StreamMessa
 
 	streamID := uuid.NewString()
 	var content strings.Builder
+	lastSentAt := time.Time{}
+	lastSentLen := 0
+	sentAny := false
+
+	sendStreamChunk := func(finish bool) error {
+		warnWeWorkReplyContextAging("aibot_respond_msg", replyCtx)
+		if err := c.sendLongConnCommand(context.Background(), "aibot_respond_msg", replyCtx.ReqID, map[string]interface{}{
+			"msgtype": "stream",
+			"stream": map[string]interface{}{
+				"id":      streamID,
+				"finish":  finish,
+				"content": content.String(),
+			},
+		}, true); err != nil {
+			return err
+		}
+
+		sentAny = true
+		lastSentLen = content.Len()
+		lastSentAt = time.Now()
+		return nil
+	}
 
 	for msg := range stream {
 		if msg.Error != "" {
@@ -703,15 +965,20 @@ func (c *WeWorkChannel) SendStream(chatID string, stream <-chan *bus.StreamMessa
 			content.WriteString(msg.Content)
 		}
 
-		if err := c.sendLongConnCommand(context.Background(), "aibot_respond_msg", replyCtx.ReqID, map[string]interface{}{
-			"msgtype": "stream",
-			"stream": map[string]interface{}{
-				"id":      streamID,
-				"finish":  msg.IsComplete,
-				"content": content.String(),
-			},
-		}, true); err != nil {
-			return err
+		shouldSend := false
+		switch {
+		case msg.IsComplete:
+			shouldSend = true
+		case !sentAny && content.Len() > 0:
+			shouldSend = true
+		case content.Len() > lastSentLen && !lastSentAt.IsZero() && time.Since(lastSentAt) >= weworkLongConnStreamSendInterval:
+			shouldSend = true
+		}
+
+		if shouldSend {
+			if err := sendStreamChunk(msg.IsComplete); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -790,6 +1057,7 @@ func (c *WeWorkChannel) sendLongConnTextMessage(ctx context.Context, chatID, con
 	if replyCtx != nil {
 		switch replyCtx.Kind {
 		case weworkLongConnReplyKindWelcome:
+			warnWeWorkReplyContextAging("aibot_respond_welcome_msg", replyCtx)
 			return c.sendLongConnCommand(ctx, "aibot_respond_welcome_msg", replyCtx.ReqID, map[string]interface{}{
 				"msgtype": "text",
 				"text": map[string]string{
@@ -797,6 +1065,7 @@ func (c *WeWorkChannel) sendLongConnTextMessage(ctx context.Context, chatID, con
 				},
 			}, true)
 		default:
+			warnWeWorkReplyContextAging("aibot_respond_msg", replyCtx)
 			return c.sendLongConnCommand(ctx, "aibot_respond_msg", replyCtx.ReqID, map[string]interface{}{
 				"msgtype": "markdown",
 				"markdown": map[string]string{
@@ -826,14 +1095,14 @@ func (c *WeWorkChannel) sendLongConnMediaMessage(ctx context.Context, chatID str
 		return fmt.Errorf("unsupported wework websocket media type: %s", media.Type)
 	}
 
-	mediaID, err := c.uploadLongConnMedia(ctx, media)
+	effectiveMedia, mediaID, err := c.uploadLongConnMedia(ctx, media)
 	if err != nil {
 		return err
 	}
 
 	body := map[string]interface{}{
-		"msgtype": media.Type,
-		media.Type: map[string]string{
+		"msgtype": effectiveMedia.Type,
+		effectiveMedia.Type: map[string]string{
 			"media_id": mediaID,
 		},
 	}
@@ -849,10 +1118,11 @@ func (c *WeWorkChannel) sendLongConnMediaMessage(ctx context.Context, chatID str
 	if replyCtx.Kind == weworkLongConnReplyKindWelcome {
 		cmd = "aibot_respond_welcome_msg"
 	}
+	warnWeWorkReplyContextAging(cmd, replyCtx)
 	return c.sendLongConnCommand(ctx, cmd, replyCtx.ReqID, body, true)
 }
 
-func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media) (string, error) {
+func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media) (bus.Media, string, error) {
 	media.Type = NormalizeMediaType(media.Type)
 
 	maxBytes := int64(weworkUploadFileMaxBytes)
@@ -864,13 +1134,13 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 	case UnifiedMediaFile:
 		maxBytes = weworkUploadFileMaxBytes
 	default:
-		return "", fmt.Errorf("unsupported wework websocket media type: %s", media.Type)
+		return bus.Media{}, "", fmt.Errorf("unsupported wework websocket media type: %s", media.Type)
 	}
 
 	originalName := InferMediaFileName(media, fallbackName)
 	data, err := MaterializeMediaData(c.httpClient, media, maxBytes)
 	if err != nil {
-		return "", fmt.Errorf("materialize wework media failed: %w", err)
+		return bus.Media{}, "", fmt.Errorf("materialize wework media failed: %w", err)
 	}
 	originalSize := len(data)
 	originalDetectedType := detectWeWorkMediaContentType(data)
@@ -883,6 +1153,16 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 		zap.Int64("max_bytes", maxBytes),
 		zap.Bool("source_is_url", strings.TrimSpace(media.URL) != ""),
 		zap.Bool("source_is_base64", strings.TrimSpace(media.Base64) != ""))
+
+	if downgradedMedia, downgraded := downgradeUnsupportedWeWorkImage(media, data); downgraded {
+		logger.Warn("WeWork does not support SVG image upload, falling back to file message",
+			zap.String("original_filename", originalName),
+			zap.String("fallback_filename", InferMediaFileName(downgradedMedia, "attachment.svg")),
+			zap.String("detected_content_type", originalDetectedType),
+			zap.Int("size_bytes", originalSize))
+		media = downgradedMedia
+		fallbackName = "attachment.svg"
+	}
 
 	if media.Type == UnifiedMediaImage {
 		targetCaps := []int64{weworkUploadImageMaxBytes, weworkUploadImageSafeMaxBytes, weworkUploadImageRetryMaxBytes}
@@ -918,7 +1198,7 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 
 			mediaID, uploadErr := c.uploadPreparedLongConnMedia(ctx, preparedMedia, preparedData, fallbackName)
 			if uploadErr == nil {
-				return mediaID, nil
+				return preparedMedia, mediaID, nil
 			}
 
 			lastErr = uploadErr
@@ -933,16 +1213,61 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 				continue
 			}
 
-			return "", uploadErr
+			return bus.Media{}, "", uploadErr
 		}
 
 		if lastErr != nil {
-			return "", lastErr
+			return bus.Media{}, "", lastErr
 		}
-		return "", fmt.Errorf("wework image upload failed without a concrete error")
+		return bus.Media{}, "", fmt.Errorf("wework image upload failed without a concrete error")
 	}
 
-	return c.uploadPreparedLongConnMedia(ctx, media, data, fallbackName)
+	mediaID, err := c.uploadPreparedLongConnMedia(ctx, media, data, fallbackName)
+	if err != nil {
+		return bus.Media{}, "", err
+	}
+	return media, mediaID, nil
+}
+
+func downgradeUnsupportedWeWorkImage(media bus.Media, data []byte) (bus.Media, bool) {
+	media.Type = NormalizeMediaType(media.Type)
+	if media.Type != UnifiedMediaImage || !isWeWorkSVGImage(data, media) {
+		return media, false
+	}
+
+	downgraded := media
+	downgraded.Type = UnifiedMediaFile
+	downgraded.MimeType = "image/svg+xml"
+
+	name := InferMediaFileName(media, "image")
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if base == "" {
+		base = "image"
+	}
+	downgraded.Name = base + ".svg"
+	return downgraded, true
+}
+
+func isWeWorkSVGImage(data []byte, media bus.Media) bool {
+	if strings.EqualFold(strings.TrimSpace(media.MimeType), "image/svg+xml") {
+		return true
+	}
+	if strings.EqualFold(strings.ToLower(filepath.Ext(InferMediaFileName(media, ""))), ".svg") {
+		return true
+	}
+
+	snippet := bytes.TrimSpace(data)
+	if len(snippet) > 512 {
+		snippet = snippet[:512]
+	}
+	lower := strings.ToLower(string(snippet))
+	if strings.HasPrefix(lower, "<svg") {
+		return true
+	}
+	if strings.HasPrefix(lower, "<?xml") && strings.Contains(lower, "<svg") {
+		return true
+	}
+	return false
 }
 
 func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media bus.Media, data []byte, fallbackName string) (string, error) {

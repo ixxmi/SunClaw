@@ -630,7 +630,7 @@ func defaultConvertToLLM(messages []AgentMessage) ([]providers.Message, error) {
 				}
 			case ImageContent:
 				if b.Data != "" {
-					providerMsg.Images = append(providerMsg.Images, b.Data)
+					providerMsg.Images = append(providerMsg.Images, formatProviderImageDataURL(b.MimeType, b.Data))
 				} else if b.URL != "" {
 					providerMsg.Images = append(providerMsg.Images, b.URL)
 				}

@@ -960,7 +960,7 @@ func convertToProviderMessages(messages []AgentMessage) []providers.Message {
 				}
 			case ImageContent:
 				if b.Data != "" {
-					providerMsg.Images = append(providerMsg.Images, b.Data)
+					providerMsg.Images = append(providerMsg.Images, formatProviderImageDataURL(b.MimeType, b.Data))
 				} else if b.URL != "" {
 					providerMsg.Images = append(providerMsg.Images, b.URL)
 				}
@@ -996,6 +996,21 @@ func convertToProviderMessages(messages []AgentMessage) []providers.Message {
 	}
 
 	return result
+}
+
+func formatProviderImageDataURL(mimeType, data string) string {
+	if data == "" {
+		return ""
+	}
+	if strings.HasPrefix(data, "data:") || strings.HasPrefix(data, "http://") || strings.HasPrefix(data, "https://") {
+		return data
+	}
+
+	mimeType = strings.TrimSpace(mimeType)
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+	return "data:" + mimeType + ";base64," + data
 }
 
 // convertFromProviderResponse converts provider response to agent message
