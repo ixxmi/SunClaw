@@ -1,4 +1,4 @@
-package channels
+package feishu
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"strconv"
@@ -27,7 +28,7 @@ import (
 
 // FeishuChannel 飞书通道 - WebSocket 模式
 type FeishuChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	appID             string
 	appSecret         string
 	domain            string
@@ -61,7 +62,7 @@ func NewFeishuChannel(cfg config.FeishuChannelConfig, bus *bus.MessageBus) (*Fei
 		lark.WithOpenBaseUrl(resolveDomain(cfg.Domain)),
 	)
 
-	baseCfg := BaseChannelConfig{
+	baseCfg := shared.BaseChannelConfig{
 		Enabled:    cfg.Enabled,
 		AllowedIDs: cfg.AllowedIDs,
 	}
@@ -87,7 +88,7 @@ func NewFeishuChannel(cfg config.FeishuChannelConfig, bus *bus.MessageBus) (*Fei
 	}
 
 	return &FeishuChannel{
-		BaseChannelImpl:   NewBaseChannelImpl("feishu", "default", baseCfg, bus),
+		BaseChannelImpl:   shared.NewBaseChannelImpl("feishu", "default", baseCfg, bus),
 		appID:             cfg.AppID,
 		appSecret:         cfg.AppSecret,
 		domain:            cfg.Domain,
@@ -537,13 +538,13 @@ func (c *FeishuChannel) Send(msg *bus.OutboundMessage) error {
 	// 统一媒体处理：image 走原生图片发送；file/video/audio 降级为文本链接
 	if len(msg.Media) > 0 {
 		for _, media := range msg.Media {
-			media.Type = NormalizeMediaType(media.Type)
+			media.Type = shared.NormalizeMediaType(media.Type)
 			switch media.Type {
-			case UnifiedMediaImage:
+			case shared.UnifiedMediaImage:
 				if err = c.sendImageMessage(msg, media, receiveIDType); err != nil {
 					logger.Error("Failed to send image message", zap.Error(err))
 				}
-			case UnifiedMediaFile, UnifiedMediaVideo, UnifiedMediaAudio:
+			case shared.UnifiedMediaFile, shared.UnifiedMediaVideo, shared.UnifiedMediaAudio:
 				if strings.TrimSpace(media.URL) != "" {
 					if strings.TrimSpace(msg.Content) == "" {
 						msg.Content = "附件：\n" + media.URL
@@ -859,8 +860,9 @@ func getStringPtr(s *string) string {
 // 返回 true 表示允许处理消息，false 表示拒绝
 func (c *FeishuChannel) checkDMPolicy(senderID string) bool {
 	// 首先检查配置的 allowed_ids（白名单优先）
-	if len(c.config.AllowedIDs) > 0 {
-		for _, id := range c.config.AllowedIDs {
+	cfg := c.Config()
+	if len(cfg.AllowedIDs) > 0 {
+		for _, id := range cfg.AllowedIDs {
 			if id == senderID {
 				return true
 			}

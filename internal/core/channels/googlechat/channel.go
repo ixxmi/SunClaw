@@ -1,10 +1,11 @@
-package channels
+package googlechat
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"strings"
@@ -20,7 +21,7 @@ import (
 
 // GoogleChatChannel Google Chat 通道
 type GoogleChatChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	service      *chat.Service
 	projectID    string
 	credentials  string
@@ -30,7 +31,7 @@ type GoogleChatChannel struct {
 
 // GoogleChatConfig Google Chat 配置
 type GoogleChatConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	ProjectID   string `mapstructure:"project_id" json:"project_id"`
 	Credentials string `mapstructure:"credentials" json:"credentials"` // Service account credentials JSON
 }
@@ -46,7 +47,7 @@ func NewGoogleChatChannel(cfg GoogleChatConfig, bus *bus.MessageBus) (*GoogleCha
 	}
 
 	return &GoogleChatChannel{
-		BaseChannelImpl: NewBaseChannelImpl("googlechat", "default", cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("googlechat", "default", cfg.BaseChannelConfig, bus),
 		projectID:       cfg.ProjectID,
 		credentials:     cfg.Credentials,
 		httpClient: &http.Client{
@@ -173,11 +174,11 @@ func (c *GoogleChatChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("google chat channel is not running")
 	}
 
-	msg.Content = AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	msg.Content = shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 优先使用 webhook URL 发送

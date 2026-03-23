@@ -1,8 +1,9 @@
-package channels
+package slack
 
 import (
 	"context"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // SlackChannel Slack 通道
 type SlackChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	client        *slack.Client
 	token         string
 	signingSecret string
@@ -22,7 +23,7 @@ type SlackChannel struct {
 
 // SlackConfig Slack 配置
 type SlackConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	Token         string `mapstructure:"token" json:"token"`
 	SigningSecret string `mapstructure:"signing_secret" json:"signing_secret"`
 }
@@ -34,7 +35,7 @@ func NewSlackChannel(cfg SlackConfig, bus *bus.MessageBus) (*SlackChannel, error
 	}
 
 	return &SlackChannel{
-		BaseChannelImpl: NewBaseChannelImpl("slack", "default", cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("slack", "default", cfg.BaseChannelConfig, bus),
 		token:           cfg.Token,
 		signingSecret:   cfg.SigningSecret,
 	}, nil
@@ -246,14 +247,14 @@ func (c *SlackChannel) Send(msg *bus.OutboundMessage) error {
 
 	// 统一媒体处理：优先图片附件，其余降级为文本链接
 	if len(msg.Media) > 0 {
-		content = AppendMediaURLsToContent(content, msg.Media, map[string]bool{
-			UnifiedMediaFile:  true,
-			UnifiedMediaVideo: true,
-			UnifiedMediaAudio: true,
+		content = shared.AppendMediaURLsToContent(content, msg.Media, map[string]bool{
+			shared.UnifiedMediaFile:  true,
+			shared.UnifiedMediaVideo: true,
+			shared.UnifiedMediaAudio: true,
 		})
 
 		for _, media := range msg.Media {
-			if NormalizeMediaType(media.Type) == UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
+			if shared.NormalizeMediaType(media.Type) == shared.UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
 				options = append(options, slack.MsgOptionAttachments(slack.Attachment{
 					ImageURL: media.URL,
 				}))

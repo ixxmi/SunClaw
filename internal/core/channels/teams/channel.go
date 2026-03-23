@@ -1,10 +1,11 @@
-package channels
+package teams
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"strings"
@@ -17,7 +18,7 @@ import (
 
 // TeamsChannel Microsoft Teams 通道
 type TeamsChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	appID       string
 	appPassword string
 	tenantID    string
@@ -27,7 +28,7 @@ type TeamsChannel struct {
 
 // TeamsConfig Teams 配置
 type TeamsConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	AppID       string `mapstructure:"app_id" json:"app_id"`
 	AppPassword string `mapstructure:"app_password" json:"app_password"`
 	TenantID    string `mapstructure:"tenant_id" json:"tenant_id"`
@@ -41,7 +42,7 @@ func NewTeamsChannel(cfg TeamsConfig, bus *bus.MessageBus) (*TeamsChannel, error
 	}
 
 	return &TeamsChannel{
-		BaseChannelImpl: NewBaseChannelImpl("teams", "default", cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("teams", "default", cfg.BaseChannelConfig, bus),
 		appID:           cfg.AppID,
 		appPassword:     cfg.AppPassword,
 		tenantID:        cfg.TenantID,
@@ -167,11 +168,11 @@ func (c *TeamsChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("teams channel is not running")
 	}
 
-	msg.Content = AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	msg.Content = shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 优先使用配置的 webhook URL

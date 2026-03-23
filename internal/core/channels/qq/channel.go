@@ -1,9 +1,10 @@
-package channels
+package qq
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"sync"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 // QQChannel QQ 官方开放平台 Bot 通道
 // 使用 botgo SDK 实现：https://github.com/tencent-connect/botgo
 type QQChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	appID        string
 	appSecret    string
 	api          openapi.OpenAPI
@@ -119,14 +120,14 @@ func NewQQChannel(accountID string, cfg config.QQChannelConfig, bus *bus.Message
 		return nil, fmt.Errorf("qq app_id and app_secret are required")
 	}
 
-	baseCfg := BaseChannelConfig{
+	baseCfg := shared.BaseChannelConfig{
 		Enabled:    cfg.Enabled,
 		AccountID:  accountID,
 		AllowedIDs: cfg.AllowedIDs,
 	}
 
 	return &QQChannel{
-		BaseChannelImpl: NewBaseChannelImpl("qq", accountID, baseCfg, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("qq", accountID, baseCfg, bus),
 		appID:           cfg.AppID,
 		appSecret:       cfg.AppSecret,
 		msgSeqMap:       make(map[string]int64),
@@ -575,11 +576,11 @@ func (c *QQChannel) Send(msg *bus.OutboundMessage) error {
 	// 获取或递增 msg_seq
 	msgSeq := c.getNextMsgSeq(msg.ChatID)
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 构建消息

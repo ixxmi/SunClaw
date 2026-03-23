@@ -1,9 +1,10 @@
-package channels
+package imessage
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"strings"
@@ -16,14 +17,14 @@ import (
 
 // IMessageChannel iMessage 通道（通过 bridge 接入）
 type IMessageChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	bridgeURL string
 	client    *http.Client
 }
 
 // IMessageConfig iMessage 配置
 type IMessageConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	BridgeURL string `mapstructure:"bridge_url" json:"bridge_url"`
 }
 
@@ -40,7 +41,7 @@ type IMessageBridgeMessage struct {
 // NewIMessageChannel 创建 iMessage 通道
 func NewIMessageChannel(accountID string, cfg IMessageConfig, bus *bus.MessageBus) (*IMessageChannel, error) {
 	return &IMessageChannel{
-		BaseChannelImpl: NewBaseChannelImpl("imessage", accountID, cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("imessage", accountID, cfg.BaseChannelConfig, bus),
 		bridgeURL:       strings.TrimRight(cfg.BridgeURL, "/"),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -167,11 +168,11 @@ func (c *IMessageChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("imessage channel is not running")
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	data := map[string]interface{}{

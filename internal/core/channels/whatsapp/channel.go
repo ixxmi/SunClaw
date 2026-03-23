@@ -1,9 +1,10 @@
-package channels
+package whatsapp
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"strings"
@@ -16,21 +17,21 @@ import (
 
 // WhatsAppChannel WhatsApp 通道
 type WhatsAppChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	bridgeURL string
 	client    *http.Client
 }
 
 // WhatsAppConfig WhatsApp 配置
 type WhatsAppConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	BridgeURL string `mapstructure:"bridge_url" json:"bridge_url"`
 }
 
 // NewWhatsAppChannel 创建 WhatsApp 通道
 func NewWhatsAppChannel(cfg WhatsAppConfig, bus *bus.MessageBus) (*WhatsAppChannel, error) {
 	return &WhatsAppChannel{
-		BaseChannelImpl: NewBaseChannelImpl("whatsapp", "default", cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("whatsapp", "default", cfg.BaseChannelConfig, bus),
 		bridgeURL:       cfg.BridgeURL,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -149,11 +150,11 @@ func (c *WhatsAppChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("whatsapp channel is not running")
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 构建请求数据

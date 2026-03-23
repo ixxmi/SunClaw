@@ -67,6 +67,15 @@ channels:
         allowed_ids: []
         enabled: false
         token: ""
+    weixin:
+        allowed_ids: []
+        mode: bridge
+        token: ""
+        base_url: ""
+        cdn_base_url: ""
+        proxy: ""
+        bridge_url: ""
+        enabled: false
     wework:
         agent_id: ""
         corp_id: ""

@@ -421,6 +421,74 @@ func (m *Manager) SetupFromConfig(cfg *config.Config) error {
 		}
 	}
 
+	// 微信通道
+	if cfg.Channels.Weixin.Enabled {
+		if len(cfg.Channels.Weixin.Accounts) > 0 {
+			for accountID, accountCfg := range cfg.Channels.Weixin.Accounts {
+				if accountCfg.Enabled {
+					wxCfg := WeixinConfig{
+						BaseChannelConfig: BaseChannelConfig{
+							Enabled:    accountCfg.Enabled,
+							AccountID:  accountID,
+							Name:       accountCfg.Name,
+							AllowedIDs: accountCfg.AllowedIDs,
+						},
+						Mode:       accountCfg.Mode,
+						Token:      accountCfg.Token,
+						BaseURL:    accountCfg.BaseURL,
+						CDNBaseURL: accountCfg.CDNBaseURL,
+						Proxy:      accountCfg.Proxy,
+						BridgeURL:  accountCfg.BridgeURL,
+					}
+					if resolveWeixinRuntimeMode(wxCfg) == weixinModeBridge && wxCfg.BridgeURL == "" {
+						continue
+					}
+
+					channel, err := NewWeixinChannel(accountID, wxCfg, m.bus)
+					if err != nil {
+						logger.Error("Failed to create Weixin channel",
+							zap.String("account_id", accountID),
+							zap.Error(err))
+					} else {
+						channelName := buildChannelName("weixin", accountID)
+						if err := m.RegisterWithName(channel, channelName); err != nil {
+							logger.Error("Failed to register Weixin channel",
+								zap.String("account_id", accountID),
+								zap.Error(err))
+						}
+					}
+				}
+			}
+		} else {
+			wxCfg := WeixinConfig{
+				BaseChannelConfig: BaseChannelConfig{
+					Enabled:    cfg.Channels.Weixin.Enabled,
+					AccountID:  "default",
+					AllowedIDs: cfg.Channels.Weixin.AllowedIDs,
+				},
+				Mode:       cfg.Channels.Weixin.Mode,
+				Token:      cfg.Channels.Weixin.Token,
+				BaseURL:    cfg.Channels.Weixin.BaseURL,
+				CDNBaseURL: cfg.Channels.Weixin.CDNBaseURL,
+				Proxy:      cfg.Channels.Weixin.Proxy,
+				BridgeURL:  cfg.Channels.Weixin.BridgeURL,
+			}
+			if resolveWeixinRuntimeMode(wxCfg) == weixinModeBridge && wxCfg.BridgeURL == "" {
+				goto afterWeixin
+			}
+
+			channel, err := NewWeixinChannel("default", wxCfg, m.bus)
+			if err != nil {
+				logger.Error("Failed to create Weixin channel", zap.Error(err))
+			} else {
+				if err := m.Register(channel); err != nil {
+					logger.Error("Failed to register Weixin channel", zap.Error(err))
+				}
+			}
+		}
+	}
+afterWeixin:
+
 	// iMessage 通道
 	if cfg.Channels.IMessage.Enabled {
 		if len(cfg.Channels.IMessage.Accounts) > 0 {

@@ -294,6 +294,7 @@ func (v *Validator) validateChannels(cfg *Config) error {
 	validators := []func(*ChannelsConfig) error{
 		v.validateTelegram,
 		v.validateWhatsApp,
+		v.validateWeixin,
 		v.validateIMessage,
 		v.validateFeishu,
 		v.validateQQ,
@@ -407,6 +408,101 @@ func (v *Validator) validateWhatsApp(channels *ChannelsConfig) error {
 	}
 
 	return nil
+}
+
+// validateWeixin validates Weixin channel configuration
+func (v *Validator) validateWeixin(channels *ChannelsConfig) error {
+	if len(channels.Weixin.Accounts) > 0 {
+		for accountID, account := range channels.Weixin.Accounts {
+			if err := validateChannelAccountID("weixin", accountID); err != nil {
+				return err
+			}
+			if !account.Enabled {
+				continue
+			}
+			if err := validateWeixinConfigValues(
+				fmt.Sprintf("weixin account %s", accountID),
+				account.Mode,
+				account.BridgeURL,
+				account.Token,
+				account.BaseURL,
+				account.CDNBaseURL,
+				account.Proxy,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if !channels.Weixin.Enabled {
+		return nil
+	}
+
+	if err := validateWeixinConfigValues(
+		"weixin",
+		channels.Weixin.Mode,
+		channels.Weixin.BridgeURL,
+		channels.Weixin.Token,
+		channels.Weixin.BaseURL,
+		channels.Weixin.CDNBaseURL,
+		channels.Weixin.Proxy,
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateWeixinConfigValues(prefix, mode, bridgeURL, token, baseURL, cdnBaseURL, proxy string) error {
+	resolvedMode, err := resolveWeixinMode(mode, bridgeURL, token, baseURL, cdnBaseURL, proxy)
+	if err != nil {
+		return err
+	}
+
+	if resolvedMode == "direct" {
+		if err := validateRequiredChannelValue(prefix+" token", token); err != nil {
+			return err
+		}
+		if strings.TrimSpace(baseURL) != "" {
+			if err := validateAbsoluteURL(prefix+" base_url", baseURL); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(cdnBaseURL) != "" {
+			if err := validateAbsoluteURL(prefix+" cdn_base_url", cdnBaseURL); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(proxy) != "" {
+			if err := validateAbsoluteURL(prefix+" proxy", proxy); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := validateRequiredChannelValue(prefix+" bridge_url", bridgeURL); err != nil {
+		return err
+	}
+	return validateAbsoluteURL(prefix+" bridge_url", bridgeURL)
+}
+
+func resolveWeixinMode(mode, bridgeURL, token, baseURL, cdnBaseURL, proxy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "bridge":
+		if strings.TrimSpace(bridgeURL) != "" {
+			return "bridge", nil
+		}
+		if strings.TrimSpace(token) != "" || strings.TrimSpace(baseURL) != "" || strings.TrimSpace(cdnBaseURL) != "" || strings.TrimSpace(proxy) != "" {
+			return "direct", nil
+		}
+		return "bridge", nil
+	case "direct", "native", "ilink":
+		return "direct", nil
+	default:
+		return "", errors.InvalidConfig(fmt.Sprintf("invalid weixin mode: %s", mode))
+	}
 }
 
 // validateIMessage validates iMessage channel configuration

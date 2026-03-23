@@ -1,8 +1,9 @@
-package channels
+package discord
 
 import (
 	"context"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"strings"
 	"time"
 
@@ -14,14 +15,14 @@ import (
 
 // DiscordChannel Discord 通道
 type DiscordChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	session *discordgo.Session
 	token   string
 }
 
 // DiscordConfig Discord 配置
 type DiscordConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	Token string `mapstructure:"token" json:"token"`
 }
 
@@ -32,7 +33,7 @@ func NewDiscordChannel(cfg DiscordConfig, bus *bus.MessageBus) (*DiscordChannel,
 	}
 
 	return &DiscordChannel{
-		BaseChannelImpl: NewBaseChannelImpl("discord", "default", cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("discord", "default", cfg.BaseChannelConfig, bus),
 		token:           cfg.Token,
 	}, nil
 }
@@ -222,14 +223,14 @@ func (c *DiscordChannel) Send(msg *bus.OutboundMessage) error {
 
 	// 统一媒体处理：图片走 embed，其余降级为文本链接
 	if len(msg.Media) > 0 {
-		content = AppendMediaURLsToContent(content, msg.Media, map[string]bool{
-			UnifiedMediaFile:  true,
-			UnifiedMediaVideo: true,
-			UnifiedMediaAudio: true,
+		content = shared.AppendMediaURLsToContent(content, msg.Media, map[string]bool{
+			shared.UnifiedMediaFile:  true,
+			shared.UnifiedMediaVideo: true,
+			shared.UnifiedMediaAudio: true,
 		})
 
 		for _, media := range msg.Media {
-			if NormalizeMediaType(media.Type) == UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
+			if shared.NormalizeMediaType(media.Type) == shared.UnifiedMediaImage && strings.TrimSpace(media.URL) != "" {
 				discordMsg.Embeds = append(discordMsg.Embeds, &discordgo.MessageEmbed{
 					Image: &discordgo.MessageEmbedImage{URL: media.URL},
 				})

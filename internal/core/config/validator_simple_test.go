@@ -260,3 +260,34 @@ func TestValidateWhatsAppRejectsNonAbsoluteBridgeURL(t *testing.T) {
 		t.Fatal("expected whatsapp bridge_url without scheme to be invalid")
 	}
 }
+
+func TestValidateWeixinDirectMode(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeixin(&ChannelsConfig{
+		Weixin: WeixinChannelConfig{
+			Enabled: true,
+			Mode:    "direct",
+			Token:   "bot-token",
+			BaseURL: "https://ilinkai.weixin.qq.com/",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected weixin direct config to be valid, got %v", err)
+	}
+}
+
+func TestValidateWeixinDirectModeMissingToken(t *testing.T) {
+	validator := NewValidator(true)
+
+	err := validator.validateWeixin(&ChannelsConfig{
+		Weixin: WeixinChannelConfig{
+			Enabled: true,
+			Mode:    "direct",
+			BaseURL: "https://ilinkai.weixin.qq.com/",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected weixin direct config without token to be invalid")
+	}
+}

@@ -1,8 +1,12 @@
-package channels
+package telegram
 
 import (
 	"context"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
+	"io"
+	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +19,7 @@ import (
 
 // TelegramChannel Telegram 通道
 type TelegramChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	bot                *telegrambot.BotAPI
 	token              string
 	inlineButtonsScope TelegramInlineButtonsScope
@@ -23,7 +27,7 @@ type TelegramChannel struct {
 
 // TelegramConfig Telegram 配置
 type TelegramConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	Token              string `mapstructure:"token" json:"token"`
 	InlineButtonsScope string `mapstructure:"inline_buttons_scope" json:"inline_buttons_scope"`
 }
@@ -71,7 +75,7 @@ func NewTelegramChannel(accountID string, cfg TelegramConfig, bus *bus.MessageBu
 	}
 
 	return &TelegramChannel{
-		BaseChannelImpl:    NewBaseChannelImpl("telegram", accountID, cfg.BaseChannelConfig, bus),
+		BaseChannelImpl:    shared.NewBaseChannelImpl("telegram", accountID, cfg.BaseChannelConfig, bus),
 		bot:                bot,
 		token:              cfg.Token,
 		inlineButtonsScope: inlineScope,
@@ -279,22 +283,34 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("invalid chat id: %w", err)
 	}
 
-	// 发送 typing indicator，让用户知道 bot 正在处理请求
-	action := telegrambot.NewChatAction(chatID, telegrambot.ChatTyping)
-	if _, err := c.bot.Send(action); err != nil {
-		// 忽略 typing indicator 发送失败，不影响主消息
-		logger.Debug("Failed to send typing indicator", zap.Error(err))
+	selectedMedia, hasMedia := shared.SelectFirstSupportedMedia(msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+	})
+
+	chatActionType := telegrambot.ChatTyping
+	if hasMedia {
+		switch selectedMedia.Type {
+		case shared.UnifiedMediaImage:
+			chatActionType = telegrambot.ChatUploadPhoto
+		case shared.UnifiedMediaFile:
+			chatActionType = telegrambot.ChatUploadDocument
+		}
+	}
+
+	// 发送 chat action，让用户知道 bot 正在处理请求
+	action := telegrambot.NewChatAction(chatID, chatActionType)
+	if _, err := c.bot.Request(action); err != nil {
+		// 忽略 chat action 发送失败，不影响主消息
+		logger.Debug("Failed to send telegram chat action", zap.Error(err))
 	}
 
 	// 统一媒体发送：Telegram 支持 image/file
-	if media, ok := SelectFirstSupportedMedia(msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-	}); ok {
-		if err := c.sendUnifiedMediaMessage(chatID, media, msg.Content, msg.ReplyTo); err == nil {
+	if hasMedia {
+		if err := c.sendUnifiedMediaMessage(chatID, selectedMedia, msg.Content, msg.ReplyTo); err == nil {
 			logger.Info("Telegram media message sent",
 				zap.Int64("chat_id", chatID),
-				zap.String("media_type", media.Type),
+				zap.String("media_type", selectedMedia.Type),
 			)
 			return nil
 		} else {
@@ -326,52 +342,106 @@ func (c *TelegramChannel) Send(msg *bus.OutboundMessage) error {
 func (c *TelegramChannel) sendUnifiedMediaMessage(chatID int64, media bus.Media, caption, replyTo string) error {
 	replyToID, _ := parseTelegramReplyToID(replyTo)
 
-	t := NormalizeMediaType(media.Type)
-	if t == UnifiedMediaImage {
-		var cfg telegrambot.PhotoConfig
-		if strings.TrimSpace(media.Base64) == "" && strings.TrimSpace(media.URL) != "" {
-			cfg = telegrambot.NewPhoto(chatID, telegrambot.FileURL(media.URL))
-		} else {
-			data, err := MaterializeMediaData(nil, media, 20<<20)
-			if err != nil {
-				return err
-			}
-			cfg = telegrambot.NewPhoto(chatID, telegrambot.FileBytes{
-				Name:  InferMediaFileName(media, "image.jpg"),
-				Bytes: data,
-			})
+	t := shared.NormalizeMediaType(media.Type)
+	if t == shared.UnifiedMediaImage {
+		file, err := c.buildTelegramUpload(media, 10<<20, "image.jpg")
+		if err != nil {
+			return err
 		}
+		cfg := telegrambot.NewPhoto(chatID, file)
 		cfg.Caption = caption
 		if replyToID > 0 {
 			cfg.ReplyToMessageID = replyToID
 		}
-		_, err := c.bot.Send(cfg)
+		_, err = c.bot.Send(cfg)
 		return err
 	}
 
-	if t == UnifiedMediaFile {
-		var cfg telegrambot.DocumentConfig
-		if strings.TrimSpace(media.Base64) == "" && strings.TrimSpace(media.URL) != "" {
-			cfg = telegrambot.NewDocument(chatID, telegrambot.FileURL(media.URL))
-		} else {
-			data, err := MaterializeMediaData(nil, media, 50<<20)
-			if err != nil {
-				return err
-			}
-			cfg = telegrambot.NewDocument(chatID, telegrambot.FileBytes{
-				Name:  InferMediaFileName(media, "attachment"),
-				Bytes: data,
-			})
+	if t == shared.UnifiedMediaFile {
+		file, err := c.buildTelegramUpload(media, 50<<20, "attachment")
+		if err != nil {
+			return err
 		}
+		cfg := telegrambot.NewDocument(chatID, file)
 		cfg.Caption = caption
 		if replyToID > 0 {
 			cfg.ReplyToMessageID = replyToID
 		}
-		_, err := c.bot.Send(cfg)
+		_, err = c.bot.Send(cfg)
 		return err
 	}
 
 	return fmt.Errorf("unsupported telegram media type: %s", media.Type)
+}
+
+func (c *TelegramChannel) buildTelegramUpload(media bus.Media, maxBytes int64, fallbackName string) (telegrambot.RequestFileData, error) {
+	data, err := c.materializeTelegramUploadData(media, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return telegrambot.FileBytes{
+		Name:  shared.InferMediaFileName(media, fallbackName),
+		Bytes: data,
+	}, nil
+}
+
+func (c *TelegramChannel) materializeTelegramUploadData(media bus.Media, maxBytes int64) ([]byte, error) {
+	if strings.TrimSpace(media.Base64) != "" {
+		data, err := shared.DecodeBase64Media(media.Base64)
+		if err != nil {
+			return nil, err
+		}
+		if maxBytes > 0 && int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("media exceeds size limit: %d > %d", len(data), maxBytes)
+		}
+		return data, nil
+	}
+
+	rawURL := strings.TrimSpace(media.URL)
+	if rawURL == "" {
+		return nil, fmt.Errorf("media has neither base64 nor url")
+	}
+
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid media url: %w", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return nil, fmt.Errorf("telegram official Bot API requires uploaded bytes or an http(s) media URL, got %q", rawURL)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build media download request failed: %w", err)
+	}
+
+	client := c.bot.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download media failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download media failed with status %d", resp.StatusCode)
+	}
+
+	reader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		reader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read media body failed: %w", err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("media exceeds size limit: %d > %d", len(data), maxBytes)
+	}
+	return data, nil
 }
 
 func parseTelegramReplyToID(replyTo string) (int, bool) {
@@ -398,7 +468,7 @@ func (c *TelegramChannel) SendTypingIndicator(chatID int64) error {
 	}
 
 	action := telegrambot.NewChatAction(chatID, telegrambot.ChatTyping)
-	_, err := c.bot.Send(action)
+	_, err := c.bot.Request(action)
 	return err
 }
 
@@ -555,7 +625,7 @@ func (c *TelegramChannel) AnswerCallbackQuery(
 	callback := telegrambot.NewCallback(callbackQueryID, text)
 	callback.ShowAlert = showAlert
 
-	_, err := c.bot.Send(callback)
+	_, err := c.bot.Request(callback)
 	if err != nil {
 		return fmt.Errorf("failed to answer callback query: %w", err)
 	}

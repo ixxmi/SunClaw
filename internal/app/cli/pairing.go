@@ -11,7 +11,7 @@ import (
 )
 
 // Supported channels for pairing
-var supportedChannels = []string{"telegram", "whatsapp", "signal", "imessage", "discord", "slack", "feishu"}
+var supportedChannels = []string{"telegram", "whatsapp", "weixin", "signal", "imessage", "discord", "slack", "feishu"}
 
 var pairingCmd = &cobra.Command{
 	Use:   "pairing",
@@ -21,7 +21,7 @@ var pairingCmd = &cobra.Command{
 Pairing is used when a channel's dmPolicy is set to "pairing". Unknown senders
 will receive a pairing code and must be approved before their messages are processed.
 
-Supported channels: telegram, whatsapp, signal, imessage, discord, slack, feishu`,
+Supported channels: telegram, whatsapp, weixin, signal, imessage, discord, slack, feishu`,
 }
 
 var pairingListCmd = &cobra.Command{

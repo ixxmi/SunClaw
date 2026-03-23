@@ -1,8 +1,9 @@
-package channels
+package infoflow
 
 import (
 	"context"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 // InfoflowChannel 百度如流通道
 type InfoflowChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	webhookURL  string
 	token       string
 	aesKey      string
@@ -26,7 +27,7 @@ type InfoflowChannel struct {
 
 // InfoflowConfig 如流通道配置
 type InfoflowConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	WebhookURL  string `json:"webhook_url" mapstructure:"webhook_url"`
 	Token       string `json:"token" mapstructure:"token"`
 	AESKey      string `json:"aes_key" mapstructure:"aes_key"`
@@ -45,7 +46,7 @@ func NewInfoflowChannel(accountID string, cfg InfoflowConfig, bus *bus.MessageBu
 	}
 
 	return &InfoflowChannel{
-		BaseChannelImpl: NewBaseChannelImpl("infoflow", accountID, cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("infoflow", accountID, cfg.BaseChannelConfig, bus),
 		webhookURL:      cfg.WebhookURL,
 		token:           cfg.Token,
 		aesKey:          cfg.AESKey,
@@ -182,11 +183,11 @@ func (c *InfoflowChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("invalid chat_id: %w", err)
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 发送文本消息

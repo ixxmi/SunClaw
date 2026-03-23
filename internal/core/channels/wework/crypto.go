@@ -1,4 +1,4 @@
-package channels
+package wework
 
 import (
 	"crypto/aes"

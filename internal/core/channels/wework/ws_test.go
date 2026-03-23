@@ -1,4 +1,4 @@
-package channels
+package wework
 
 import (
 	"bufio"
@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"image"
 	"image/color"
 	"image/png"
@@ -131,7 +132,7 @@ func TestWeWorkHandleLongConnImageMessageDecryptsMedia(t *testing.T) {
 	if len(inbound.Media) != 1 {
 		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
 	}
-	if inbound.Media[0].Type != UnifiedMediaImage {
+	if inbound.Media[0].Type != shared.UnifiedMediaImage {
 		t.Fatalf("expected media type image, got %q", inbound.Media[0].Type)
 	}
 	if inbound.Media[0].URL != "" {
@@ -202,7 +203,7 @@ func TestWeWorkHandleLongConnFileMessageDecryptsMedia(t *testing.T) {
 	if len(inbound.Media) != 1 {
 		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
 	}
-	if inbound.Media[0].Type != UnifiedMediaFile {
+	if inbound.Media[0].Type != shared.UnifiedMediaFile {
 		t.Fatalf("expected media type file, got %q", inbound.Media[0].Type)
 	}
 	if inbound.Media[0].URL != "" {
@@ -563,7 +564,7 @@ func TestWeWorkSendLongConnMessageUploadsImageReply(t *testing.T) {
 		if err := json.Unmarshal(frame.Body, &body); err != nil {
 			return err
 		}
-		if body.Type != UnifiedMediaImage {
+		if body.Type != shared.UnifiedMediaImage {
 			return fmt.Errorf("unexpected init type: %s", body.Type)
 		}
 		if body.Filename != "image.png" {
@@ -629,7 +630,7 @@ func TestWeWorkSendLongConnMessageUploadsImageReply(t *testing.T) {
 			return fmt.Errorf("unexpected finish upload_id: %s", finishBody.UploadID)
 		}
 		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
-			"type":       UnifiedMediaImage,
+			"type":       shared.UnifiedMediaImage,
 			"media_id":   "media-image-1",
 			"created_at": "1380000000",
 		}); err != nil {
@@ -655,7 +656,7 @@ func TestWeWorkSendLongConnMessageUploadsImageReply(t *testing.T) {
 		if err := json.Unmarshal(frame.Body, &replyBody); err != nil {
 			return err
 		}
-		if replyBody.MsgType != UnifiedMediaImage {
+		if replyBody.MsgType != shared.UnifiedMediaImage {
 			return fmt.Errorf("unexpected reply msgtype: %s", replyBody.MsgType)
 		}
 		if replyBody.Image.MediaID != "media-image-1" {
@@ -692,7 +693,7 @@ func TestWeWorkSendLongConnMessageUploadsImageReply(t *testing.T) {
 		Timestamp: time.Now(),
 		Media: []bus.Media{
 			{
-				Type:   UnifiedMediaImage,
+				Type:   shared.UnifiedMediaImage,
 				Name:   "image.png",
 				Base64: base64.StdEncoding.EncodeToString(raw),
 			},
@@ -756,7 +757,7 @@ func TestWeWorkSendLongConnMessageSendsTextThenFileReply(t *testing.T) {
 		if err := json.Unmarshal(frame.Body, &initBody); err != nil {
 			return err
 		}
-		if initBody.Type != UnifiedMediaFile {
+		if initBody.Type != shared.UnifiedMediaFile {
 			return fmt.Errorf("unexpected init type: %s", initBody.Type)
 		}
 		if initBody.Filename != "report.pdf" {
@@ -822,7 +823,7 @@ func TestWeWorkSendLongConnMessageSendsTextThenFileReply(t *testing.T) {
 			return fmt.Errorf("unexpected finish upload_id: %s", finishBody.UploadID)
 		}
 		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
-			"type":       UnifiedMediaFile,
+			"type":       shared.UnifiedMediaFile,
 			"media_id":   "media-file-1",
 			"created_at": "1380000000",
 		}); err != nil {
@@ -848,7 +849,7 @@ func TestWeWorkSendLongConnMessageSendsTextThenFileReply(t *testing.T) {
 		if err := json.Unmarshal(frame.Body, &replyBody); err != nil {
 			return err
 		}
-		if replyBody.MsgType != UnifiedMediaFile {
+		if replyBody.MsgType != shared.UnifiedMediaFile {
 			return fmt.Errorf("unexpected file msgtype: %s", replyBody.MsgType)
 		}
 		if replyBody.File.MediaID != "media-file-1" {
@@ -886,7 +887,7 @@ func TestWeWorkSendLongConnMessageSendsTextThenFileReply(t *testing.T) {
 		Timestamp: time.Now(),
 		Media: []bus.Media{
 			{
-				Type:   UnifiedMediaFile,
+				Type:   shared.UnifiedMediaFile,
 				Name:   "report.pdf",
 				Base64: base64.StdEncoding.EncodeToString(raw),
 			},
@@ -1006,7 +1007,7 @@ func TestWeWorkSendStreamBatchesRapidChunks(t *testing.T) {
 
 func TestWeWorkUploadLongConnMediaRejectsUnsupportedImageFormat(t *testing.T) {
 	convertedMedia, convertedData, err := normalizeWeWorkUploadImage(bus.Media{
-		Type: UnifiedMediaImage,
+		Type: shared.UnifiedMediaImage,
 		Name: "animated.gif",
 	}, testWeWorkGIFData, weworkUploadImageMaxBytes)
 	if err != nil {
@@ -1038,7 +1039,7 @@ func TestWeWorkUploadLongConnMediaRejectsUnsupportedImageFormat(t *testing.T) {
 		t.Fatalf("png.Encode error: %v", err)
 	}
 	shrunkMedia, shrunkData, err := normalizeWeWorkUploadImage(bus.Media{
-		Type: UnifiedMediaImage,
+		Type: shared.UnifiedMediaImage,
 		Name: "large.png",
 	}, pngBuf.Bytes(), 1024)
 	if err != nil {
@@ -1064,7 +1065,7 @@ func TestWeWorkUploadLongConnMediaRejectsUnsupportedImageFormat(t *testing.T) {
 	}
 
 	_, _, err = channel.uploadLongConnMedia(context.Background(), bus.Media{
-		Type:   UnifiedMediaImage,
+		Type:   shared.UnifiedMediaImage,
 		Name:   "invalid.gif",
 		Base64: base64.StdEncoding.EncodeToString([]byte("GIF89a-invalid")),
 	})
@@ -1096,7 +1097,7 @@ func TestWeWorkUploadLongConnMediaRetriesWithSmallerImageOnInit40009(t *testing.
 		if err := json.Unmarshal(frame.Body, &firstInit); err != nil {
 			return err
 		}
-		if firstInit.Type != UnifiedMediaImage {
+		if firstInit.Type != shared.UnifiedMediaImage {
 			return fmt.Errorf("unexpected first init type: %s", firstInit.Type)
 		}
 		if firstInit.TotalSize <= weworkUploadImageSafeMaxBytes {
@@ -1172,7 +1173,7 @@ func TestWeWorkUploadLongConnMediaRetriesWithSmallerImageOnInit40009(t *testing.
 			return fmt.Errorf("unexpected finish command: %s", frame.Cmd)
 		}
 		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
-			"type":       UnifiedMediaImage,
+			"type":       shared.UnifiedMediaImage,
 			"media_id":   "media-retry-1",
 			"created_at": "1380000000",
 		}); err != nil {
@@ -1197,7 +1198,7 @@ func TestWeWorkUploadLongConnMediaRetriesWithSmallerImageOnInit40009(t *testing.
 	defer assertWeWorkTestReadLoopErr(t, readErrCh)
 
 	_, mediaID, err := channel.uploadLongConnMedia(context.Background(), bus.Media{
-		Type:   UnifiedMediaImage,
+		Type:   shared.UnifiedMediaImage,
 		Name:   "large.png",
 		Base64: largeImageBase64,
 	})
@@ -1231,7 +1232,7 @@ func TestWeWorkUploadLongConnMediaDowngradesSVGImageToFile(t *testing.T) {
 		if err := json.Unmarshal(frame.Body, &initBody); err != nil {
 			return err
 		}
-		if initBody.Type != UnifiedMediaFile {
+		if initBody.Type != shared.UnifiedMediaFile {
 			return fmt.Errorf("expected downgraded init type file, got %s", initBody.Type)
 		}
 		if initBody.Filename != "avatar.svg" {
@@ -1265,7 +1266,7 @@ func TestWeWorkUploadLongConnMediaDowngradesSVGImageToFile(t *testing.T) {
 			return fmt.Errorf("unexpected third command: %s", frame.Cmd)
 		}
 		if err := writeWeWorkTestAck(conn, frame.Headers.ReqID, map[string]string{
-			"type":       UnifiedMediaFile,
+			"type":       shared.UnifiedMediaFile,
 			"media_id":   "media-svg-1",
 			"created_at": "1380000000",
 		}); err != nil {
@@ -1290,14 +1291,14 @@ func TestWeWorkUploadLongConnMediaDowngradesSVGImageToFile(t *testing.T) {
 	defer assertWeWorkTestReadLoopErr(t, readErrCh)
 
 	effectiveMedia, mediaID, err := channel.uploadLongConnMedia(context.Background(), bus.Media{
-		Type:   UnifiedMediaImage,
+		Type:   shared.UnifiedMediaImage,
 		Name:   "avatar.png",
 		Base64: base64.StdEncoding.EncodeToString([]byte(svg)),
 	})
 	if err != nil {
 		t.Fatalf("uploadLongConnMedia returned error: %v", err)
 	}
-	if effectiveMedia.Type != UnifiedMediaFile {
+	if effectiveMedia.Type != shared.UnifiedMediaFile {
 		t.Fatalf("expected effective media type file, got %s", effectiveMedia.Type)
 	}
 	if effectiveMedia.Name != "avatar.svg" {

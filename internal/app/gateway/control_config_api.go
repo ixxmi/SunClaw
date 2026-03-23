@@ -32,6 +32,9 @@ type controlChannelConfig struct {
 	Name              string   `json:"name"`
 	Mode              string   `json:"mode"`
 	Token             string   `json:"token"`
+	BaseURL           string   `json:"baseUrl"`
+	CDNBaseURL        string   `json:"cdnBaseUrl"`
+	Proxy             string   `json:"proxy"`
 	AppID             string   `json:"appId"`
 	AppSecret         string   `json:"appSecret"`
 	CorpID            string   `json:"corpId"`
@@ -293,6 +296,24 @@ func buildControlChannelConfigs(cfg *config.Config) []controlChannelConfig {
 		})
 	}
 
+	if len(cfg.Channels.Weixin.Accounts) > 0 {
+		appendAccountRows("weixin", cfg.Channels.Weixin.Accounts)
+	} else if cfg.Channels.Weixin.Enabled || cfg.Channels.Weixin.BridgeURL != "" || cfg.Channels.Weixin.Token != "" || len(cfg.Channels.Weixin.AllowedIDs) > 0 {
+		rows = append(rows, controlChannelConfig{
+			Channel:    "weixin",
+			AccountID:  "default",
+			Legacy:     true,
+			Enabled:    cfg.Channels.Weixin.Enabled,
+			Mode:       cfg.Channels.Weixin.Mode,
+			Token:      cfg.Channels.Weixin.Token,
+			BaseURL:    cfg.Channels.Weixin.BaseURL,
+			CDNBaseURL: cfg.Channels.Weixin.CDNBaseURL,
+			Proxy:      cfg.Channels.Weixin.Proxy,
+			BridgeURL:  cfg.Channels.Weixin.BridgeURL,
+			AllowedIDs: cloneStrings(cfg.Channels.Weixin.AllowedIDs),
+		})
+	}
+
 	if len(cfg.Channels.IMessage.Accounts) > 0 {
 		appendAccountRows("imessage", cfg.Channels.IMessage.Accounts)
 	} else if cfg.Channels.IMessage.Enabled || cfg.Channels.IMessage.BridgeURL != "" || len(cfg.Channels.IMessage.AllowedIDs) > 0 {
@@ -423,6 +444,9 @@ func controlChannelFromAccount(channel, accountID string, cfg config.ChannelAcco
 		Name:              cfg.Name,
 		Mode:              cfg.Mode,
 		Token:             cfg.Token,
+		BaseURL:           cfg.BaseURL,
+		CDNBaseURL:        cfg.CDNBaseURL,
+		Proxy:             cfg.Proxy,
 		AppID:             cfg.AppID,
 		AppSecret:         cfg.AppSecret,
 		CorpID:            cfg.CorpID,
@@ -458,6 +482,9 @@ func normalizeControlChannelRow(row *controlChannelConfig) {
 	row.Name = strings.TrimSpace(row.Name)
 	row.Mode = strings.TrimSpace(strings.ToLower(row.Mode))
 	row.Token = strings.TrimSpace(row.Token)
+	row.BaseURL = strings.TrimSpace(row.BaseURL)
+	row.CDNBaseURL = strings.TrimSpace(row.CDNBaseURL)
+	row.Proxy = strings.TrimSpace(row.Proxy)
 	row.AppID = strings.TrimSpace(row.AppID)
 	row.AppSecret = strings.TrimSpace(row.AppSecret)
 	row.CorpID = strings.TrimSpace(row.CorpID)
@@ -530,6 +557,30 @@ func applyControlChannelConfigs(cfg *config.Config, rows []controlChannelConfig)
 				account.BridgeURL = row.BridgeURL
 				account.AllowedIDs = row.AllowedIDs
 				cfg.Channels.WhatsApp.Accounts[row.AccountID] = account
+			}
+		case "weixin":
+			if row.Legacy {
+				cfg.Channels.Weixin.Enabled = row.Enabled
+				cfg.Channels.Weixin.Mode = row.Mode
+				cfg.Channels.Weixin.Token = row.Token
+				cfg.Channels.Weixin.BaseURL = row.BaseURL
+				cfg.Channels.Weixin.CDNBaseURL = row.CDNBaseURL
+				cfg.Channels.Weixin.Proxy = row.Proxy
+				cfg.Channels.Weixin.BridgeURL = row.BridgeURL
+				cfg.Channels.Weixin.AllowedIDs = row.AllowedIDs
+			} else {
+				ensureChannelAccountMap(&cfg.Channels.Weixin.Accounts)
+				account := cfg.Channels.Weixin.Accounts[row.AccountID]
+				account.Enabled = row.Enabled
+				account.Name = row.Name
+				account.Mode = row.Mode
+				account.Token = row.Token
+				account.BaseURL = row.BaseURL
+				account.CDNBaseURL = row.CDNBaseURL
+				account.Proxy = row.Proxy
+				account.BridgeURL = row.BridgeURL
+				account.AllowedIDs = row.AllowedIDs
+				cfg.Channels.Weixin.Accounts[row.AccountID] = account
 			}
 		case "imessage":
 			if row.Legacy {
@@ -690,6 +741,9 @@ func normalizeChannelEnabledFlags(cfg *config.Config) {
 	}
 	if len(cfg.Channels.WhatsApp.Accounts) > 0 {
 		cfg.Channels.WhatsApp.Enabled = anyEnabledAccount(cfg.Channels.WhatsApp.Accounts)
+	}
+	if len(cfg.Channels.Weixin.Accounts) > 0 {
+		cfg.Channels.Weixin.Enabled = anyEnabledAccount(cfg.Channels.Weixin.Accounts)
 	}
 	if len(cfg.Channels.IMessage.Accounts) > 0 {
 		cfg.Channels.IMessage.Enabled = anyEnabledAccount(cfg.Channels.IMessage.Accounts)

@@ -51,7 +51,7 @@ func init() {
 	agentCmd.Flags().StringVar(&agentSessionID, "session-id", "", "Use an explicit session id")
 	agentCmd.Flags().StringVar(&agentThinking, "thinking", "off", "Thinking level: off | minimal | low | medium | high")
 	agentCmd.Flags().BoolVar(&agentVerbose, "verbose", false, "Persist agent verbose level for the session")
-	agentCmd.Flags().StringVar(&agentChannel, "channel", "", "Delivery channel: last|telegram|whatsapp|discord|irc|googlechat|slack|signal|imessage|feishu|nostr|msteams|mattermost|nextcloud-talk|matrix|bluebubbles|line|zalo|wecom|zalouser|synology-chat|tlon")
+	agentCmd.Flags().StringVar(&agentChannel, "channel", "", "Delivery channel: last|telegram|whatsapp|weixin|discord|irc|googlechat|slack|signal|imessage|feishu|nostr|msteams|mattermost|nextcloud-talk|matrix|bluebubbles|line|zalo|wecom|zalouser|synology-chat|tlon")
 	agentCmd.Flags().BoolVar(&agentLocal, "local", false, "Run the embedded agent locally (requires model provider API keys in your shell)")
 	agentCmd.Flags().BoolVar(&agentDeliver, "deliver", false, "Send the agent's reply back to the selected channel")
 	agentCmd.Flags().BoolVar(&agentJSON, "json", false, "Output result as JSON")

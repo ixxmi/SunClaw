@@ -1,4 +1,4 @@
-package channels
+package wework
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"mime"
 	"net/http"
@@ -26,7 +27,7 @@ import (
 
 // WeWorkChannel 企业微信通道
 type WeWorkChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	corpID         string
 	agentID        string
 	secret         string
@@ -63,7 +64,7 @@ func NewWeWorkChannel(accountID string, cfg config.WeWorkChannelConfig, bus *bus
 		return nil, fmt.Errorf("unsupported wework mode: %s", cfg.Mode)
 	}
 
-	baseCfg := BaseChannelConfig{
+	baseCfg := shared.BaseChannelConfig{
 		Enabled:    cfg.Enabled,
 		AllowedIDs: cfg.AllowedIDs,
 	}
@@ -74,7 +75,7 @@ func NewWeWorkChannel(accountID string, cfg config.WeWorkChannelConfig, bus *bus
 	}
 
 	return &WeWorkChannel{
-		BaseChannelImpl: NewBaseChannelImpl("wework", accountID, baseCfg, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("wework", accountID, baseCfg, bus),
 		corpID:          cfg.CorpID,
 		agentID:         cfg.AgentID,
 		secret:          cfg.Secret,
@@ -315,21 +316,21 @@ func (c *WeWorkChannel) buildWebhookInboundMessage(senderID string, createTime i
 		}
 	case "image":
 		inMsg.Content = "[图片]"
-		media, err := c.downloadWebhookMediaByID(UnifiedMediaImage, mediaID, weworkUploadImageMaxBytes)
+		media, err := c.downloadWebhookMediaByID(shared.UnifiedMediaImage, mediaID, weworkUploadImageMaxBytes)
 		if err != nil {
 			return nil, err
 		}
 		inMsg.Media = []bus.Media{media}
 	case "file":
 		inMsg.Content = "[文件]"
-		media, err := c.downloadWebhookMediaByID(UnifiedMediaFile, mediaID, weworkUploadFileMaxBytes)
+		media, err := c.downloadWebhookMediaByID(shared.UnifiedMediaFile, mediaID, weworkUploadFileMaxBytes)
 		if err != nil {
 			return nil, err
 		}
 		inMsg.Media = []bus.Media{media}
 	case "voice":
 		inMsg.Content = "[语音]"
-		media, err := c.downloadWebhookMediaByID(UnifiedMediaAudio, mediaID, 2<<20)
+		media, err := c.downloadWebhookMediaByID(shared.UnifiedMediaAudio, mediaID, 2<<20)
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +340,7 @@ func (c *WeWorkChannel) buildWebhookInboundMessage(senderID string, createTime i
 		inMsg.Media = []bus.Media{media}
 	case "video":
 		inMsg.Content = "[视频]"
-		media, err := c.downloadWebhookMediaByID(UnifiedMediaVideo, mediaID, 10<<20)
+		media, err := c.downloadWebhookMediaByID(shared.UnifiedMediaVideo, mediaID, 10<<20)
 		if err != nil {
 			return nil, err
 		}
@@ -450,7 +451,7 @@ func (c *WeWorkChannel) decryptMsg(encrypted string) ([]byte, error) {
 	}
 
 	// Step 1: Base64 解码密文
-	ciphertext, err := DecodeBase64Media(encrypted)
+	ciphertext, err := shared.DecodeBase64Media(encrypted)
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode failed: %w", err)
 	}
@@ -558,11 +559,11 @@ func (c *WeWorkChannel) Send(msg *bus.OutboundMessage) error {
 		return c.sendLongConnMessage(msg)
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 检查是否有 AI Bot response_url 缓存（AI Bot 消息必须通过 response_url 回复）

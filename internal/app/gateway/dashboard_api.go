@@ -339,6 +339,7 @@ func (s *Server) buildChannelRows() []dashboardChannel {
 
 	appendTopLevelChannelRows("telegram", "bot", s.config.Channels.Telegram.Enabled, s.config.Channels.Telegram.Accounts)
 	appendTopLevelChannelRows("whatsapp", "bridge", s.config.Channels.WhatsApp.Enabled, s.config.Channels.WhatsApp.Accounts)
+	appendTopLevelChannelRows("weixin", defaultString(s.config.Channels.Weixin.Mode, "bridge"), s.config.Channels.Weixin.Enabled, s.config.Channels.Weixin.Accounts)
 	appendTopLevelChannelRows("imessage", "bridge", s.config.Channels.IMessage.Enabled, s.config.Channels.IMessage.Accounts)
 	appendTopLevelChannelRows("feishu", "webhook", s.config.Channels.Feishu.Enabled, s.config.Channels.Feishu.Accounts)
 	appendTopLevelChannelRows("dingtalk", "oauth", s.config.Channels.DingTalk.Enabled, s.config.Channels.DingTalk.Accounts)

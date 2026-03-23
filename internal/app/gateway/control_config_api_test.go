@@ -64,3 +64,70 @@ func TestApplyControlChannelConfigsRejectsMissingMultiAccountID(t *testing.T) {
 		t.Fatal("expected missing account ID error")
 	}
 }
+
+func TestApplyControlChannelConfigsSupportsWeixinBridge(t *testing.T) {
+	cfg := &config.Config{}
+
+	err := applyControlChannelConfigs(cfg, []controlChannelConfig{
+		{
+			Channel:   "weixin",
+			AccountID: "wx-1",
+			Enabled:   true,
+			BridgeURL: "https://weixin-bridge.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("applyControlChannelConfigs returned error: %v", err)
+	}
+
+	account, ok := cfg.Channels.Weixin.Accounts["wx-1"]
+	if !ok {
+		t.Fatal("expected weixin account to be created")
+	}
+	if account.BridgeURL != "https://weixin-bridge.example.com" {
+		t.Fatalf("bridge_url = %q", account.BridgeURL)
+	}
+	if !cfg.Channels.Weixin.Enabled {
+		t.Fatal("expected weixin channel to be marked enabled")
+	}
+}
+
+func TestApplyControlChannelConfigsSupportsWeixinDirect(t *testing.T) {
+	cfg := &config.Config{}
+
+	err := applyControlChannelConfigs(cfg, []controlChannelConfig{
+		{
+			Channel:    "weixin",
+			AccountID:  "wx-direct",
+			Enabled:    true,
+			Mode:       "direct",
+			Token:      "bot-token",
+			BaseURL:    "https://ilinkai.weixin.qq.com/",
+			CDNBaseURL: "https://novac2c.cdn.weixin.qq.com/c2c",
+			Proxy:      "http://127.0.0.1:7890",
+		},
+	})
+	if err != nil {
+		t.Fatalf("applyControlChannelConfigs returned error: %v", err)
+	}
+
+	account, ok := cfg.Channels.Weixin.Accounts["wx-direct"]
+	if !ok {
+		t.Fatal("expected weixin account to be created")
+	}
+	if account.Mode != "direct" {
+		t.Fatalf("mode = %q, want direct", account.Mode)
+	}
+	if account.Token != "bot-token" {
+		t.Fatalf("token = %q, want bot-token", account.Token)
+	}
+	if account.BaseURL != "https://ilinkai.weixin.qq.com/" {
+		t.Fatalf("base_url = %q", account.BaseURL)
+	}
+	if account.CDNBaseURL != "https://novac2c.cdn.weixin.qq.com/c2c" {
+		t.Fatalf("cdn_base_url = %q", account.CDNBaseURL)
+	}
+	if account.Proxy != "http://127.0.0.1:7890" {
+		t.Fatalf("proxy = %q", account.Proxy)
+	}
+}

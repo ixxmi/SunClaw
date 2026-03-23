@@ -118,6 +118,7 @@ type BindingMatch struct {
 type ChannelsConfig struct {
 	Telegram TelegramChannelConfig `mapstructure:"telegram" json:"telegram"`
 	WhatsApp WhatsAppChannelConfig `mapstructure:"whatsapp" json:"whatsapp"`
+	Weixin   WeixinChannelConfig   `mapstructure:"weixin" json:"weixin"`
 	IMessage IMessageChannelConfig `mapstructure:"imessage" json:"imessage"`
 	Feishu   FeishuChannelConfig   `mapstructure:"feishu" json:"feishu"`
 	DingTalk DingTalkChannelConfig `mapstructure:"dingtalk" json:"dingtalk"`
@@ -133,6 +134,9 @@ type ChannelAccountConfig struct {
 	Name              string   `mapstructure:"name" json:"name"`                             // 账号显示名称
 	Mode              string   `mapstructure:"mode" json:"mode"`                             // 通道接入模式（如 webhook / websocket）
 	Token             string   `mapstructure:"token" json:"token"`                           // Telegram token
+	BaseURL           string   `mapstructure:"base_url" json:"base_url"`                     // Weixin direct base URL
+	CDNBaseURL        string   `mapstructure:"cdn_base_url" json:"cdn_base_url"`             // Weixin direct CDN base URL
+	Proxy             string   `mapstructure:"proxy" json:"proxy"`                           // Optional HTTP proxy URL
 	AppID             string   `mapstructure:"app_id" json:"app_id"`                         // QQ/Feishu/WeWork app_id
 	AppSecret         string   `mapstructure:"app_secret" json:"app_secret"`                 // QQ/Feishu app_secret
 	CorpID            string   `mapstructure:"corp_id" json:"corp_id"`                       // 企业微信 corp_id
@@ -173,6 +177,20 @@ type TelegramChannelConfig struct {
 // WhatsAppChannelConfig WhatsApp 通道配置
 type WhatsAppChannelConfig struct {
 	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
+	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
+	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	// 多账号配置（新格式）
+	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
+}
+
+// WeixinChannelConfig 微信通道配置
+type WeixinChannelConfig struct {
+	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
+	Mode       string   `mapstructure:"mode" json:"mode"`
+	Token      string   `mapstructure:"token" json:"token"`
+	BaseURL    string   `mapstructure:"base_url" json:"base_url"`
+	CDNBaseURL string   `mapstructure:"cdn_base_url" json:"cdn_base_url"`
+	Proxy      string   `mapstructure:"proxy" json:"proxy"`
 	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
 	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
 	// 多账号配置（新格式）

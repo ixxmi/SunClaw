@@ -1,10 +1,11 @@
-package channels
+package gotify
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +25,7 @@ const (
 
 // GotifyChannel Gotify 通道
 type GotifyChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	serverURL string
 	appToken  string
 	priority  int
@@ -33,7 +34,7 @@ type GotifyChannel struct {
 
 // GotifyConfig Gotify 配置
 type GotifyConfig struct {
-	BaseChannelConfig
+	shared.BaseChannelConfig
 	ServerURL string `mapstructure:"server_url" json:"server_url"`
 	AppToken  string `mapstructure:"app_token" json:"app_token"`
 	Priority  int    `mapstructure:"priority" json:"priority"` // 消息优先级 1-10
@@ -58,7 +59,7 @@ func NewGotifyChannel(accountID string, cfg GotifyConfig, bus *bus.MessageBus) (
 	}
 
 	return &GotifyChannel{
-		BaseChannelImpl: NewBaseChannelImpl("gotify", accountID, cfg.BaseChannelConfig, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("gotify", accountID, cfg.BaseChannelConfig, bus),
 		serverURL:       serverURL,
 		appToken:        cfg.AppToken,
 		priority:        priority,
@@ -158,11 +159,11 @@ func (c *GotifyChannel) Send(msg *bus.OutboundMessage) error {
 		return fmt.Errorf("gotify channel is not running")
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// 构建 Gotify 消息

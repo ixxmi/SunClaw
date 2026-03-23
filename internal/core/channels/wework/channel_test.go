@@ -1,4 +1,4 @@
-package channels
+package wework
 
 import (
 	"bytes"
@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/binary"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -160,7 +161,7 @@ func TestWeWorkHandleWebhookImageMessageUsesMediaID(t *testing.T) {
 	if len(inbound.Media) != 1 {
 		t.Fatalf("expected 1 media item, got %d", len(inbound.Media))
 	}
-	if inbound.Media[0].Type != UnifiedMediaImage {
+	if inbound.Media[0].Type != shared.UnifiedMediaImage {
 		t.Fatalf("expected image media type, got %q", inbound.Media[0].Type)
 	}
 	if inbound.Media[0].Name != "callback-image.png" {

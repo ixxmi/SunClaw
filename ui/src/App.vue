@@ -70,6 +70,7 @@ const isControlDirty = computed(() => {
 const channelFieldSupport: Record<string, string[]> = {
   telegram: ["token"],
   whatsapp: ["bridgeUrl"],
+  weixin: ["mode", "token", "baseUrl", "cdnBaseUrl", "proxy", "bridgeUrl"],
   imessage: ["bridgeUrl"],
   feishu: ["appId", "appSecret", "encryptKey", "verificationToken", "webhookPort"],
   qq: ["appId", "appSecret"],
@@ -92,6 +93,9 @@ const channelFieldSupport: Record<string, string[]> = {
 
 const fieldLabels: Record<string, string> = {
   token: "Token",
+  baseUrl: "Base URL",
+  cdnBaseUrl: "CDN Base URL",
+  proxy: "Proxy",
   appId: "App ID",
   appSecret: "App Secret",
   corpId: "Corp ID",
@@ -119,13 +123,23 @@ function normalizeWeWorkMode(mode: string) {
   return normalized || "webhook";
 }
 
+function normalizeWeixinMode(mode: string) {
+  const normalized = mode.trim().toLowerCase();
+  return normalized || "bridge";
+}
+
 function normalizeControlState(value: ControlConfig): ControlConfig {
   const next = JSON.parse(JSON.stringify(value)) as ControlConfig;
   next.channels = next.channels.map((item) => ({
     ...item,
     channel: item.channel.trim().toLowerCase(),
     accountId: item.accountId.trim(),
-    mode: item.channel.trim().toLowerCase() === "wework" ? normalizeWeWorkMode(item.mode) : item.mode.trim(),
+    mode:
+      item.channel.trim().toLowerCase() === "wework"
+        ? normalizeWeWorkMode(item.mode)
+        : item.channel.trim().toLowerCase() === "weixin"
+          ? normalizeWeixinMode(item.mode)
+          : item.mode.trim(),
     secret: item.channel.trim().toLowerCase() === "wework" ? item.secret || item.appSecret : item.secret,
     allowedIds: Array.isArray(item.allowedIds) ? item.allowedIds : [],
   }));
@@ -192,6 +206,10 @@ function currentWeWorkMode(item: ControlChannelConfig) {
   return item.channel === "wework" ? normalizeWeWorkMode(item.mode) : item.mode.trim().toLowerCase();
 }
 
+function currentWeixinMode(item: ControlChannelConfig) {
+  return item.channel === "weixin" ? normalizeWeixinMode(item.mode) : item.mode.trim().toLowerCase();
+}
+
 function requiredFieldsForChannel(item: ControlChannelConfig) {
   switch (item.channel) {
     case "telegram":
@@ -199,6 +217,8 @@ function requiredFieldsForChannel(item: ControlChannelConfig) {
     case "whatsapp":
     case "imessage":
       return ["bridgeUrl"];
+    case "weixin":
+      return currentWeixinMode(item) === "direct" ? ["token"] : ["bridgeUrl"];
     case "feishu":
       return ["appId", "appSecret"];
     case "qq":
@@ -227,6 +247,12 @@ function channelFieldValue(item: ControlChannelConfig, field: string) {
   switch (field) {
     case "token":
       return item.token;
+    case "baseUrl":
+      return item.baseUrl;
+    case "cdnBaseUrl":
+      return item.cdnBaseUrl;
+    case "proxy":
+      return item.proxy;
     case "appId":
       return item.appId;
     case "appSecret":
@@ -302,6 +328,24 @@ function validateControlDraft(value: ControlConfig) {
 
     if ((item.channel === "whatsapp" || item.channel === "imessage") && !isAbsoluteUrl(item.bridgeUrl)) {
       issues.push(`${channelLabel(item)} 的 Bridge URL 必须是完整 URL。`);
+    }
+
+    if (item.channel === "weixin") {
+      if (currentWeixinMode(item) === "bridge") {
+        if (!isAbsoluteUrl(item.bridgeUrl)) {
+          issues.push(`${channelLabel(item)} 的 Bridge URL 必须是完整 URL。`);
+        }
+      } else {
+        if (item.baseUrl.trim() && !isAbsoluteUrl(item.baseUrl)) {
+          issues.push(`${channelLabel(item)} 的 Base URL 必须是完整 URL。`);
+        }
+        if (item.cdnBaseUrl.trim() && !isAbsoluteUrl(item.cdnBaseUrl)) {
+          issues.push(`${channelLabel(item)} 的 CDN Base URL 必须是完整 URL。`);
+        }
+        if (item.proxy.trim() && !isAbsoluteUrl(item.proxy)) {
+          issues.push(`${channelLabel(item)} 的 Proxy 必须是完整 URL。`);
+        }
+      }
     }
 
     if (item.channel === "infoflow" && !isAbsoluteUrl(item.webhookUrl)) {
@@ -762,6 +806,10 @@ onBeforeUnmount(() => {
                             <option value="webhook">webhook</option>
                             <option value="websocket">websocket</option>
                           </select>
+                          <select v-else-if="item.channel === 'weixin'" v-model="item.mode" class="select-input">
+                            <option value="bridge">bridge</option>
+                            <option value="direct">direct</option>
+                          </select>
                           <input
                             v-else
                             v-model="item.mode"
@@ -774,6 +822,21 @@ onBeforeUnmount(() => {
                         <label v-if="supportsField(item.channel, 'token')" class="input-field">
                           <span>Token</span>
                           <input v-model="item.token" class="text-input" type="text" />
+                        </label>
+
+                        <label v-if="supportsField(item.channel, 'baseUrl')" class="input-field full-width">
+                          <span>Base URL</span>
+                          <input v-model="item.baseUrl" class="text-input" type="text" />
+                        </label>
+
+                        <label v-if="supportsField(item.channel, 'cdnBaseUrl')" class="input-field full-width">
+                          <span>CDN Base URL</span>
+                          <input v-model="item.cdnBaseUrl" class="text-input" type="text" />
+                        </label>
+
+                        <label v-if="supportsField(item.channel, 'proxy')" class="input-field full-width">
+                          <span>Proxy</span>
+                          <input v-model="item.proxy" class="text-input" type="text" />
                         </label>
 
                         <label v-if="supportsField(item.channel, 'appId')" class="input-field">

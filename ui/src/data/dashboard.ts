@@ -198,6 +198,9 @@ export interface ControlChannelConfig {
   name: string;
   mode: string;
   token: string;
+  baseUrl: string;
+  cdnBaseUrl: string;
+  proxy: string;
   appId: string;
   appSecret: string;
   corpId: string;

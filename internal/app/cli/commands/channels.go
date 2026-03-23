@@ -115,6 +115,7 @@ func getAllKnownChannels() []ChannelInfo {
 		{Name: "feishu", Enabled: false},
 		{Name: "telegram", Enabled: false},
 		{Name: "whatsapp", Enabled: false},
+		{Name: "weixin", Enabled: false},
 		{Name: "qq", Enabled: false},
 		{Name: "wework", Enabled: false},
 		{Name: "dingtalk", Enabled: false},

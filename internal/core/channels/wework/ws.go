@@ -1,4 +1,4 @@
-package channels
+package wework
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
@@ -355,6 +356,9 @@ func (c *WeWorkChannel) readLongConnLoop(ctx context.Context, conn *websocket.Co
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("read wework websocket message failed: %w", err)
 		}
 
@@ -661,15 +665,15 @@ func (c *WeWorkChannel) extractLongConnMessageContentAndMedia(msg *weworkAiBotMe
 		}
 	case "image":
 		if msg.Image != nil {
-			addEncryptedMedia(UnifiedMediaImage, "[图片]", msg.Image.URL, msg.Image.AESKey, weworkUploadImageMaxBytes)
+			addEncryptedMedia(shared.UnifiedMediaImage, "[图片]", msg.Image.URL, msg.Image.AESKey, weworkUploadImageMaxBytes)
 		}
 	case "file":
 		if msg.File != nil {
-			addEncryptedMedia(UnifiedMediaFile, "[文件]", msg.File.URL, msg.File.AESKey, weworkUploadFileMaxBytes)
+			addEncryptedMedia(shared.UnifiedMediaFile, "[文件]", msg.File.URL, msg.File.AESKey, weworkUploadFileMaxBytes)
 		}
 	case "video":
 		if msg.Video != nil {
-			addEncryptedMedia(UnifiedMediaVideo, "[视频]", msg.Video.URL, msg.Video.AESKey, weworkUploadVideoMaxBytes)
+			addEncryptedMedia(shared.UnifiedMediaVideo, "[视频]", msg.Video.URL, msg.Video.AESKey, weworkUploadVideoMaxBytes)
 		}
 	case "mixed":
 		if msg.Mixed != nil {
@@ -681,7 +685,7 @@ func (c *WeWorkChannel) extractLongConnMessageContentAndMedia(msg *weworkAiBotMe
 					}
 				case "image":
 					if item.Image != nil {
-						addEncryptedMedia(UnifiedMediaImage, "[图片]", item.Image.URL, item.Image.AESKey, weworkUploadImageMaxBytes)
+						addEncryptedMedia(shared.UnifiedMediaImage, "[图片]", item.Image.URL, item.Image.AESKey, weworkUploadImageMaxBytes)
 					}
 				}
 			}
@@ -741,15 +745,15 @@ func (c *WeWorkChannel) downloadAndDecryptLongConnMedia(mediaURL, aesKey string,
 func inferWeWorkInboundMediaName(kind, mediaURL, mimeType string) string {
 	fallback := "attachment"
 	switch kind {
-	case UnifiedMediaImage:
+	case shared.UnifiedMediaImage:
 		fallback = "image"
-	case UnifiedMediaFile:
+	case shared.UnifiedMediaFile:
 		fallback = "file"
-	case UnifiedMediaVideo:
+	case shared.UnifiedMediaVideo:
 		fallback = "video"
 	}
 
-	name := InferMediaFileName(bus.Media{Type: kind, URL: mediaURL}, fallback)
+	name := shared.InferMediaFileName(bus.Media{Type: kind, URL: mediaURL}, fallback)
 	if filepath.Ext(name) != "" {
 		return name
 	}
@@ -854,20 +858,20 @@ func (c *WeWorkChannel) sendLongConnMessage(msg *bus.OutboundMessage) error {
 	var nativeMedia []bus.Media
 	var fallbackMedia []bus.Media
 	for _, media := range msg.Media {
-		media.Type = NormalizeMediaType(media.Type)
+		media.Type = shared.NormalizeMediaType(media.Type)
 		switch media.Type {
-		case UnifiedMediaImage, UnifiedMediaFile:
+		case shared.UnifiedMediaImage, shared.UnifiedMediaFile:
 			nativeMedia = append(nativeMedia, media)
 		default:
 			fallbackMedia = append(fallbackMedia, media)
 		}
 	}
 
-	content := AppendMediaURLsToContent(msg.Content, fallbackMedia, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	content := shared.AppendMediaURLsToContent(msg.Content, fallbackMedia, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	ctx := context.Background()
@@ -1090,8 +1094,8 @@ func (c *WeWorkChannel) sendLongConnTextMessage(ctx context.Context, chatID, con
 }
 
 func (c *WeWorkChannel) sendLongConnMediaMessage(ctx context.Context, chatID string, metadata map[string]interface{}, media bus.Media, replyCtx *weworkReplyContext) error {
-	media.Type = NormalizeMediaType(media.Type)
-	if media.Type != UnifiedMediaImage && media.Type != UnifiedMediaFile {
+	media.Type = shared.NormalizeMediaType(media.Type)
+	if media.Type != shared.UnifiedMediaImage && media.Type != shared.UnifiedMediaFile {
 		return fmt.Errorf("unsupported wework websocket media type: %s", media.Type)
 	}
 
@@ -1123,22 +1127,22 @@ func (c *WeWorkChannel) sendLongConnMediaMessage(ctx context.Context, chatID str
 }
 
 func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media) (bus.Media, string, error) {
-	media.Type = NormalizeMediaType(media.Type)
+	media.Type = shared.NormalizeMediaType(media.Type)
 
 	maxBytes := int64(weworkUploadFileMaxBytes)
 	fallbackName := "attachment"
 	switch media.Type {
-	case UnifiedMediaImage:
+	case shared.UnifiedMediaImage:
 		maxBytes = weworkUploadImageSourceMaxBytes
 		fallbackName = "image.jpg"
-	case UnifiedMediaFile:
+	case shared.UnifiedMediaFile:
 		maxBytes = weworkUploadFileMaxBytes
 	default:
 		return bus.Media{}, "", fmt.Errorf("unsupported wework websocket media type: %s", media.Type)
 	}
 
-	originalName := InferMediaFileName(media, fallbackName)
-	data, err := MaterializeMediaData(c.httpClient, media, maxBytes)
+	originalName := shared.InferMediaFileName(media, fallbackName)
+	data, err := shared.MaterializeMediaData(c.httpClient, media, maxBytes)
 	if err != nil {
 		return bus.Media{}, "", fmt.Errorf("materialize wework media failed: %w", err)
 	}
@@ -1157,14 +1161,14 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 	if downgradedMedia, downgraded := downgradeUnsupportedWeWorkImage(media, data); downgraded {
 		logger.Warn("WeWork does not support SVG image upload, falling back to file message",
 			zap.String("original_filename", originalName),
-			zap.String("fallback_filename", InferMediaFileName(downgradedMedia, "attachment.svg")),
+			zap.String("fallback_filename", shared.InferMediaFileName(downgradedMedia, "attachment.svg")),
 			zap.String("detected_content_type", originalDetectedType),
 			zap.Int("size_bytes", originalSize))
 		media = downgradedMedia
 		fallbackName = "attachment.svg"
 	}
 
-	if media.Type == UnifiedMediaImage {
+	if media.Type == shared.UnifiedMediaImage {
 		targetCaps := []int64{weworkUploadImageMaxBytes, weworkUploadImageSafeMaxBytes, weworkUploadImageRetryMaxBytes}
 		var lastErr error
 		seenCaps := make(map[int64]bool, len(targetCaps))
@@ -1188,7 +1192,7 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 			if preparedMedia.Name != originalName || len(preparedData) != originalSize || detectWeWorkMediaContentType(preparedData) != originalDetectedType {
 				logger.Info("WeWork image normalized before upload",
 					zap.String("original_filename", originalName),
-					zap.String("normalized_filename", InferMediaFileName(preparedMedia, fallbackName)),
+					zap.String("normalized_filename", shared.InferMediaFileName(preparedMedia, fallbackName)),
 					zap.String("original_content_type", originalDetectedType),
 					zap.String("normalized_content_type", detectWeWorkMediaContentType(preparedData)),
 					zap.Int("original_size_bytes", originalSize),
@@ -1205,7 +1209,7 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 			var cmdErr *weworkLongConnCommandError
 			if errors.As(uploadErr, &cmdErr) && cmdErr.ErrCode == 40009 && strings.EqualFold(strings.TrimSpace(cmdErr.Cmd), "aibot_upload_media_init") {
 				logger.Warn("WeWork rejected image size during init, retrying with stricter target",
-					zap.String("filename", InferMediaFileName(preparedMedia, fallbackName)),
+					zap.String("filename", shared.InferMediaFileName(preparedMedia, fallbackName)),
 					zap.Int("prepared_size_bytes", len(preparedData)),
 					zap.Int64("target_max_bytes", targetCap),
 					zap.Int("errcode", cmdErr.ErrCode),
@@ -1230,16 +1234,16 @@ func (c *WeWorkChannel) uploadLongConnMedia(ctx context.Context, media bus.Media
 }
 
 func downgradeUnsupportedWeWorkImage(media bus.Media, data []byte) (bus.Media, bool) {
-	media.Type = NormalizeMediaType(media.Type)
-	if media.Type != UnifiedMediaImage || !isWeWorkSVGImage(data, media) {
+	media.Type = shared.NormalizeMediaType(media.Type)
+	if media.Type != shared.UnifiedMediaImage || !isWeWorkSVGImage(data, media) {
 		return media, false
 	}
 
 	downgraded := media
-	downgraded.Type = UnifiedMediaFile
+	downgraded.Type = shared.UnifiedMediaFile
 	downgraded.MimeType = "image/svg+xml"
 
-	name := InferMediaFileName(media, "image")
+	name := shared.InferMediaFileName(media, "image")
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	if base == "" {
 		base = "image"
@@ -1252,7 +1256,7 @@ func isWeWorkSVGImage(data []byte, media bus.Media) bool {
 	if strings.EqualFold(strings.TrimSpace(media.MimeType), "image/svg+xml") {
 		return true
 	}
-	if strings.EqualFold(strings.ToLower(filepath.Ext(InferMediaFileName(media, ""))), ".svg") {
+	if strings.EqualFold(strings.ToLower(filepath.Ext(shared.InferMediaFileName(media, ""))), ".svg") {
 		return true
 	}
 
@@ -1274,7 +1278,7 @@ func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media b
 	if err := validateWeWorkUploadMedia(media, data); err != nil {
 		logger.Warn("WeWork media validation failed",
 			zap.String("media_type", media.Type),
-			zap.String("filename", InferMediaFileName(media, fallbackName)),
+			zap.String("filename", shared.InferMediaFileName(media, fallbackName)),
 			zap.String("detected_content_type", detectWeWorkMediaContentType(data)),
 			zap.Int("size_bytes", len(data)),
 			zap.Error(err))
@@ -1290,7 +1294,7 @@ func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media b
 	}
 	logger.Debug("WeWork media upload validated",
 		zap.String("media_type", media.Type),
-		zap.String("filename", InferMediaFileName(media, fallbackName)),
+		zap.String("filename", shared.InferMediaFileName(media, fallbackName)),
 		zap.String("detected_content_type", detectWeWorkMediaContentType(data)),
 		zap.Int("size_bytes", len(data)),
 		zap.Int("chunks", len(chunks)),
@@ -1299,7 +1303,7 @@ func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media b
 	checksum := md5.Sum(data)
 	initResp, err := c.sendLongConnCommandWithResponse(ctx, "aibot_upload_media_init", "", map[string]interface{}{
 		"type":         media.Type,
-		"filename":     InferMediaFileName(media, fallbackName),
+		"filename":     shared.InferMediaFileName(media, fallbackName),
 		"total_size":   len(data),
 		"total_chunks": len(chunks),
 		"md5":          hex.EncodeToString(checksum[:]),
@@ -1319,7 +1323,7 @@ func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media b
 	}
 	logger.Debug("WeWork media upload initialized",
 		zap.String("media_type", media.Type),
-		zap.String("filename", InferMediaFileName(media, fallbackName)),
+		zap.String("filename", shared.InferMediaFileName(media, fallbackName)),
 		zap.String("upload_id", initBody.UploadID))
 
 	for idx, chunk := range chunks {
@@ -1350,7 +1354,7 @@ func (c *WeWorkChannel) uploadPreparedLongConnMedia(ctx context.Context, media b
 	}
 	logger.Debug("WeWork media upload finished",
 		zap.String("media_type", media.Type),
-		zap.String("filename", InferMediaFileName(media, fallbackName)),
+		zap.String("filename", shared.InferMediaFileName(media, fallbackName)),
 		zap.String("media_id", finishBody.MediaID),
 		zap.Int("size_bytes", len(data)),
 		zap.Int("chunks", len(chunks)))
@@ -1414,7 +1418,7 @@ func normalizeWeWorkUploadImage(media bus.Media, data []byte, maxBytes int64) (b
 }
 
 func updateWeWorkConvertedImageMeta(media bus.Media, ext, mimeType string) bus.Media {
-	name := InferMediaFileName(media, "image")
+	name := shared.InferMediaFileName(media, "image")
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	if base == "" {
 		base = "image"
@@ -1491,14 +1495,14 @@ func validateWeWorkUploadMedia(media bus.Media, data []byte) error {
 		return fmt.Errorf("wework media must be at least %d bytes", weworkUploadMinBytes)
 	}
 
-	switch NormalizeMediaType(media.Type) {
-	case UnifiedMediaImage:
+	switch shared.NormalizeMediaType(media.Type) {
+	case shared.UnifiedMediaImage:
 		detectedType := strings.ToLower(strings.TrimSpace(http.DetectContentType(data)))
 		if detectedType == "image/jpeg" || detectedType == "image/png" {
 			return nil
 		}
 
-		ext := strings.ToLower(filepath.Ext(InferMediaFileName(media, "")))
+		ext := strings.ToLower(filepath.Ext(shared.InferMediaFileName(media, "")))
 		if detectedType == "application/octet-stream" {
 			if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
 				return nil
@@ -1506,7 +1510,7 @@ func validateWeWorkUploadMedia(media bus.Media, data []byte) error {
 		}
 
 		return fmt.Errorf("wework image upload only supports JPG/JPEG or PNG, got content-type %q", detectedType)
-	case UnifiedMediaFile:
+	case shared.UnifiedMediaFile:
 		return nil
 	default:
 		return fmt.Errorf("unsupported wework websocket media type: %s", media.Type)

@@ -1,8 +1,9 @@
-package channels
+package dingtalk
 
 import (
 	"context"
 	"fmt"
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"sync"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 
 // DingTalkChannel DingTalk 通道实现
 type DingTalkChannel struct {
-	*BaseChannelImpl
+	*shared.BaseChannelImpl
 	config       config.DingTalkChannelConfig
 	clientID     string
 	clientSecret string
@@ -33,13 +34,13 @@ func NewDingTalkChannel(cfg config.DingTalkChannelConfig, bus *bus.MessageBus) (
 		return nil, fmt.Errorf("dingtalk client_id and client_secret are required")
 	}
 
-	baseCfg := BaseChannelConfig{
+	baseCfg := shared.BaseChannelConfig{
 		Enabled:    cfg.Enabled,
 		AllowedIDs: cfg.AllowedIDs,
 	}
 
 	return &DingTalkChannel{
-		BaseChannelImpl: NewBaseChannelImpl("dingtalk", "default", baseCfg, bus),
+		BaseChannelImpl: shared.NewBaseChannelImpl("dingtalk", "default", baseCfg, bus),
 		config:          cfg,
 		clientID:        cfg.ClientID,
 		clientSecret:    cfg.ClientSecret,
@@ -121,11 +122,11 @@ func (c *DingTalkChannel) Send(msg *bus.OutboundMessage) error {
 		zap.Int("media_count", len(msg.Media)))
 
 	// 统一媒体策略：钉钉当前通过文本+链接降级
-	text := AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
-		UnifiedMediaImage: true,
-		UnifiedMediaFile:  true,
-		UnifiedMediaVideo: true,
-		UnifiedMediaAudio: true,
+	text := shared.AppendMediaURLsToContent(msg.Content, msg.Media, map[string]bool{
+		shared.UnifiedMediaImage: true,
+		shared.UnifiedMediaFile:  true,
+		shared.UnifiedMediaVideo: true,
+		shared.UnifiedMediaAudio: true,
 	})
 
 	// Use session webhook to send reply
