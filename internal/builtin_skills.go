@@ -7,9 +7,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+
+	"github.com/smallnest/goclaw/internal/core/config"
 )
 
-//go:embed builtin_skills config.example.json
+//go:embed builtin_skills config.example.yaml
 var builtinSkillsFS embed.FS
 
 // GetHomeDir 获取用户主目录
@@ -30,14 +32,21 @@ func GetSunclawDir() string {
 
 // GetConfigPath 获取配置文件路径
 func GetConfigPath() string {
-	return filepath.Join(GetSunclawDir(), "config.json")
+	return filepath.Join(GetSunclawDir(), "config.yaml")
 }
 
-// EnsureBuiltinSkills 确保内置技能被复制到用户目录
+// EnsureBuiltinSkills 确保内置技能被复制到工作空间目录
 // 支持增量复制：只复制缺失的技能，不会覆盖已存在的技能
-func EnsureBuiltinSkills() error {
-	goclawDir := GetSunclawDir()
-	skillsDir := filepath.Join(goclawDir, "skills")
+func EnsureBuiltinSkills(workspace string) error {
+	if workspace == "" {
+		var err error
+		workspace, err = config.GetWorkspacePath(nil)
+		if err != nil {
+			return fmt.Errorf("failed to get workspace path: %w", err)
+		}
+	}
+
+	skillsDir := filepath.Join(workspace, "skills")
 
 	// 确保目录存在
 	if err := os.MkdirAll(skillsDir, 0755); err != nil {
@@ -122,7 +131,7 @@ func copySingleSkill(skillName, dstDir string) error {
 }
 
 // EnsureConfig 确保配置文件存在
-// 如果 config.json 不存在，则从 config.example.json 复制
+// 如果 config.yaml 不存在，则从 config.example.yaml 复制
 // 返回是否是新创建的配置文件，以及可能的错误
 func EnsureConfig() (bool, error) {
 	configPath := GetConfigPath()
@@ -139,14 +148,14 @@ func EnsureConfig() (bool, error) {
 	}
 
 	// 从嵌入的文件读取示例配置
-	data, err := builtinSkillsFS.ReadFile("config.example.json")
+	data, err := builtinSkillsFS.ReadFile("config.example.yaml")
 	if err != nil {
-		return false, fmt.Errorf("failed to read config.example.json: %w", err)
+		return false, fmt.Errorf("failed to read config.example.yaml: %w", err)
 	}
 
 	// 写入配置文件
 	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		return false, fmt.Errorf("failed to write config.json: %w", err)
+		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
 	return true, nil

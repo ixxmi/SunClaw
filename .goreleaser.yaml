@@ -3,7 +3,7 @@ version: 2
 builds:
   - id: sunclaw
     binary: goclaw
-    main: .
+    main: ./cmd/goclaw
     env:
       - CGO_ENABLED=0
     goos:

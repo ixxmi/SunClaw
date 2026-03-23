@@ -25,7 +25,7 @@ cd goclaw
 go mod tidy
 
 # 编译二进制文件
-go build -o goclaw .
+go build -o goclaw ./cmd/goclaw
 ```
 
 或者使用 Makefile：
@@ -58,10 +58,10 @@ make install
 
 GoClaw 按以下顺序查找配置文件：
 
-1. `~/.goclaw/config.json` (用户全局目录，**最高优先级**)
-2. `./config.json` (当前目录)
+1. `~/.goclaw/config.yaml` (用户全局目录，**最高优先级**)
+2. `./config.yaml` (当前目录)
 
-创建配置文件 `config.json`：
+创建配置文件 `config.yaml`：
 
 ```json
 {
@@ -214,7 +214,7 @@ GoClaw 支持多个 LLM 提供商：
 ./goclaw start
 
 # 指定配置文件路径启动
-./goclaw start --config /path/to/config.json
+./goclaw start --config /path/to/config.yaml
 
 # 以调试模式启动
 ./goclaw start --log-level debug

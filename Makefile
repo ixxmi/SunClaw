@@ -1,4 +1,4 @@
-.PHONY: help all build test test-race test-coverage test-verbose lint fmt fmt-check vet clean deps tidy check install-tools benchmark
+.PHONY: help all build ui-build test test-race test-coverage test-verbose lint fmt fmt-check vet clean deps tidy check install-tools benchmark
 
 # Variables
 GOCMD=go
@@ -11,11 +11,15 @@ GOFMT=gofmt
 GOVET=$(GOCMD) vet
 BINARY_NAME=sunclaw
 BUILD_DIR=.
+APP_PKG=./cmd/goclaw
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 DOCKER_IMAGE=sunclaw
 DOCKER_TAG=$(VERSION)
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
+UI_DIR=ui
+UI_DIST=$(UI_DIR)/dist/index.html
+UI_SOURCES=$(shell find $(UI_DIR)/src -type f 2>/dev/null)
 
 # Colors for terminal output
 COLOR_RESET=\033[0m
@@ -39,28 +43,35 @@ help:
 	@echo ""
 
 ## build: Build the project
-build:
+build: ui-build
 	@echo "$(COLOR_BLUE)Building $(BINARY_NAME)...$(COLOR_RESET)"
 	@mkdir -p $(BUILD_DIR)
-	$(GOBUILD) -ldflags="-X 'main.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) .
+	$(GOBUILD) -ldflags="-X 'main.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) $(APP_PKG)
+
+## ui-build: Build the embedded admin UI bundle
+ui-build: $(UI_DIST)
+
+$(UI_DIST): $(UI_DIR)/package.json $(UI_DIR)/package-lock.json $(UI_DIR)/index.html $(UI_DIR)/vite.config.ts $(UI_DIR)/tsconfig.json $(UI_SOURCES)
+	@echo "$(COLOR_BLUE)Building embedded admin UI...$(COLOR_RESET)"
+	cd $(UI_DIR) && npm run build
 
 ## test: Run all tests
-test:
+test: ui-build
 	@echo "$(COLOR_BLUE)Running tests...$(COLOR_RESET)"
 	$(GOTEST) -v ./...
 
 ## test-short: Run tests in short mode
-test-short:
+test-short: ui-build
 	@echo "$(COLOR_BLUE)Running tests (short mode)...$(COLOR_RESET)"
 	$(GOTEST) -short ./...
 
 ## test-race: Run tests with race detector
-test-race:
+test-race: ui-build
 	@echo "$(COLOR_BLUE)Running tests with race detector...$(COLOR_RESET)"
 	$(GOTEST) -race ./...
 
 ## test-coverage: Run tests with coverage report
-test-coverage:
+test-coverage: ui-build
 	@echo "$(COLOR_BLUE)Running tests with coverage...$(COLOR_RESET)"
 	$(GOTEST) -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
 	@echo "$(COLOR_GREEN)Coverage report generated: $(COVERAGE_FILE)$(COLOR_RESET)"
@@ -68,12 +79,12 @@ test-coverage:
 	@echo "$(COLOR_GREEN)HTML coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
 ## test-verbose: Run tests with verbose output
-test-verbose:
+test-verbose: ui-build
 	@echo "$(COLOR_BLUE)Running tests (verbose)...$(COLOR_RESET)"
 	$(GOTEST) -v -count=1 ./...
 
 ## benchmark: Run benchmarks
-benchmark:
+benchmark: ui-build
 	@echo "$(COLOR_BLUE)Running benchmarks...$(COLOR_RESET)"
 	$(GOTEST) -bench=. -benchmem ./...
 
@@ -117,6 +128,7 @@ clean:
 	$(GOCLEAN)
 	rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
 	rm -f $(BUILD_DIR)/$(BINARY_NAME)
+	rm -rf $(UI_DIR)/dist
 	@echo "$(COLOR_GREEN)Clean complete$(COLOR_RESET)"
 
 ## deps: Download dependencies
@@ -140,14 +152,14 @@ install-tools:
 	@echo "$(COLOR_GREEN)Tools installed$(COLOR_RESET)"
 
 ## run: Run the application
-run:
+run: ui-build
 	@echo "$(COLOR_BLUE)Running $(BINARY_NAME)...$(COLOR_RESET)"
-	$(GOCMD) run .
+	$(GOCMD) run $(APP_PKG)
 
 ## install: Install the binary to GOPATH/bin
-install:
+install: ui-build
 	@echo "$(COLOR_BLUE)Installing $(BINARY_NAME)...$(COLOR_RESET)"
-	$(GOCMD) install
+	$(GOCMD) install $(APP_PKG)
 
 ## docs: Generate documentation
 docs:
@@ -204,7 +216,7 @@ docker-run:
 	@echo "$(COLOR_BLUE)Running Docker container...$(COLOR_RESET)"
 	docker run --rm -it \
 		-p 8080:8080 \
-		-v $(PWD)/config.json:/home/sunclaw/.sunclaw/config.json:ro \
+		-v $(PWD)/config.yaml:/home/sunclaw/.sunclaw/config.yaml:ro \
 		$(DOCKER_IMAGE):latest
 
 ## docker-compose-up: Start services with docker-compose
@@ -267,4 +279,3 @@ release-notes:
 	@which goreleaser > /dev/null || (echo "goreleaser not found. Install with: brew install goreleaser" && exit 1)
 	@echo "$(COLOR_BLUE)Generating release notes...$(COLOR_RESET)"
 	goreleaser release --release-notes=release-notes.txt --skip=publish --skip=validate --skip=announce
-
