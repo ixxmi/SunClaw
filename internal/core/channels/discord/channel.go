@@ -276,6 +276,10 @@ func (c *DiscordChannel) Stop() error {
 	return nil
 }
 
+func (c *DiscordChannel) SupportsReplyStreamEdit() bool {
+	return true
+}
+
 // SendStream sends streaming messages (edits original message progressively)
 func (c *DiscordChannel) SendStream(chatID string, stream <-chan *bus.StreamMessage) error {
 	if !c.IsRunning() {
@@ -288,10 +292,16 @@ func (c *DiscordChannel) SendStream(chatID string, stream <-chan *bus.StreamMess
 
 	var messageID string
 	var content strings.Builder
+	var replyTo string
 
 	for msg := range stream {
 		if msg.Error != "" {
 			return fmt.Errorf("stream error: %s", msg.Error)
+		}
+		if replyTo == "" && msg.Metadata != nil {
+			if streamReplyTo, ok := msg.Metadata["reply_to"].(string); ok {
+				replyTo = streamReplyTo
+			}
 		}
 
 		if !msg.IsThinking && !msg.IsFinal {
@@ -302,6 +312,11 @@ func (c *DiscordChannel) SendStream(chatID string, stream <-chan *bus.StreamMess
 			// Send initial message
 			discordMsg := &discordgo.MessageSend{
 				Content: content.String(),
+			}
+			if replyTo != "" {
+				discordMsg.Reference = &discordgo.MessageReference{
+					MessageID: replyTo,
+				}
 			}
 
 			sentMsg, err := c.session.ChannelMessageSendComplex(chatID, discordMsg)

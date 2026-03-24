@@ -213,11 +213,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	defer messageBus.Close()
 
 	// 创建会话管理器
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		logger.Fatal("Failed to get home directory", zap.Error(err))
-	}
-	sessionDir := homeDir + "/.sunclaw/sessions"
+	sessionDir := workspaceDir + "/sessions"
 	sessionMgr, err := session.NewManager(sessionDir)
 	if err != nil {
 		logger.Fatal("Failed to create session manager", zap.Error(err))

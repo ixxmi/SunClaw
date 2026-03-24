@@ -125,6 +125,10 @@ func (c *TelegramChannel) Stop() error {
 	return c.BaseChannelImpl.Stop()
 }
 
+func (c *TelegramChannel) SupportsReplyStreamEdit() bool {
+	return true
+}
+
 // receiveUpdates 接收更新
 func (c *TelegramChannel) receiveUpdates(ctx context.Context) {
 	u := telegrambot.NewUpdate(0)
@@ -485,10 +489,16 @@ func (c *TelegramChannel) SendStream(chatID string, stream <-chan *bus.StreamMes
 
 	var messageID int
 	var content strings.Builder
+	var replyTo string
 
 	for msg := range stream {
 		if msg.Error != "" {
 			return fmt.Errorf("stream error: %s", msg.Error)
+		}
+		if replyTo == "" && msg.Metadata != nil {
+			if streamReplyTo, ok := msg.Metadata["reply_to"].(string); ok {
+				replyTo = streamReplyTo
+			}
 		}
 
 		if !msg.IsThinking && !msg.IsFinal {
@@ -498,6 +508,9 @@ func (c *TelegramChannel) SendStream(chatID string, stream <-chan *bus.StreamMes
 		if messageID == 0 && content.Len() > 0 {
 			// Send initial message
 			tgMsg := telegrambot.NewMessage(parsedChatID, content.String())
+			if replyToID, ok := parseTelegramReplyToID(replyTo); ok {
+				tgMsg.ReplyToMessageID = replyToID
+			}
 
 			sentMsg, err := c.bot.Send(tgMsg)
 			if err != nil {

@@ -112,6 +112,10 @@ func (c *WeWorkChannel) Start(ctx context.Context) error {
 	return nil
 }
 
+func (c *WeWorkChannel) SupportsReplyStreamEdit() bool {
+	return c.mode == "websocket"
+}
+
 func (c *WeWorkChannel) startWebhookServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/wework/event", c.handleWebhook)
