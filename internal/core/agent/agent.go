@@ -68,6 +68,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 	state.Model = getModelName(cfg.Provider)
 	state.Provider = "provider"
 	state.AgentID = cfg.AgentID
+	state.BootstrapOwnerID = cfg.AgentID
 	state.SessionKey = "main"
 	state.Tools = ToAgentTools(cfg.Tools.ListExisting())
 	state.LoadedSkills = []string{} // Initialize with empty loaded skills
@@ -545,10 +546,17 @@ func (a *Agent) Reset() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	agentID := a.state.AgentID
+	bootstrapOwnerID := a.state.BootstrapOwnerID
+	if bootstrapOwnerID == "" {
+		bootstrapOwnerID = agentID
+	}
 	a.state = NewAgentState()
 	a.state.SystemPrompt = a.context.BuildSystemPrompt(nil)
 	a.state.Model = getModelName(a.provider)
 	a.state.Provider = "provider"
+	a.state.AgentID = agentID
+	a.state.BootstrapOwnerID = bootstrapOwnerID
 	a.state.SessionKey = "main"
 	a.state.Tools = ToAgentTools(a.tools.ListExisting())
 }

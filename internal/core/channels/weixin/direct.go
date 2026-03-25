@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/smallnest/goclaw/internal/core/channels/shared"
 	"io"
 	"mime"
 	"net/http"
@@ -20,6 +19,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/smallnest/goclaw/internal/core/channels/shared"
+	"github.com/smallnest/goclaw/internal/core/config"
 
 	"github.com/google/uuid"
 	"github.com/smallnest/goclaw/internal/core/bus"
@@ -610,16 +612,27 @@ func (c *WeixinChannel) resolveWeixinDirectContextToken(chatID string, metadata 
 }
 
 func buildWeixinDirectSyncCursorPath(baseURL, token string) string {
-	home, err := os.UserHomeDir()
+	//home, err := os.UserHomeDir()
+	//if err != nil {
+	//	return ""
+	//}
+	cfg, err := config.Load("")
 	if err != nil {
-		return ""
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	// 获取 workspace 目录
+	workspace, err := config.GetWorkspacePath(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
+		os.Exit(1)
 	}
 	key := "default"
 	if strings.TrimSpace(token) != "" {
 		sum := sha256.Sum256([]byte(strings.TrimSpace(baseURL) + "|" + strings.TrimSpace(token)))
 		key = hex.EncodeToString(sum[:8])
 	}
-	return filepath.Join(home, ".sunclaw", "channels", "weixin", "sync", key+".json")
+	return filepath.Join(workspace, ".sunclaw", "channels", "weixin", "sync", key+".json")
 }
 
 func loadWeixinDirectCursor(path string) (string, error) {

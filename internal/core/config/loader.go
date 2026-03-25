@@ -78,6 +78,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agents.defaults.max_tokens", 4096)
 	v.SetDefault("agents.defaults.max_history_messages", 100) // 默认保留最近100条消息
 
+	// Reply delivery defaults keep existing behavior unless explicitly enabled.
+	v.SetDefault("reply_delivery.mode", ReplyDeliveryModeSingle)
+	v.SetDefault("reply_delivery.min_chunk_chars", DefaultReplyDeliveryMinChunkChars)
+	v.SetDefault("reply_delivery.max_chunk_chars", DefaultReplyDeliveryMaxChunkChars)
+	v.SetDefault("reply_delivery.min_delay_ms", DefaultReplyDeliveryMinDelayMs)
+	v.SetDefault("reply_delivery.max_delay_ms", DefaultReplyDeliveryMaxDelayMs)
+	v.SetDefault("reply_delivery.max_push_count", DefaultReplyDeliveryMaxPushCount)
+
 	// Gateway 默认配置
 	v.SetDefault("gateway.host", "localhost")
 	v.SetDefault("gateway.port", 8080)

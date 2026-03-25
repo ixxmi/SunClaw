@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +86,46 @@ type errorRouteRuntime struct {
 
 func (r *errorRouteRuntime) RunTurn(ctx context.Context, input acpruntime.AcpRuntimeTurnInput) (<-chan acpruntime.AcpRuntimeEvent, error) {
 	return nil, acpruntime.NewTurnError("forced error", nil)
+}
+
+type interruptibleRouteRuntime struct {
+	testRouteRuntime
+	started chan string
+	mu      sync.Mutex
+	runs    []string
+}
+
+func (r *interruptibleRouteRuntime) RunTurn(ctx context.Context, input acpruntime.AcpRuntimeTurnInput) (<-chan acpruntime.AcpRuntimeEvent, error) {
+	ch := make(chan acpruntime.AcpRuntimeEvent, 2)
+	r.mu.Lock()
+	r.runs = append(r.runs, input.Text)
+	r.mu.Unlock()
+
+	go func() {
+		defer close(ch)
+		select {
+		case r.started <- input.Text:
+		default:
+		}
+
+		if input.Text == "slow" {
+			<-ctx.Done()
+			ch <- &acpruntime.AcpEventError{
+				Message:   "interrupted",
+				Code:      acpruntime.ErrCodeTurnCanceled,
+				Retryable: false,
+			}
+			return
+		}
+
+		ch <- &acpruntime.AcpEventTextDelta{Text: "acp:" + input.Text, Stream: "output"}
+		ch <- &acpruntime.AcpEventDone{StopReason: "completed"}
+	}()
+	return ch, nil
+}
+
+func (r *interruptibleRouteRuntime) Cancel(ctx context.Context, handle acpruntime.AcpRuntimeHandle, reason string) error {
+	return nil
 }
 
 type staticRouter struct {
@@ -288,5 +330,294 @@ func TestHandleInboundMessageAcpRoutingPublishesErrorOnTurnStartFailure(t *testi
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for outbound error message")
+	}
+}
+
+func TestHandleInboundMessageAcpInterruptCommandCancelsActiveTurn(t *testing.T) {
+	backendID := "agent-acp-route-interrupt-backend"
+	rt := &interruptibleRouteRuntime{
+		testRouteRuntime: testRouteRuntime{backendID: backendID},
+		started:          make(chan string, 4),
+	}
+	if err := acpruntime.RegisterAcpRuntimeBackend(acpruntime.AcpRuntimeBackend{
+		ID:      backendID,
+		Runtime: rt,
+		Healthy: func() bool { return true },
+	}); err != nil {
+		t.Fatalf("register backend: %v", err)
+	}
+	t.Cleanup(func() { acpruntime.UnregisterAcpRuntimeBackend(backendID) })
+
+	cfg := &config.Config{}
+	cfg.ACP.Enabled = true
+	cfg.ACP.Backend = backendID
+	cfg.ACP.DefaultAgent = "main"
+
+	acpMgr := acp.NewManager(cfg)
+	sessionKey := "agent:main:acp:routed-interrupt"
+	if _, _, err := acpMgr.InitializeSession(context.Background(), acp.InitializeSessionInput{
+		Cfg:        cfg,
+		SessionKey: sessionKey,
+		Agent:      "main",
+		Mode:       acpruntime.AcpSessionModePersistent,
+	}); err != nil {
+		t.Fatalf("initialize acp session: %v", err)
+	}
+
+	messageBus := bus.NewMessageBus(16)
+	channelMgr := channels.NewManager(messageBus)
+	channelMgr.SetAcpRouter(&staticRouter{sessionKey: sessionKey})
+	manager := &AgentManager{
+		bus:           messageBus,
+		cfg:           cfg,
+		channelMgr:    channelMgr,
+		acpManager:    acpMgr,
+		acpThreadRuns: make(map[string]*acpThreadSessionControl),
+	}
+
+	sub := messageBus.SubscribeOutbound()
+	defer sub.Unsubscribe()
+
+	if err := manager.handleInboundMessage(context.Background(), &bus.InboundMessage{
+		ID:        "msg-interrupt-1",
+		Channel:   "telegram",
+		AccountID: "acc-1",
+		ChatID:    "thread-1",
+		Content:   "slow",
+		Timestamp: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("handle slow inbound: %v", err)
+	}
+
+	select {
+	case started := <-rt.started:
+		if started != "slow" {
+			t.Fatalf("expected slow run to start, got %q", started)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for slow run to start")
+	}
+
+	if err := manager.handleInboundMessage(context.Background(), &bus.InboundMessage{
+		ID:        "msg-interrupt-2",
+		Channel:   "telegram",
+		AccountID: "acc-1",
+		ChatID:    "thread-1",
+		Content:   "/interrupt",
+		Timestamp: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("handle interrupt inbound: %v", err)
+	}
+
+	select {
+	case out := <-sub.Channel:
+		if out == nil {
+			t.Fatalf("expected outbound interrupt ack, got nil")
+		}
+		if !strings.Contains(out.Content, "正在中断当前任务") {
+			t.Fatalf("unexpected interrupt ack: %q", out.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for interrupt ack")
+	}
+
+	select {
+	case out := <-sub.Channel:
+		t.Fatalf("unexpected extra outbound after interrupt: %+v", out)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestHandleInboundMessageAcpFollowUpInterruptsAndContinues(t *testing.T) {
+	backendID := "agent-acp-route-followup-backend"
+	rt := &interruptibleRouteRuntime{
+		testRouteRuntime: testRouteRuntime{backendID: backendID},
+		started:          make(chan string, 4),
+	}
+	if err := acpruntime.RegisterAcpRuntimeBackend(acpruntime.AcpRuntimeBackend{
+		ID:      backendID,
+		Runtime: rt,
+		Healthy: func() bool { return true },
+	}); err != nil {
+		t.Fatalf("register backend: %v", err)
+	}
+	t.Cleanup(func() { acpruntime.UnregisterAcpRuntimeBackend(backendID) })
+
+	cfg := &config.Config{}
+	cfg.ACP.Enabled = true
+	cfg.ACP.Backend = backendID
+	cfg.ACP.DefaultAgent = "main"
+
+	acpMgr := acp.NewManager(cfg)
+	sessionKey := "agent:main:acp:routed-followup"
+	if _, _, err := acpMgr.InitializeSession(context.Background(), acp.InitializeSessionInput{
+		Cfg:        cfg,
+		SessionKey: sessionKey,
+		Agent:      "main",
+		Mode:       acpruntime.AcpSessionModePersistent,
+	}); err != nil {
+		t.Fatalf("initialize acp session: %v", err)
+	}
+
+	messageBus := bus.NewMessageBus(16)
+	channelMgr := channels.NewManager(messageBus)
+	channelMgr.SetAcpRouter(&staticRouter{sessionKey: sessionKey})
+	manager := &AgentManager{
+		bus:           messageBus,
+		cfg:           cfg,
+		channelMgr:    channelMgr,
+		acpManager:    acpMgr,
+		acpThreadRuns: make(map[string]*acpThreadSessionControl),
+	}
+
+	sub := messageBus.SubscribeOutbound()
+	defer sub.Unsubscribe()
+
+	if err := manager.handleInboundMessage(context.Background(), &bus.InboundMessage{
+		ID:        "msg-followup-1",
+		Channel:   "telegram",
+		AccountID: "acc-1",
+		ChatID:    "thread-1",
+		Content:   "slow",
+		Timestamp: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("handle slow inbound: %v", err)
+	}
+
+	select {
+	case started := <-rt.started:
+		if started != "slow" {
+			t.Fatalf("expected slow run to start, got %q", started)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for slow run to start")
+	}
+
+	if err := manager.handleInboundMessage(context.Background(), &bus.InboundMessage{
+		ID:        "msg-followup-2",
+		Channel:   "telegram",
+		AccountID: "acc-1",
+		ChatID:    "thread-1",
+		Content:   "follow up",
+		Timestamp: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("handle follow-up inbound: %v", err)
+	}
+
+	select {
+	case out := <-sub.Channel:
+		if out == nil {
+			t.Fatalf("expected outbound follow-up ack, got nil")
+		}
+		if !strings.Contains(out.Content, "收到补充说明") {
+			t.Fatalf("unexpected follow-up ack: %q", out.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for follow-up ack")
+	}
+
+	select {
+	case started := <-rt.started:
+		if started != "follow up" {
+			t.Fatalf("expected follow-up run to start, got %q", started)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for follow-up run to start")
+	}
+
+	select {
+	case out := <-sub.Channel:
+		if out == nil {
+			t.Fatalf("expected outbound follow-up reply, got nil")
+		}
+		if out.Content != "acp:follow up" {
+			t.Fatalf("unexpected follow-up reply: %q", out.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for follow-up reply")
+	}
+
+	select {
+	case out := <-sub.Channel:
+		t.Fatalf("unexpected stale outbound after follow-up: %+v", out)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestHandleInboundMessageAcpResumeCommandStartsTurn(t *testing.T) {
+	backendID := "agent-acp-route-resume-backend"
+	rt := &interruptibleRouteRuntime{
+		testRouteRuntime: testRouteRuntime{backendID: backendID},
+		started:          make(chan string, 4),
+	}
+	if err := acpruntime.RegisterAcpRuntimeBackend(acpruntime.AcpRuntimeBackend{
+		ID:      backendID,
+		Runtime: rt,
+		Healthy: func() bool { return true },
+	}); err != nil {
+		t.Fatalf("register backend: %v", err)
+	}
+	t.Cleanup(func() { acpruntime.UnregisterAcpRuntimeBackend(backendID) })
+
+	cfg := &config.Config{}
+	cfg.ACP.Enabled = true
+	cfg.ACP.Backend = backendID
+	cfg.ACP.DefaultAgent = "main"
+
+	acpMgr := acp.NewManager(cfg)
+	sessionKey := "agent:main:acp:routed-resume"
+	if _, _, err := acpMgr.InitializeSession(context.Background(), acp.InitializeSessionInput{
+		Cfg:        cfg,
+		SessionKey: sessionKey,
+		Agent:      "main",
+		Mode:       acpruntime.AcpSessionModePersistent,
+	}); err != nil {
+		t.Fatalf("initialize acp session: %v", err)
+	}
+
+	messageBus := bus.NewMessageBus(16)
+	channelMgr := channels.NewManager(messageBus)
+	channelMgr.SetAcpRouter(&staticRouter{sessionKey: sessionKey})
+	manager := &AgentManager{
+		bus:           messageBus,
+		cfg:           cfg,
+		channelMgr:    channelMgr,
+		acpManager:    acpMgr,
+		acpThreadRuns: make(map[string]*acpThreadSessionControl),
+	}
+
+	sub := messageBus.SubscribeOutbound()
+	defer sub.Unsubscribe()
+
+	if err := manager.handleInboundMessage(context.Background(), &bus.InboundMessage{
+		ID:        "msg-resume-1",
+		Channel:   "telegram",
+		AccountID: "acc-1",
+		ChatID:    "thread-1",
+		Content:   "/resume review status",
+		Timestamp: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("handle resume inbound: %v", err)
+	}
+
+	select {
+	case started := <-rt.started:
+		if started != "review status" {
+			t.Fatalf("expected resume text to be used, got %q", started)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for resume run to start")
+	}
+
+	select {
+	case out := <-sub.Channel:
+		if out == nil {
+			t.Fatalf("expected outbound resume reply, got nil")
+		}
+		if out.Content != "acp:review status" {
+			t.Fatalf("unexpected resume reply: %q", out.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for resume reply")
 	}
 }

@@ -92,12 +92,7 @@ func runAgent(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Create workspace
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
-		os.Exit(1)
-	}
+	// 获取 workspace 目录
 	workspace, err := config.GetWorkspacePath(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
@@ -117,7 +112,7 @@ func runAgent(cmd *cobra.Command, args []string) {
 	defer messageBus.Close()
 
 	// Create session manager
-	sessionDir := homeDir + "/.sunclaw/sessions"
+	sessionDir := workspace + "/sessions"
 	sessionMgr, err := session.NewManager(sessionDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create session manager: %v\n", err)

@@ -26,16 +26,36 @@ const (
 
 // ContextBuilder 上下文构建器
 type ContextBuilder struct {
-	memory    *MemoryStore
-	workspace string
+	memory               *MemoryStore
+	bootstrapStore       *MemoryStore
+	bootstrapDirResolver func(ownerID string) string
+	workspace            string
 }
 
 // NewContextBuilder 创建上下文构建器
 func NewContextBuilder(memory *MemoryStore, workspace string) *ContextBuilder {
 	return &ContextBuilder{
-		memory:    memory,
-		workspace: workspace,
+		memory:         memory,
+		bootstrapStore: memory,
+		workspace:      workspace,
 	}
+}
+
+// NewContextBuilderWithBootstrap 创建上下文构建器，并允许为 bootstrap 文件指定独立来源目录。
+func NewContextBuilderWithBootstrap(memory *MemoryStore, workspace string, bootstrapStore *MemoryStore) *ContextBuilder {
+	if bootstrapStore == nil {
+		bootstrapStore = memory
+	}
+	return &ContextBuilder{
+		memory:         memory,
+		bootstrapStore: bootstrapStore,
+		workspace:      workspace,
+	}
+}
+
+// SetBootstrapDirResolver 设置按主 agent owner 解析认知目录的回调。
+func (b *ContextBuilder) SetBootstrapDirResolver(resolver func(ownerID string) string) {
+	b.bootstrapDirResolver = resolver
 }
 
 // BuildToolsSummary 构建工具列表摘要段落。
@@ -62,6 +82,8 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		"web_search":             "通过 API 搜索网页",
 		"web_fetch":              "抓取 URL 并提取可读内容",
 		"use_skill":              "加载专项技能（最高优先级，先于其他工具检查）",
+		"send_message":           "向当前会话主动发送文本消息，适合确认已收到、进度同步和结果通知",
+		"send_file":              "向当前会话发送图片或文件",
 		"message":                "发送消息和频道动作（投票、反应、按钮等）",
 		"cron":                   "管理内置定时任务（add/list/rm/enable/disable/run/status）",
 		"reminder":               "在当前会话中安排未来主动提醒或延迟回复",
@@ -117,29 +139,29 @@ func (b *ContextBuilder) buildSystemPromptWithSkills(skillsContent string, mode 
 	// 3. 安全提示
 	parts = append(parts, b.buildSafety())
 
-	// 4. 错误处理指导（仅 full 模式）
+	// 4. 沟通风格（仅 full 模式）
+	if !isMinimal {
+		parts = append(parts, b.buildCommunicationStyle())
+	}
+
+	// 5. 错误处理指导（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildErrorHandling())
 	}
 
-	// 5. 技能系统
+	// 6. 技能系统
 	if skillsContent != "" {
 		parts = append(parts, skillsContent)
 	}
 
-	// 6. GoClaw CLI 快速参考（仅 full 模式）
+	// 7. GoClaw CLI 快速参考（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildCLIReference())
 	}
 
-	// 7. 文档路径（仅 full 模式）
+	// 8. 文档路径（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildDocsSection())
-	}
-
-	// 8. Bootstrap 文件（工作区上下文）
-	if bootstrap := b.loadBootstrapFiles(); bootstrap != "" {
-		parts = append(parts, "## Workspace Files (injected)\n\n"+bootstrap)
 	}
 
 	// 9. 消息和回复指导（仅 full 模式）
@@ -188,10 +210,15 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 		"web_search":             "Search the web using API (Brave/Search APIs)",
 		"web_fetch":              "Fetch and extract readable content from a URL",
 		"use_skill":              "Load a specialized skill. SKILLS HAVE HIGHEST PRIORITY - always check Skills section first",
+		"send_message":           "Send a proactive text message to the current or specified chat. Use this for acknowledgement, progress updates, or intentional multi-message delivery",
+		"send_file":              "Send one image or file to the current or specified chat",
 		"message":                "Send messages and channel actions (polls, reactions, buttons)",
 		"cron":                   "Manage goclaw's built-in cron/scheduler service. This is the ONLY WAY to manage scheduled tasks. DO NOT use system 'crontab' commands. Supports: add (create), list/ls (view all), rm/remove (delete), enable, disable, run (execute immediately), status, runs (history)",
 		"reminder":               "Schedule future proactive follow-ups back into the current chat, including delayed replies and timed reminders",
 		"session_status":         "Show session usage/time/model state (use for 'what model are we using?' questions)",
+		"sessions_spawn":         "Spawn a child agent to handle a longer or more specialized subtask; it will auto-announce when finished",
+		"memory_search":          "Search stored memories and prior notes",
+		"memory_add":             "Save useful information into memory",
 	}
 
 	// 构建工具列表 - 按功能分组
@@ -206,7 +233,11 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 		// 网络
 		"web_search", "web_fetch",
 		// 技能和消息
-		"use_skill", "message", "cron", "reminder", "session_status",
+		"use_skill", "send_message", "send_file", "message",
+		// 编排和记忆
+		"sessions_spawn", "memory_search", "memory_add",
+		// 系统能力
+		"cron", "reminder", "session_status",
 	}
 
 	var toolLines []string
@@ -237,9 +268,12 @@ TOOLS.md does not control tool availability; it is user guidance for how to use 
 ### Task Complexity Guidelines
 
 - **Simple tasks**: Use tools directly
-- **Moderate tasks**: Use tools, narrate key steps
+- **Moderate tasks**: Use tools, keep the user oriented with short, human updates
 - **Complex/Long tasks**: Consider spawning a sub-agent. Completion is push-based: it will auto-announce when done
+- **Before non-trivial work**: Briefly acknowledge the request and say what you will do next
 - **For long waits**: Avoid rapid poll loops. Use run_shell with background mode, or process(action=poll, timeout=<ms>)
+- **For noticeable waits**: Use send_message to avoid going silent; short progress updates are better than silence
+- **For final delivery**: Prefer one coherent answer by default; split into multiple user-visible messages only when it clearly helps
 
 ### Skill-First Workflow (HIGHEST PRIORITY)
 
@@ -265,13 +299,21 @@ TOOLS.md does not control tool availability; it is user guidance for how to use 
 func (b *ContextBuilder) buildToolCallStyle() string {
 	return `## Tool Call Style
 
-**Default behavior**: Do not narrate routine, low-risk tool calls (just call the tool).
+**Default behavior**: Keep routine narration light. Do the work instead of over-explaining it.
 
 **Narrate ONLY when**:
 - Multi-step work where context helps
 - Complex/challenging problems
 - Sensitive actions (deletions, irreversible changes)
 - User explicitly asks for explanation
+
+**Before non-trivial work**:
+- Briefly acknowledge the request in natural language and say what you are doing next
+- Example: "收到，我先帮你看一下相关代码。"
+
+**For long or multi-step work**:
+- Use send_message for meaningful progress updates so the user is not left wondering whether work is still happening
+- Keep progress updates short and concrete, not repetitive
 
 **Keep narration**: Brief and value-dense; avoid repeating obvious steps. Use plain human language unless in a technical context.
 
@@ -379,6 +421,52 @@ If network tools fail:
 - Use cached data if available`
 }
 
+func (b *ContextBuilder) buildCommunicationStyle() string {
+	return `## Communication Style
+
+Be human, clear, and reassuring. Sound like a capable assistant working alongside the user, not a robotic logger.
+
+### Start -> progress -> result
+
+- For non-trivial requests, begin with a short acknowledgement that confirms you received the request and what you will do next.
+- For trivial questions or instant answers, reply directly. Do not fake a process with "我先看下" when no real waiting or tool work is needed.
+- Good examples:
+  - "收到，我先帮你看下这个问题。"
+  - "明白，我先检查相关配置和代码。"
+- If work may take noticeable time, proactively send a short progress update instead of going silent.
+- Good examples:
+  - "我在帮你处理，您稍等一下。"
+  - "我已经定位到关键文件了，继续整理中。"
+- Only send a progress update when there is actual waiting or real new progress. Avoid repetitive filler updates.
+- When finished, give the result first, then only the necessary detail.
+
+### Message count
+
+- Default to one coherent final reply.
+- Split into multiple user-visible messages only when it clearly improves the experience:
+  - casual or conversational chats
+  - emotional support, comforting, or soft check-in moments where two short beats feel more human than one polished paragraph
+  - long-running tasks where progress updates reduce uncertainty
+  - stepwise delivery where earlier information is immediately useful
+- Do not fragment a normal answer into many small messages just because you can.
+- In caring or casual one-to-one chats, when the user is sharing feelings or feeling low, default to two short messages instead of one overly complete block unless the context clearly calls for a single reply.
+- Example:
+  - "哎，心情不好的时候真的很难受。"
+  - "发生什么事了？想说就说，我听着。"
+
+### Tone matching
+
+- Mirror the user's language and level of formality.
+- For simple, casual, or playful conversation, you may be more relaxed and conversational, including a couple of short back-to-back messages when that feels natural.
+- For technical, sensitive, or serious work, stay natural but concise and professional.
+
+### Emojis
+
+- Emojis are optional. Use them sparingly and only when they fit the tone.
+- Usually use no more than one light emoji in a message, such as :) or a light waiting cue.
+- Avoid emojis in risky operations, error handling, or formal contexts.`
+}
+
 // buildCLIReference 构建 GoClaw CLI 快速参考
 func (b *ContextBuilder) buildCLIReference() string {
 	return `## SunClaw CLI Quick Reference
@@ -411,8 +499,14 @@ func (b *ContextBuilder) buildMessagingSection() string {
 
 ### proactive messaging tools
 - Use 'send_message' to push proactive text updates to the current chat
+- Prefer 'send_message' when you want deliberate acknowledgement, progress reporting, or exact control over whether the user sees one message or several
 - Use 'send_file' to send an image or file to the current chat; it supports local file paths, remote URLs, or base64 data
 - 'message' is a legacy alias for 'send_message'
+- For long-running work, do not disappear silently. Send a short status such as "我在帮你处理，您稍等一下。"
+- For emotional support or casual one-to-one chat, prefer two short messages instead of one full paragraph when that feels warmer and more natural
+- Example two-message cadence:
+  - first: acknowledge emotion
+  - second: invite the user to continue
 - These tools default to the current channel/chat/account, so only pass routing params when you want to override the current conversation
 - If you use 'send_message', 'send_file', or 'message' to deliver your user-visible reply, respond with ONLY: SILENT_REPLY (avoid duplicate replies)`
 }
@@ -597,6 +691,24 @@ func (b *ContextBuilder) buildSelectedSkills(selectedSkillNames []string, skills
 	return sb.String()
 }
 
+// buildSkillsContext 构建当前轮需要注入的技能上下文。
+// - 未选择技能时：注入可用技能摘要，供 LLM 决定是否调用 use_skill
+// - 已选择技能时：注入所选技能全文，进入第二阶段执行
+func (b *ContextBuilder) buildSkillsContext(skills []*Skill, loadedSkills []string, mode PromptMode) string {
+	if len(skills) == 0 {
+		return ""
+	}
+
+	if len(loadedSkills) > 0 {
+		selected := b.buildSelectedSkills(loadedSkills, skills)
+		if strings.TrimSpace(selected) != "" {
+			return selected
+		}
+	}
+
+	return b.buildSkillsPrompt(skills, mode)
+}
+
 // BuildMessages 构建消息列表
 func (b *ContextBuilder) BuildMessages(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string) []Message {
 	return b.BuildMessagesWithMode(history, currentMessage, skills, loadedSkills, PromptModeFull)
@@ -607,15 +719,8 @@ func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, curren
 	// 首先验证历史消息，过滤掉孤立的 tool 消息
 	validHistory := b.validateHistoryMessages(history)
 
-	// 构建系统提示词：根据是否已加载技能决定注入内容
-	var skillsContent string
-	if len(loadedSkills) > 0 {
-		// 第二阶段：注入已选中技能的完整内容
-		skillsContent = b.buildSelectedSkills(loadedSkills, skills)
-	} else {
-		// 第一阶段：只注入技能摘要
-		skillsContent = b.buildSkillsPrompt(skills, mode)
-	}
+	// 构建系统提示词：未选 skill 时注入摘要，已选 skill 时注入正文
+	skillsContent := b.buildSkillsContext(skills, loadedSkills, mode)
 
 	systemPrompt := b.buildSystemPromptWithSkills(skillsContent, mode)
 
@@ -714,18 +819,68 @@ func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, curren
 	return messages
 }
 
-// loadBootstrapFiles 加载 bootstrap 文件
-func (b *ContextBuilder) loadBootstrapFiles() string {
+func (b *ContextBuilder) resolveBootstrapStore(ownerID string) *MemoryStore {
+	if b.bootstrapDirResolver != nil && strings.TrimSpace(ownerID) != "" {
+		if dir := strings.TrimSpace(b.bootstrapDirResolver(ownerID)); dir != "" {
+			return NewMemoryStore(dir)
+		}
+	}
+	if b.bootstrapStore != nil {
+		return b.bootstrapStore
+	}
+	return b.memory
+}
+
+func (b *ContextBuilder) defaultBootstrapStore() *MemoryStore {
+	if b.bootstrapStore != nil {
+		return b.bootstrapStore
+	}
+	return b.memory
+}
+
+// loadBootstrapFilesForOwner 加载指定主 agent owner 的 bootstrap 文件。
+func (b *ContextBuilder) loadBootstrapFilesForOwner(ownerID string) string {
 	var parts []string
 
 	files := []string{"IDENTITY.md", "AGENTS.md", "SOUL.md", "USER.md"}
+	store := b.resolveBootstrapStore(ownerID)
 	for _, filename := range files {
-		if content, err := b.memory.ReadBootstrapFile(filename); err == nil && content != "" {
+		if store == nil {
+			break
+		}
+		if content, err := store.ReadBootstrapFile(filename); err == nil && content != "" {
 			parts = append(parts, fmt.Sprintf("### %s\n\n%s", filename, content))
 		}
 	}
 
+	if len(parts) == 0 && store != nil {
+		if content, err := store.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
+			parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
+		}
+	}
+
+	// 主 agent 的专属目录还没有认知文件时，回退到根工作区的 BOOTSTRAP.md 引导。
+	if len(parts) == 0 && strings.TrimSpace(ownerID) != "" {
+		rootStore := b.defaultBootstrapStore()
+		if rootStore != nil && (store == nil || rootStore.workspace != store.workspace) {
+			if content, err := rootStore.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
+				parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
+			}
+		}
+	}
+
 	return joinNonEmpty(parts, "\n\n")
+}
+
+func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
+	if bootstrap := b.loadBootstrapFilesForOwner(ownerID); bootstrap != "" {
+		return "## Workspace Files (injected)\n\n" + bootstrap
+	}
+	return ""
+}
+
+func (b *ContextBuilder) buildBootstrapSection() string {
+	return b.buildBootstrapSectionForOwner("")
 }
 
 // validateHistoryMessages 验证历史消息，过滤掉孤立的 tool 消息

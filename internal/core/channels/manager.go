@@ -20,6 +20,11 @@ type AcpSessionRouter interface {
 	IsACPThreadBinding(channel, accountID, conversationID string) bool
 }
 
+// ReplyStreamEditCapable reports whether a channel can progressively edit one visible reply.
+type ReplyStreamEditCapable interface {
+	SupportsReplyStreamEdit() bool
+}
+
 // Manager 通道管理器
 type Manager struct {
 	channels             map[string]BaseChannel
@@ -910,6 +915,44 @@ func (m *Manager) resolveOutboundChannel(msg *bus.OutboundMessage) (BaseChannel,
 	}
 
 	return nil, "", false
+}
+
+// DispatchStream routes a streamed reply to the resolved channel implementation.
+func (m *Manager) DispatchStream(msg *bus.OutboundMessage, stream <-chan *bus.StreamMessage) error {
+	if msg == nil {
+		return fmt.Errorf("outbound message is nil")
+	}
+	if strings.TrimSpace(msg.ChatID) == "" {
+		return fmt.Errorf("outbound message chat_id is required")
+	}
+
+	channel, resolvedName, ok := m.resolveOutboundChannel(msg)
+	if !ok {
+		return fmt.Errorf("channel not found for stream: %s", msg.Channel)
+	}
+
+	logger.Debug("Dispatching stream via channel",
+		zap.String("channel", msg.Channel),
+		zap.String("resolved_channel", resolvedName),
+		zap.String("account_id", msg.AccountID),
+		zap.String("chat_id", msg.ChatID))
+
+	return channel.SendStream(msg.ChatID, stream)
+}
+
+// SupportsStreamEdit reports whether the resolved channel supports progressive single-message edits.
+func (m *Manager) SupportsStreamEdit(msg *bus.OutboundMessage) bool {
+	if msg == nil {
+		return false
+	}
+
+	channel, _, ok := m.resolveOutboundChannel(msg)
+	if !ok {
+		return false
+	}
+
+	capable, ok := channel.(ReplyStreamEditCapable)
+	return ok && capable.SupportsReplyStreamEdit()
 }
 
 // RegisterWithName 使用指定名称注册通道

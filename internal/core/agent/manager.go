@@ -50,11 +50,17 @@ type AgentManager struct {
 	dataDir           string
 	// 会话级 Agent 路由（支持运行时切换主 Agent）
 	sessionRouter *SessionAgentRouter
+	// 通道内逻辑会话路由（支持 /session 在同一 chat 下切换任务上下文）
+	sessionContextRouter *SessionContextRouter
 
 	// per-session follow-up 注入队列：子 agent 完成后直接 push，主 agent runLoop 消费
 	// key = requester session key（主 agent 的会话键），value = 待注入消息列表
 	followUpQueues   map[string][]AgentMessage
 	followUpQueuesMu sync.Mutex
+
+	// per-session ACP thread 控制状态：用于 channel 里的中断/继续
+	acpThreadRuns   map[string]*acpThreadSessionControl
+	acpThreadRunsMu sync.Mutex
 }
 
 // BindingEntry Agent 绑定条目
@@ -88,25 +94,29 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 
 	// 创建会话级 Agent 路由器
 	sessionRouter := NewSessionAgentRouter(cfg.DataDir)
+	// 创建通道内逻辑会话路由器
+	sessionContextRouter := NewSessionContextRouter(cfg.DataDir)
 
 	return &AgentManager{
-		agents:            make(map[string]*Agent),
-		bindings:          make(map[string]*BindingEntry),
-		bus:               cfg.Bus,
-		sessionMgr:        cfg.SessionMgr,
-		provider:          cfg.Provider,
-		tools:             cfg.Tools,
-		subagentRegistry:  subagentRegistry,
-		subagentAnnouncer: subagentAnnouncer,
-		dataDir:           cfg.DataDir,
-		contextBuilder:    cfg.ContextBuilder,
-		skillsLoader:      cfg.SkillsLoader,
-		helper:            NewAgentHelper(cfg.SessionMgr),
-		channelMgr:        cfg.ChannelMgr,
-		acpManager:        cfg.AcpManager,
-		manualCronLast:    make(map[string]time.Time),
-		sessionRouter:     sessionRouter,
-		followUpQueues:    make(map[string][]AgentMessage),
+		agents:               make(map[string]*Agent),
+		bindings:             make(map[string]*BindingEntry),
+		bus:                  cfg.Bus,
+		sessionMgr:           cfg.SessionMgr,
+		provider:             cfg.Provider,
+		tools:                cfg.Tools,
+		subagentRegistry:     subagentRegistry,
+		subagentAnnouncer:    subagentAnnouncer,
+		dataDir:              cfg.DataDir,
+		contextBuilder:       cfg.ContextBuilder,
+		skillsLoader:         cfg.SkillsLoader,
+		helper:               NewAgentHelper(cfg.SessionMgr),
+		channelMgr:           cfg.ChannelMgr,
+		acpManager:           cfg.AcpManager,
+		manualCronLast:       make(map[string]time.Time),
+		sessionRouter:        sessionRouter,
+		sessionContextRouter: sessionContextRouter,
+		followUpQueues:       make(map[string][]AgentMessage),
+		acpThreadRuns:        make(map[string]*acpThreadSessionControl),
 	}
 }
 
@@ -467,6 +477,10 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	// 构建子 Agent 独立状态
 	subagentState := NewAgentState()
 	subagentState.AgentID = agentID
+	subagentState.BootstrapOwnerID = result.BootstrapOwnerID
+	if subagentState.BootstrapOwnerID == "" {
+		subagentState.BootstrapOwnerID = agentID
+	}
 	subagentState.SessionKey = result.ChildSessionKey
 	subagentState.Tools = subagentTools
 
@@ -490,8 +504,8 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 		SessionMgr:     targetAgent.orchestrator.config.SessionMgr,
 		MaxIterations:  targetAgent.orchestrator.config.MaxIterations,
 		ConvertToLLM:   defaultConvertToLLM,
-		ContextBuilder: nil,
-		Skills:         nil,
+		ContextBuilder: targetAgent.orchestrator.config.ContextBuilder,
+		Skills:         targetAgent.orchestrator.config.Skills,
 	}
 
 	// 创建独立 Orchestrator 实例（与父 Agent 完全隔离，互不干扰）
@@ -683,10 +697,12 @@ func (m *AgentManager) sendToSession(sessionKey, message string) error {
 // createAgent 创建 Agent 实例
 func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *ContextBuilder, globalCfg *config.Config) error {
 	// 获取 workspace 路径
-	workspace := cfg.Workspace
-	if workspace == "" {
-		workspace = globalCfg.Workspace.Path
+	agentWorkspace := cfg.Workspace
+	if agentWorkspace == "" {
+		agentWorkspace = globalCfg.Workspace.Path
 	}
+
+	agentContextBuilder := contextBuilder
 
 	// 获取模型
 	model := cfg.Model
@@ -751,8 +767,8 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 		Provider:           agentProvider,
 		SessionMgr:         m.sessionMgr,
 		Tools:              m.tools,
-		Context:            contextBuilder,
-		Workspace:          workspace,
+		Context:            agentContextBuilder,
+		Workspace:          agentWorkspace,
 		MaxIteration:       maxIterations,
 		MaxHistoryMessages: maxHistoryMessages,
 		SkillsLoader:       m.skillsLoader,
@@ -787,7 +803,7 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 	logger.Info("Agent created",
 		zap.String("agent_id", cfg.ID),
 		zap.String("name", cfg.Name),
-		zap.String("workspace", workspace),
+		zap.String("workspace", agentWorkspace),
 		zap.String("model", model),
 		zap.String("provider_profile", cfg.Provider),
 		zap.Bool("is_default", cfg.Default))
@@ -855,6 +871,10 @@ func (m *AgentManager) RouteInbound(ctx context.Context, msg *bus.InboundMessage
 	// --- 处理 /agent 切换指令 ---
 	if cmd := parseAgentSwitchCommand(msg.Content); cmd.IsSwitch {
 		return m.handleAgentSwitchCommand(ctx, cmd, msg)
+	}
+	// --- 处理 /session 切换指令 ---
+	if cmd := parseSessionSwitchCommand(msg.Content); cmd.IsSwitch {
+		return m.handleSessionSwitchCommand(ctx, cmd, msg)
 	}
 
 	decision := m.resolveInboundRoute(msg)
@@ -1044,6 +1064,14 @@ func extractThreadSessionID(msg *bus.InboundMessage) string {
 }
 
 func (m *AgentManager) buildSessionKey(msg *bus.InboundMessage) string {
+	baseSessionKey := m.buildBaseSessionKey(msg)
+	if m.sessionContextRouter == nil {
+		return baseSessionKey
+	}
+	return m.sessionContextRouter.Resolve(baseSessionKey)
+}
+
+func (m *AgentManager) buildBaseSessionKey(msg *bus.InboundMessage) string {
 	accountID := normalizeAccountID(msg.AccountID)
 	sessionKey := fmt.Sprintf("%s:%s:%s", msg.Channel, accountID, msg.ChatID)
 	if msg.ChatID == "default" || msg.ChatID == "" {
@@ -1061,12 +1089,20 @@ func (m *AgentManager) buildSessionKeyCandidates(msg *bus.InboundMessage) []stri
 	}
 
 	canonical := m.buildSessionKey(msg)
+	baseKey := m.buildBaseSessionKey(msg)
 	keys := []string{canonical}
+	if baseKey != canonical {
+		keys = append(keys, baseKey)
+	}
 	rawAccountID := strings.TrimSpace(msg.AccountID)
 	if rawAccountID == "" {
-		legacy := strings.Replace(canonical, ":default", ":", 1)
-		if legacy != canonical {
-			keys = append(keys, legacy)
+		legacyBase := strings.Replace(baseKey, ":default", ":", 1)
+		if legacyBase != baseKey {
+			keys = append(keys, legacyBase)
+		}
+		legacyCanonical := strings.Replace(canonical, ":default", ":", 1)
+		if legacyCanonical != canonical {
+			keys = append(keys, legacyCanonical)
 		}
 	}
 	return keys
@@ -1319,7 +1355,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 				}
 				m.updateSession(sess, finalMessages, 0)
 				if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
-					m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
+					m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 				}
 				return nil
 			}
@@ -1331,7 +1367,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 			logger.Warn("Agent error but publishing last assistant message",
 				zap.Error(err))
 			m.updateSession(sess, finalMessages, len(history))
-			m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
+			m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 			return nil
 		}
 
@@ -1344,7 +1380,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 
 	// 发布响应
 	if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
-		m.publishToBus(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
+		m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 	}
 
 	return nil
@@ -1495,35 +1531,46 @@ func (m *AgentManager) handleAcpThreadBindingInbound(ctx context.Context, msg *b
 		return false, nil
 	}
 
-	go m.runAcpThreadBindingTurn(ctx, sessionKey, msg)
+	cmd := parseAcpThreadControlCommand(msg.Content)
+	switch cmd.Action {
+	case acpThreadControlInterrupt:
+		m.handleAcpThreadInterrupt(ctx, sessionKey, msg)
+	case acpThreadControlResume:
+		m.enqueueAcpThreadTurn(ctx, sessionKey, msg, cmd.Text, true)
+	default:
+		m.enqueueAcpThreadTurn(ctx, sessionKey, msg, msg.Content, false)
+	}
 	return true, nil
 }
 
-func (m *AgentManager) runAcpThreadBindingTurn(ctx context.Context, sessionKey string, msg *bus.InboundMessage) {
-	requestID := msg.ID
-	if requestID == "" {
-		requestID = uuid.NewString()
-	}
-
+func (m *AgentManager) runAcpThreadBindingTurn(ctx context.Context, sessionKey, requestID, text string, msg *bus.InboundMessage) {
 	result, err := m.acpManager.RunTrackedTurn(ctx, acp.RunTrackedTurnInput{
 		Cfg:        m.cfg,
 		SessionKey: sessionKey,
-		Text:       msg.Content,
+		Text:       text,
 		Mode:       acpruntime.AcpPromptModePrompt,
 		RequestID:  requestID,
 	})
 	if err != nil {
+		publishReply, next, nextRequestID := m.finishAcpThreadTurn(sessionKey, requestID)
+		if next != nil {
+			go m.runAcpThreadBindingTurn(ctx, sessionKey, nextRequestID, next.text, next.msg)
+		}
+		if !publishReply {
+			return
+		}
 		logger.Error("Failed to run ACP turn for thread binding",
 			zap.String("session_key", sessionKey),
 			zap.String("channel", msg.Channel),
 			zap.String("account_id", msg.AccountID),
 			zap.String("chat_id", msg.ChatID),
 			zap.Error(err))
-		m.publishAcpThreadBindingError(ctx, msg, "ACP session is currently unavailable. Please retry.")
+		m.publishAcpThreadBindingText(ctx, msg, "ACP session is currently unavailable. Please retry.")
 		return
 	}
 
 	var response strings.Builder
+	canceled := false
 	for event := range result.EventChan {
 		switch e := event.(type) {
 		case *acpruntime.AcpEventTextDelta:
@@ -1531,15 +1578,34 @@ func (m *AgentManager) runAcpThreadBindingTurn(ctx context.Context, sessionKey s
 				response.WriteString(e.Text)
 			}
 		case *acpruntime.AcpEventError:
+			if e.Code == acpruntime.ErrCodeTurnCanceled {
+				canceled = true
+				continue
+			}
+			publishReply, next, nextRequestID := m.finishAcpThreadTurn(sessionKey, requestID)
+			if next != nil {
+				go m.runAcpThreadBindingTurn(ctx, sessionKey, nextRequestID, next.text, next.msg)
+			}
+			if !publishReply {
+				return
+			}
 			logger.Error("ACP turn failed for thread binding",
 				zap.String("session_key", sessionKey),
 				zap.String("channel", msg.Channel),
 				zap.String("account_id", msg.AccountID),
 				zap.String("chat_id", msg.ChatID),
 				zap.String("error_message", e.Message))
-			m.publishAcpThreadBindingError(ctx, msg, "ACP session failed to complete this request.")
+			m.publishAcpThreadBindingText(ctx, msg, "ACP session failed to complete this request.")
 			return
 		}
+	}
+
+	publishReply, next, nextRequestID := m.finishAcpThreadTurn(sessionKey, requestID)
+	if next != nil {
+		go m.runAcpThreadBindingTurn(ctx, sessionKey, nextRequestID, next.text, next.msg)
+	}
+	if canceled || !publishReply {
+		return
 	}
 
 	reply := response.String()
@@ -1556,6 +1622,10 @@ func (m *AgentManager) runAcpThreadBindingTurn(ctx context.Context, sessionKey s
 }
 
 func (m *AgentManager) publishAcpThreadBindingError(ctx context.Context, msg *bus.InboundMessage, text string) {
+	m.publishAcpThreadBindingText(ctx, msg, text)
+}
+
+func (m *AgentManager) publishAcpThreadBindingText(ctx context.Context, msg *bus.InboundMessage, text string) {
 	if msg == nil || strings.TrimSpace(text) == "" {
 		return
 	}
@@ -1595,6 +1665,101 @@ func (m *AgentManager) publishToBus(ctx context.Context, channel, accountID, cha
 	if err := m.bus.PublishOutbound(ctx, outbound); err != nil {
 		logger.Error("Failed to publish outbound", zap.Error(err))
 	}
+}
+
+func (m *AgentManager) publishAssistantReply(ctx context.Context, channel, accountID, chatID string, metadata map[string]interface{}, msg AgentMessage, replyTo string) {
+	content := extractTextContent(msg)
+	outbound := &bus.OutboundMessage{
+		Channel:   channel,
+		AccountID: accountID,
+		ChatID:    chatID,
+		Content:   content,
+		ReplyTo:   replyTo,
+		Metadata:  metadata,
+		Timestamp: time.Unix(msg.Timestamp/1000, 0),
+	}
+
+	executor := newReplyDeliveryExecutor(m.cfg, m.bus, m.channelMgr)
+	mode := executor.deliveryMode(executor.deliveryConfig(channel, accountID), outbound)
+	if mode == config.ReplyDeliveryModeSingle {
+		if err := executor.Publish(ctx, outbound); err != nil {
+			logger.Error("Failed to publish assistant reply", zap.Error(err))
+		}
+		return
+	}
+
+	go func() {
+		if err := executor.Publish(ctx, outbound); err != nil {
+			logger.Error("Failed to deliver segmented assistant reply",
+				zap.String("channel", channel),
+				zap.String("account_id", accountID),
+				zap.String("chat_id", chatID),
+				zap.String("mode", mode),
+				zap.Error(err))
+		}
+	}()
+}
+
+func (m *AgentManager) GetSessionRecentPreview(sessionKey string) string {
+	if m == nil || m.sessionMgr == nil || strings.TrimSpace(sessionKey) == "" {
+		return "暂无历史消息"
+	}
+
+	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
+	if err != nil || sess == nil {
+		return "暂无历史消息"
+	}
+
+	history := sess.GetHistorySafe(20)
+	if len(history) == 0 {
+		return "暂无历史消息"
+	}
+
+	if text := extractRecentPreviewByRole(history, "assistant"); text != "" {
+		return text
+	}
+	if text := extractRecentPreviewByRole(history, "user"); text != "" {
+		return text
+	}
+	return "暂无历史消息"
+}
+
+func extractRecentPreviewByRole(history []session.Message, role string) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != role {
+			continue
+		}
+		if role == "assistant" && len(msg.ToolCalls) > 0 && strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		cleaned := cleanSessionPreviewText(msg.Content, 100)
+		if cleaned != "" {
+			return cleaned
+		}
+	}
+	return ""
+}
+
+func cleanSessionPreviewText(text string, limit int) string {
+	cleaned := strings.TrimSpace(text)
+	if cleaned == "" {
+		return ""
+	}
+	cleaned = strings.ReplaceAll(cleaned, "\r", " ")
+	cleaned = strings.ReplaceAll(cleaned, "\n", " ")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	if cleaned == "" {
+		return ""
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if len([]rune(cleaned)) <= limit {
+		return cleaned
+	}
+	runes := []rune(cleaned)
+	return string(runes[:limit]) + "..."
 }
 
 // sessionMessagesToAgentMessages 将 session 消息转换为 Agent 消息

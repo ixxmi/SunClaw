@@ -315,6 +315,10 @@ func (c *SlackChannel) Stop() error {
 	return c.BaseChannelImpl.Stop()
 }
 
+func (c *SlackChannel) SupportsReplyStreamEdit() bool {
+	return true
+}
+
 // SendStream sends streaming messages (posts initial message for updates)
 func (c *SlackChannel) SendStream(chatID string, stream <-chan *bus.StreamMessage) error {
 	if !c.IsRunning() {
@@ -327,10 +331,16 @@ func (c *SlackChannel) SendStream(chatID string, stream <-chan *bus.StreamMessag
 
 	var timestamp string
 	var content strings.Builder
+	var replyTo string
 
 	for msg := range stream {
 		if msg.Error != "" {
 			return fmt.Errorf("stream error: %s", msg.Error)
+		}
+		if replyTo == "" && msg.Metadata != nil {
+			if streamReplyTo, ok := msg.Metadata["reply_to"].(string); ok {
+				replyTo = streamReplyTo
+			}
 		}
 
 		if !msg.IsThinking && !msg.IsFinal {
@@ -341,6 +351,9 @@ func (c *SlackChannel) SendStream(chatID string, stream <-chan *bus.StreamMessag
 			// Send initial message
 			options := []slack.MsgOption{
 				slack.MsgOptionText(content.String(), false),
+			}
+			if replyTo != "" {
+				options = append(options, slack.MsgOptionTS(replyTo))
 			}
 
 			_, ts, err := c.client.PostMessage(chatID, options...)

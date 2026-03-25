@@ -6,8 +6,9 @@ import (
 )
 
 type contextCaptureTool struct {
-	sessionKey string
-	agentID    string
+	sessionKey       string
+	agentID          string
+	bootstrapOwnerID string
 }
 
 func (t *contextCaptureTool) Name() string { return "capture_context" }
@@ -30,6 +31,9 @@ func (t *contextCaptureTool) Execute(ctx context.Context, params map[string]any,
 	if aid, ok := ctx.Value("agent_id").(string); ok {
 		t.agentID = aid
 	}
+	if bid, ok := ctx.Value("bootstrap_owner_id").(string); ok {
+		t.bootstrapOwnerID = bid
+	}
 	return ToolResult{
 		Content: []ContentBlock{TextContent{Text: "ok"}},
 	}, nil
@@ -39,6 +43,7 @@ func TestExecuteToolCalls_InjectsStringContextKeysForTools(t *testing.T) {
 	state := NewAgentState()
 	state.SessionKey = "wework:default:chat-1"
 	state.AgentID = "reviewer"
+	state.BootstrapOwnerID = "vibecoding"
 
 	tool := &contextCaptureTool{}
 	state.Tools = []Tool{tool}
@@ -53,5 +58,8 @@ func TestExecuteToolCalls_InjectsStringContextKeysForTools(t *testing.T) {
 	}
 	if tool.agentID != state.AgentID {
 		t.Fatalf("expected agent_id %q, got %q", state.AgentID, tool.agentID)
+	}
+	if tool.bootstrapOwnerID != state.BootstrapOwnerID {
+		t.Fatalf("expected bootstrap_owner_id %q, got %q", state.BootstrapOwnerID, tool.bootstrapOwnerID)
 	}
 }

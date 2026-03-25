@@ -291,6 +291,13 @@ func (v *Validator) validateCircuitBreakerConfig(cb *CircuitBreakerConfig) error
 
 // validateChannels validates channel configuration
 func (v *Validator) validateChannels(cfg *Config) error {
+	if err := validateReplyDeliveryConfig("reply_delivery", cfg.ReplyDelivery); err != nil {
+		return err
+	}
+	if err := validateChannelReplyDeliveryConfigs(&cfg.Channels); err != nil {
+		return err
+	}
+
 	validators := []func(*ChannelsConfig) error{
 		v.validateTelegram,
 		v.validateWhatsApp,
@@ -307,6 +314,68 @@ func (v *Validator) validateChannels(cfg *Config) error {
 	for _, validator := range validators {
 		if err := validator(&cfg.Channels); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+func validateReplyDeliveryConfig(prefix string, cfg ReplyDeliveryConfig) error {
+	if mode := strings.TrimSpace(cfg.Mode); mode != "" && NormalizeReplyDeliveryMode(mode) == "" {
+		return errors.InvalidConfig(fmt.Sprintf("%s mode must be one of: single, multi_push, stream_edit, hybrid", prefix))
+	}
+	if cfg.MinChunkChars < 0 {
+		return errors.InvalidConfig(fmt.Sprintf("%s min_chunk_chars must be >= 0", prefix))
+	}
+	if cfg.MaxChunkChars < 0 {
+		return errors.InvalidConfig(fmt.Sprintf("%s max_chunk_chars must be >= 0", prefix))
+	}
+	if cfg.MinDelayMs < 0 {
+		return errors.InvalidConfig(fmt.Sprintf("%s min_delay_ms must be >= 0", prefix))
+	}
+	if cfg.MaxDelayMs < 0 {
+		return errors.InvalidConfig(fmt.Sprintf("%s max_delay_ms must be >= 0", prefix))
+	}
+	if cfg.MaxPushCount < 0 {
+		return errors.InvalidConfig(fmt.Sprintf("%s max_push_count must be >= 0", prefix))
+	}
+	if cfg.MinChunkChars > 0 && cfg.MaxChunkChars > 0 && cfg.MinChunkChars > cfg.MaxChunkChars {
+		return errors.InvalidConfig(fmt.Sprintf("%s min_chunk_chars must be <= max_chunk_chars", prefix))
+	}
+	if cfg.MinDelayMs > 0 && cfg.MaxDelayMs > 0 && cfg.MinDelayMs > cfg.MaxDelayMs {
+		return errors.InvalidConfig(fmt.Sprintf("%s min_delay_ms must be <= max_delay_ms", prefix))
+	}
+	return nil
+}
+
+func validateChannelReplyDeliveryConfigs(channels *ChannelsConfig) error {
+	type channelOverride struct {
+		name     string
+		cfg      ReplyDeliveryConfig
+		accounts map[string]ChannelAccountConfig
+	}
+
+	overrides := []channelOverride{
+		{name: "channels.telegram.reply_delivery", cfg: channels.Telegram.ReplyDelivery, accounts: channels.Telegram.Accounts},
+		{name: "channels.whatsapp.reply_delivery", cfg: channels.WhatsApp.ReplyDelivery, accounts: channels.WhatsApp.Accounts},
+		{name: "channels.weixin.reply_delivery", cfg: channels.Weixin.ReplyDelivery, accounts: channels.Weixin.Accounts},
+		{name: "channels.imessage.reply_delivery", cfg: channels.IMessage.ReplyDelivery, accounts: channels.IMessage.Accounts},
+		{name: "channels.feishu.reply_delivery", cfg: channels.Feishu.ReplyDelivery, accounts: channels.Feishu.Accounts},
+		{name: "channels.qq.reply_delivery", cfg: channels.QQ.ReplyDelivery, accounts: channels.QQ.Accounts},
+		{name: "channels.wework.reply_delivery", cfg: channels.WeWork.ReplyDelivery, accounts: channels.WeWork.Accounts},
+		{name: "channels.dingtalk.reply_delivery", cfg: channels.DingTalk.ReplyDelivery, accounts: channels.DingTalk.Accounts},
+		{name: "channels.infoflow.reply_delivery", cfg: channels.Infoflow.ReplyDelivery, accounts: channels.Infoflow.Accounts},
+		{name: "channels.gotify.reply_delivery", cfg: channels.Gotify.ReplyDelivery, accounts: channels.Gotify.Accounts},
+	}
+
+	for _, item := range overrides {
+		if err := validateReplyDeliveryConfig(item.name, item.cfg); err != nil {
+			return err
+		}
+		for accountID, account := range item.accounts {
+			if err := validateReplyDeliveryConfig(item.name+".accounts."+accountID, account.ReplyDelivery); err != nil {
+				return err
+			}
 		}
 	}
 

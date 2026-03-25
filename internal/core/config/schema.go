@@ -9,18 +9,30 @@ type Config struct {
 	Workspace WorkspaceConfig `mapstructure:"workspace" json:"workspace"`
 	Agents    AgentsConfig    `mapstructure:"agents" json:"agents"`
 	Channels  ChannelsConfig  `mapstructure:"channels" json:"channels"`
-	Providers ProvidersConfig `mapstructure:"providers" json:"providers"`
-	Gateway   GatewayConfig   `mapstructure:"gateway" json:"gateway"`
-	Tools     ToolsConfig     `mapstructure:"tools" json:"tools"`
-	Approvals ApprovalsConfig `mapstructure:"approvals" json:"approvals"`
-	Memory    MemoryConfig    `mapstructure:"memory" json:"memory"`
-	Log       LogConfig       `mapstructure:"log" json:"log"`
+	// ReplyDelivery controls how assistant replies are delivered to channels.
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
+	Providers     ProvidersConfig     `mapstructure:"providers" json:"providers"`
+	Gateway       GatewayConfig       `mapstructure:"gateway" json:"gateway"`
+	Tools         ToolsConfig         `mapstructure:"tools" json:"tools"`
+	Approvals     ApprovalsConfig     `mapstructure:"approvals" json:"approvals"`
+	Memory        MemoryConfig        `mapstructure:"memory" json:"memory"`
+	Log           LogConfig           `mapstructure:"log" json:"log"`
 	// Skills configuration (map[string]interface{} to be parsed by skills package)
 	Skills map[string]interface{} `mapstructure:"skills" json:"skills"`
 	// Agent 绑定配置
 	Bindings []BindingConfig `mapstructure:"bindings" json:"bindings"`
 	// ACP (Agent Client Protocol) configuration
 	ACP ACPConfig `mapstructure:"acp" json:"acp"`
+}
+
+// ReplyDeliveryConfig controls how a reply is split and delivered.
+type ReplyDeliveryConfig struct {
+	Mode          string `mapstructure:"mode" json:"mode"`
+	MinChunkChars int    `mapstructure:"min_chunk_chars" json:"min_chunk_chars"`
+	MaxChunkChars int    `mapstructure:"max_chunk_chars" json:"max_chunk_chars"`
+	MinDelayMs    int    `mapstructure:"min_delay_ms" json:"min_delay_ms"`
+	MaxDelayMs    int    `mapstructure:"max_delay_ms" json:"max_delay_ms"`
+	MaxPushCount  int    `mapstructure:"max_push_count" json:"max_push_count"`
 }
 
 // LogConfig 日志配置
@@ -130,33 +142,34 @@ type ChannelsConfig struct {
 
 // ChannelAccountConfig 通道账号配置（支持多账号）
 type ChannelAccountConfig struct {
-	Enabled           bool     `mapstructure:"enabled" json:"enabled"`
-	Name              string   `mapstructure:"name" json:"name"`                             // 账号显示名称
-	Mode              string   `mapstructure:"mode" json:"mode"`                             // 通道接入模式（如 webhook / websocket）
-	Token             string   `mapstructure:"token" json:"token"`                           // Telegram token
-	BaseURL           string   `mapstructure:"base_url" json:"base_url"`                     // Weixin direct base URL
-	CDNBaseURL        string   `mapstructure:"cdn_base_url" json:"cdn_base_url"`             // Weixin direct CDN base URL
-	Proxy             string   `mapstructure:"proxy" json:"proxy"`                           // Optional HTTP proxy URL
-	AppID             string   `mapstructure:"app_id" json:"app_id"`                         // QQ/Feishu/WeWork app_id
-	AppSecret         string   `mapstructure:"app_secret" json:"app_secret"`                 // QQ/Feishu app_secret
-	CorpID            string   `mapstructure:"corp_id" json:"corp_id"`                       // 企业微信 corp_id
-	AgentID           string   `mapstructure:"agent_id" json:"agent_id"`                     // 企业微信 agent_id
-	BotID             string   `mapstructure:"bot_id" json:"bot_id"`                         // 企业微信智能机器人 bot_id
-	BotSecret         string   `mapstructure:"bot_secret" json:"bot_secret"`                 // 企业微信智能机器人长连接密钥
-	ClientID          string   `mapstructure:"client_id" json:"client_id"`                   // 钉钉 client_id
-	ClientSecret      string   `mapstructure:"client_secret" json:"client_secret"`           // 钉钉 client_secret
-	BridgeURL         string   `mapstructure:"bridge_url" json:"bridge_url"`                 // WhatsApp bridge url
-	WebhookURL        string   `mapstructure:"webhook_url" json:"webhook_url"`               // Infoflow/Feishu webhook url
-	WebSocketURL      string   `mapstructure:"websocket_url" json:"websocket_url"`           // WebSocket 接入地址
-	AESKey            string   `mapstructure:"aes_key" json:"aes_key"`                       // Infoflow AES key
-	EncodingAESKey    string   `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`     // 企业微信 EncodingAESKey
-	EncryptKey        string   `mapstructure:"encrypt_key" json:"encrypt_key"`               // Feishu encrypt key
-	VerificationToken string   `mapstructure:"verification_token" json:"verification_token"` // Feishu verification token
-	WebhookPort       int      `mapstructure:"webhook_port" json:"webhook_port"`             // Infoflow/Feishu webhook port
-	ServerURL         string   `mapstructure:"server_url" json:"server_url"`                 // Gotify server url
-	AppToken          string   `mapstructure:"app_token" json:"app_token"`                   // Gotify app token
-	Priority          int      `mapstructure:"priority" json:"priority"`                     // Gotify message priority 1-10
-	AllowedIDs        []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled           bool                `mapstructure:"enabled" json:"enabled"`
+	Name              string              `mapstructure:"name" json:"name"` // 账号显示名称
+	ReplyDelivery     ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
+	Mode              string              `mapstructure:"mode" json:"mode"`                             // 通道接入模式（如 webhook / websocket）
+	Token             string              `mapstructure:"token" json:"token"`                           // Telegram token
+	BaseURL           string              `mapstructure:"base_url" json:"base_url"`                     // Weixin direct base URL
+	CDNBaseURL        string              `mapstructure:"cdn_base_url" json:"cdn_base_url"`             // Weixin direct CDN base URL
+	Proxy             string              `mapstructure:"proxy" json:"proxy"`                           // Optional HTTP proxy URL
+	AppID             string              `mapstructure:"app_id" json:"app_id"`                         // QQ/Feishu/WeWork app_id
+	AppSecret         string              `mapstructure:"app_secret" json:"app_secret"`                 // QQ/Feishu app_secret
+	CorpID            string              `mapstructure:"corp_id" json:"corp_id"`                       // 企业微信 corp_id
+	AgentID           string              `mapstructure:"agent_id" json:"agent_id"`                     // 企业微信 agent_id
+	BotID             string              `mapstructure:"bot_id" json:"bot_id"`                         // 企业微信智能机器人 bot_id
+	BotSecret         string              `mapstructure:"bot_secret" json:"bot_secret"`                 // 企业微信智能机器人长连接密钥
+	ClientID          string              `mapstructure:"client_id" json:"client_id"`                   // 钉钉 client_id
+	ClientSecret      string              `mapstructure:"client_secret" json:"client_secret"`           // 钉钉 client_secret
+	BridgeURL         string              `mapstructure:"bridge_url" json:"bridge_url"`                 // WhatsApp bridge url
+	WebhookURL        string              `mapstructure:"webhook_url" json:"webhook_url"`               // Infoflow/Feishu webhook url
+	WebSocketURL      string              `mapstructure:"websocket_url" json:"websocket_url"`           // WebSocket 接入地址
+	AESKey            string              `mapstructure:"aes_key" json:"aes_key"`                       // Infoflow AES key
+	EncodingAESKey    string              `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`     // 企业微信 EncodingAESKey
+	EncryptKey        string              `mapstructure:"encrypt_key" json:"encrypt_key"`               // Feishu encrypt key
+	VerificationToken string              `mapstructure:"verification_token" json:"verification_token"` // Feishu verification token
+	WebhookPort       int                 `mapstructure:"webhook_port" json:"webhook_port"`             // Infoflow/Feishu webhook port
+	ServerURL         string              `mapstructure:"server_url" json:"server_url"`                 // Gotify server url
+	AppToken          string              `mapstructure:"app_token" json:"app_token"`                   // Gotify app token
+	Priority          int                 `mapstructure:"priority" json:"priority"`                     // Gotify message priority 1-10
+	AllowedIDs        []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
 }
 
 // ChannelTypeAccountConfig 通道类型的多账号配置
@@ -167,57 +180,62 @@ type ChannelTypeAccountConfig struct {
 
 // TelegramChannelConfig Telegram 通道配置
 type TelegramChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	Token      string   `mapstructure:"token" json:"token"`
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	Token         string              `mapstructure:"token" json:"token"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // WhatsAppChannelConfig WhatsApp 通道配置
 type WhatsAppChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	BridgeURL     string              `mapstructure:"bridge_url" json:"bridge_url"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // WeixinChannelConfig 微信通道配置
 type WeixinChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	Mode       string   `mapstructure:"mode" json:"mode"`
-	Token      string   `mapstructure:"token" json:"token"`
-	BaseURL    string   `mapstructure:"base_url" json:"base_url"`
-	CDNBaseURL string   `mapstructure:"cdn_base_url" json:"cdn_base_url"`
-	Proxy      string   `mapstructure:"proxy" json:"proxy"`
-	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	Mode          string              `mapstructure:"mode" json:"mode"`
+	Token         string              `mapstructure:"token" json:"token"`
+	BaseURL       string              `mapstructure:"base_url" json:"base_url"`
+	CDNBaseURL    string              `mapstructure:"cdn_base_url" json:"cdn_base_url"`
+	Proxy         string              `mapstructure:"proxy" json:"proxy"`
+	BridgeURL     string              `mapstructure:"bridge_url" json:"bridge_url"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // IMessageChannelConfig iMessage 通道配置
 type IMessageChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	BridgeURL  string   `mapstructure:"bridge_url" json:"bridge_url"`
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	BridgeURL     string              `mapstructure:"bridge_url" json:"bridge_url"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // FeishuChannelConfig 飞书通道配置
 type FeishuChannelConfig struct {
-	Enabled           bool     `mapstructure:"enabled" json:"enabled"`
-	AppID             string   `mapstructure:"app_id" json:"app_id"`
-	AppSecret         string   `mapstructure:"app_secret" json:"app_secret"`
-	EncryptKey        string   `mapstructure:"encrypt_key" json:"encrypt_key"`
-	VerificationToken string   `mapstructure:"verification_token" json:"verification_token"`
-	WebhookPort       int      `mapstructure:"webhook_port" json:"webhook_port"`
-	Domain            string   `mapstructure:"domain" json:"domain"`             // 飞书域名 (如: feishu, lark)
-	GroupPolicy       string   `mapstructure:"group_policy" json:"group_policy"` // 群聊策略: open, closed, whitelist
-	DMPolicy          string   `mapstructure:"dm_policy" json:"dm_policy"`       // 私聊策略: open, pairing, allowlist, closed (默认: pairing)
-	AllowedIDs        []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled           bool                `mapstructure:"enabled" json:"enabled"`
+	AppID             string              `mapstructure:"app_id" json:"app_id"`
+	AppSecret         string              `mapstructure:"app_secret" json:"app_secret"`
+	EncryptKey        string              `mapstructure:"encrypt_key" json:"encrypt_key"`
+	VerificationToken string              `mapstructure:"verification_token" json:"verification_token"`
+	WebhookPort       int                 `mapstructure:"webhook_port" json:"webhook_port"`
+	Domain            string              `mapstructure:"domain" json:"domain"`             // 飞书域名 (如: feishu, lark)
+	GroupPolicy       string              `mapstructure:"group_policy" json:"group_policy"` // 群聊策略: open, closed, whitelist
+	DMPolicy          string              `mapstructure:"dm_policy" json:"dm_policy"`       // 私聊策略: open, pairing, allowlist, closed (默认: pairing)
+	AllowedIDs        []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery     ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// CronOutputChatID 指定 cron 任务输出的目标聊天 ID（用于接收定时任务的通知）
 	CronOutputChatID string `mapstructure:"cron_output_chat_id" json:"cron_output_chat_id"`
 	// 多账号配置（新格式）
@@ -226,61 +244,66 @@ type FeishuChannelConfig struct {
 
 // QQChannelConfig QQ 通道配置 (QQ 开放平台官方 Bot API)
 type QQChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	AppID      string   `mapstructure:"app_id" json:"app_id"`           // QQ 机器人 AppID
-	AppSecret  string   `mapstructure:"app_secret" json:"app_secret"`   // AppSecret (ClientSecret)
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"` // 允许的用户/群ID列表
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	AppID         string              `mapstructure:"app_id" json:"app_id"`           // QQ 机器人 AppID
+	AppSecret     string              `mapstructure:"app_secret" json:"app_secret"`   // AppSecret (ClientSecret)
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"` // 允许的用户/群ID列表
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // WeWorkChannelConfig 企业微信通道配置
 type WeWorkChannelConfig struct {
-	Enabled        bool     `mapstructure:"enabled" json:"enabled"`
-	Mode           string   `mapstructure:"mode" json:"mode"` // webhook / websocket
-	CorpID         string   `mapstructure:"corp_id" json:"corp_id"`
-	AgentID        string   `mapstructure:"agent_id" json:"agent_id"`
-	Secret         string   `mapstructure:"secret" json:"secret"`
-	BotID          string   `mapstructure:"bot_id" json:"bot_id"`
-	BotSecret      string   `mapstructure:"bot_secret" json:"bot_secret"`
-	WebSocketURL   string   `mapstructure:"websocket_url" json:"websocket_url"`
-	Token          string   `mapstructure:"token" json:"token"`
-	EncodingAESKey string   `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`
-	WebhookPort    int      `mapstructure:"webhook_port" json:"webhook_port"`
-	AllowedIDs     []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled        bool                `mapstructure:"enabled" json:"enabled"`
+	Mode           string              `mapstructure:"mode" json:"mode"` // webhook / websocket
+	CorpID         string              `mapstructure:"corp_id" json:"corp_id"`
+	AgentID        string              `mapstructure:"agent_id" json:"agent_id"`
+	Secret         string              `mapstructure:"secret" json:"secret"`
+	BotID          string              `mapstructure:"bot_id" json:"bot_id"`
+	BotSecret      string              `mapstructure:"bot_secret" json:"bot_secret"`
+	WebSocketURL   string              `mapstructure:"websocket_url" json:"websocket_url"`
+	Token          string              `mapstructure:"token" json:"token"`
+	EncodingAESKey string              `mapstructure:"encoding_aes_key" json:"encoding_aes_key"`
+	WebhookPort    int                 `mapstructure:"webhook_port" json:"webhook_port"`
+	AllowedIDs     []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery  ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // DingTalkChannelConfig 钉钉通道配置
 type DingTalkChannelConfig struct {
-	Enabled      bool     `mapstructure:"enabled" json:"enabled"`
-	ClientID     string   `mapstructure:"client_id" json:"client_id"`
-	ClientSecret string   `mapstructure:"secret" json:"secret"`
-	AllowedIDs   []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	ClientID      string              `mapstructure:"client_id" json:"client_id"`
+	ClientSecret  string              `mapstructure:"secret" json:"secret"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // InfoflowChannelConfig 如流通道配置
 type InfoflowChannelConfig struct {
-	Enabled     bool     `mapstructure:"enabled" json:"enabled"`
-	WebhookURL  string   `mapstructure:"webhook_url" json:"webhook_url"`
-	Token       string   `mapstructure:"token" json:"token"`
-	AESKey      string   `mapstructure:"aes_key" json:"aes_key"`
-	WebhookPort int      `mapstructure:"webhook_port" json:"webhook_port"`
-	AllowedIDs  []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	WebhookURL    string              `mapstructure:"webhook_url" json:"webhook_url"`
+	Token         string              `mapstructure:"token" json:"token"`
+	AESKey        string              `mapstructure:"aes_key" json:"aes_key"`
+	WebhookPort   int                 `mapstructure:"webhook_port" json:"webhook_port"`
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
 
 // GotifyChannelConfig Gotify 通道配置
 type GotifyChannelConfig struct {
-	Enabled    bool     `mapstructure:"enabled" json:"enabled"`
-	ServerURL  string   `mapstructure:"server_url" json:"server_url"`
-	AppToken   string   `mapstructure:"app_token" json:"app_token"`
-	Priority   int      `mapstructure:"priority" json:"priority"` // 消息优先级 1-10
-	AllowedIDs []string `mapstructure:"allowed_ids" json:"allowed_ids"`
+	Enabled       bool                `mapstructure:"enabled" json:"enabled"`
+	ServerURL     string              `mapstructure:"server_url" json:"server_url"`
+	AppToken      string              `mapstructure:"app_token" json:"app_token"`
+	Priority      int                 `mapstructure:"priority" json:"priority"` // 消息优先级 1-10
+	AllowedIDs    []string            `mapstructure:"allowed_ids" json:"allowed_ids"`
+	ReplyDelivery ReplyDeliveryConfig `mapstructure:"reply_delivery" json:"reply_delivery"`
 	// 多账号配置（新格式）
 	Accounts map[string]ChannelAccountConfig `mapstructure:"accounts" json:"accounts"`
 }
