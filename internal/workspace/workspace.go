@@ -26,6 +26,16 @@ var BootstrapFiles = []string{
 	"BOOTSTRAP.md",
 }
 
+// CognitiveFiles 定义会参与 agent 认知注入和 read_config/update_config 的文件。
+var CognitiveFiles = []string{
+	"AGENTS.md",
+	"SOUL.md",
+	"IDENTITY.md",
+	"USER.md",
+}
+
+const AgentBootstrapGuideFile = "BOOTSTRAP.md"
+
 // Manager 管理 workspace 目录
 type Manager struct {
 	workspaceDir string
@@ -222,6 +232,24 @@ func (m *Manager) ListMemoryFiles() ([]string, error) {
 // GetWorkspaceDir 获取 workspace 目录路径
 func (m *Manager) GetWorkspaceDir() string {
 	return m.workspaceDir
+}
+
+// AgentBootstrapDir 返回某个 agent 的认知文件目录。
+func AgentBootstrapDir(baseWorkspaceDir, agentID string) string {
+	safeAgentID := strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(agentID)
+	return filepath.Join(baseWorkspaceDir, "agents", safeAgentID, "bootstrap")
+}
+
+// EnsureAgentBootstrapDir 确保 agent 专属认知目录存在。
+// 该函数只负责建目录，不预填认知文件；运行时若认知文件缺失，
+// 会由 prompt 注入逻辑回退到 BOOTSTRAP.md 作为引导。
+func EnsureAgentBootstrapDir(baseWorkspaceDir, agentID string) (string, error) {
+	targetDir := AgentBootstrapDir(baseWorkspaceDir, agentID)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create agent bootstrap dir: %w", err)
+	}
+
+	return targetDir, nil
 }
 
 // ListFiles 列出 workspace 目录下的所有文件

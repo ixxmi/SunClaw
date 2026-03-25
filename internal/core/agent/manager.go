@@ -50,6 +50,8 @@ type AgentManager struct {
 	dataDir           string
 	// 会话级 Agent 路由（支持运行时切换主 Agent）
 	sessionRouter *SessionAgentRouter
+	// 通道内逻辑会话路由（支持 /session 在同一 chat 下切换任务上下文）
+	sessionContextRouter *SessionContextRouter
 
 	// per-session follow-up 注入队列：子 agent 完成后直接 push，主 agent runLoop 消费
 	// key = requester session key（主 agent 的会话键），value = 待注入消息列表
@@ -92,26 +94,29 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 
 	// 创建会话级 Agent 路由器
 	sessionRouter := NewSessionAgentRouter(cfg.DataDir)
+	// 创建通道内逻辑会话路由器
+	sessionContextRouter := NewSessionContextRouter(cfg.DataDir)
 
 	return &AgentManager{
-		agents:            make(map[string]*Agent),
-		bindings:          make(map[string]*BindingEntry),
-		bus:               cfg.Bus,
-		sessionMgr:        cfg.SessionMgr,
-		provider:          cfg.Provider,
-		tools:             cfg.Tools,
-		subagentRegistry:  subagentRegistry,
-		subagentAnnouncer: subagentAnnouncer,
-		dataDir:           cfg.DataDir,
-		contextBuilder:    cfg.ContextBuilder,
-		skillsLoader:      cfg.SkillsLoader,
-		helper:            NewAgentHelper(cfg.SessionMgr),
-		channelMgr:        cfg.ChannelMgr,
-		acpManager:        cfg.AcpManager,
-		manualCronLast:    make(map[string]time.Time),
-		sessionRouter:     sessionRouter,
-		followUpQueues:    make(map[string][]AgentMessage),
-		acpThreadRuns:     make(map[string]*acpThreadSessionControl),
+		agents:               make(map[string]*Agent),
+		bindings:             make(map[string]*BindingEntry),
+		bus:                  cfg.Bus,
+		sessionMgr:           cfg.SessionMgr,
+		provider:             cfg.Provider,
+		tools:                cfg.Tools,
+		subagentRegistry:     subagentRegistry,
+		subagentAnnouncer:    subagentAnnouncer,
+		dataDir:              cfg.DataDir,
+		contextBuilder:       cfg.ContextBuilder,
+		skillsLoader:         cfg.SkillsLoader,
+		helper:               NewAgentHelper(cfg.SessionMgr),
+		channelMgr:           cfg.ChannelMgr,
+		acpManager:           cfg.AcpManager,
+		manualCronLast:       make(map[string]time.Time),
+		sessionRouter:        sessionRouter,
+		sessionContextRouter: sessionContextRouter,
+		followUpQueues:       make(map[string][]AgentMessage),
+		acpThreadRuns:        make(map[string]*acpThreadSessionControl),
 	}
 }
 
@@ -472,6 +477,10 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	// 构建子 Agent 独立状态
 	subagentState := NewAgentState()
 	subagentState.AgentID = agentID
+	subagentState.BootstrapOwnerID = result.BootstrapOwnerID
+	if subagentState.BootstrapOwnerID == "" {
+		subagentState.BootstrapOwnerID = agentID
+	}
 	subagentState.SessionKey = result.ChildSessionKey
 	subagentState.Tools = subagentTools
 
@@ -495,8 +504,8 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 		SessionMgr:     targetAgent.orchestrator.config.SessionMgr,
 		MaxIterations:  targetAgent.orchestrator.config.MaxIterations,
 		ConvertToLLM:   defaultConvertToLLM,
-		ContextBuilder: nil,
-		Skills:         nil,
+		ContextBuilder: targetAgent.orchestrator.config.ContextBuilder,
+		Skills:         targetAgent.orchestrator.config.Skills,
 	}
 
 	// 创建独立 Orchestrator 实例（与父 Agent 完全隔离，互不干扰）
@@ -688,10 +697,12 @@ func (m *AgentManager) sendToSession(sessionKey, message string) error {
 // createAgent 创建 Agent 实例
 func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *ContextBuilder, globalCfg *config.Config) error {
 	// 获取 workspace 路径
-	workspace := cfg.Workspace
-	if workspace == "" {
-		workspace = globalCfg.Workspace.Path
+	agentWorkspace := cfg.Workspace
+	if agentWorkspace == "" {
+		agentWorkspace = globalCfg.Workspace.Path
 	}
+
+	agentContextBuilder := contextBuilder
 
 	// 获取模型
 	model := cfg.Model
@@ -756,8 +767,8 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 		Provider:           agentProvider,
 		SessionMgr:         m.sessionMgr,
 		Tools:              m.tools,
-		Context:            contextBuilder,
-		Workspace:          workspace,
+		Context:            agentContextBuilder,
+		Workspace:          agentWorkspace,
 		MaxIteration:       maxIterations,
 		MaxHistoryMessages: maxHistoryMessages,
 		SkillsLoader:       m.skillsLoader,
@@ -792,7 +803,7 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 	logger.Info("Agent created",
 		zap.String("agent_id", cfg.ID),
 		zap.String("name", cfg.Name),
-		zap.String("workspace", workspace),
+		zap.String("workspace", agentWorkspace),
 		zap.String("model", model),
 		zap.String("provider_profile", cfg.Provider),
 		zap.Bool("is_default", cfg.Default))
@@ -860,6 +871,10 @@ func (m *AgentManager) RouteInbound(ctx context.Context, msg *bus.InboundMessage
 	// --- 处理 /agent 切换指令 ---
 	if cmd := parseAgentSwitchCommand(msg.Content); cmd.IsSwitch {
 		return m.handleAgentSwitchCommand(ctx, cmd, msg)
+	}
+	// --- 处理 /session 切换指令 ---
+	if cmd := parseSessionSwitchCommand(msg.Content); cmd.IsSwitch {
+		return m.handleSessionSwitchCommand(ctx, cmd, msg)
 	}
 
 	decision := m.resolveInboundRoute(msg)
@@ -1049,6 +1064,14 @@ func extractThreadSessionID(msg *bus.InboundMessage) string {
 }
 
 func (m *AgentManager) buildSessionKey(msg *bus.InboundMessage) string {
+	baseSessionKey := m.buildBaseSessionKey(msg)
+	if m.sessionContextRouter == nil {
+		return baseSessionKey
+	}
+	return m.sessionContextRouter.Resolve(baseSessionKey)
+}
+
+func (m *AgentManager) buildBaseSessionKey(msg *bus.InboundMessage) string {
 	accountID := normalizeAccountID(msg.AccountID)
 	sessionKey := fmt.Sprintf("%s:%s:%s", msg.Channel, accountID, msg.ChatID)
 	if msg.ChatID == "default" || msg.ChatID == "" {
@@ -1066,12 +1089,20 @@ func (m *AgentManager) buildSessionKeyCandidates(msg *bus.InboundMessage) []stri
 	}
 
 	canonical := m.buildSessionKey(msg)
+	baseKey := m.buildBaseSessionKey(msg)
 	keys := []string{canonical}
+	if baseKey != canonical {
+		keys = append(keys, baseKey)
+	}
 	rawAccountID := strings.TrimSpace(msg.AccountID)
 	if rawAccountID == "" {
-		legacy := strings.Replace(canonical, ":default", ":", 1)
-		if legacy != canonical {
-			keys = append(keys, legacy)
+		legacyBase := strings.Replace(baseKey, ":default", ":", 1)
+		if legacyBase != baseKey {
+			keys = append(keys, legacyBase)
+		}
+		legacyCanonical := strings.Replace(canonical, ":default", ":", 1)
+		if legacyCanonical != canonical {
+			keys = append(keys, legacyCanonical)
 		}
 	}
 	return keys
@@ -1667,6 +1698,68 @@ func (m *AgentManager) publishAssistantReply(ctx context.Context, channel, accou
 				zap.Error(err))
 		}
 	}()
+}
+
+func (m *AgentManager) GetSessionRecentPreview(sessionKey string) string {
+	if m == nil || m.sessionMgr == nil || strings.TrimSpace(sessionKey) == "" {
+		return "暂无历史消息"
+	}
+
+	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
+	if err != nil || sess == nil {
+		return "暂无历史消息"
+	}
+
+	history := sess.GetHistorySafe(20)
+	if len(history) == 0 {
+		return "暂无历史消息"
+	}
+
+	if text := extractRecentPreviewByRole(history, "assistant"); text != "" {
+		return text
+	}
+	if text := extractRecentPreviewByRole(history, "user"); text != "" {
+		return text
+	}
+	return "暂无历史消息"
+}
+
+func extractRecentPreviewByRole(history []session.Message, role string) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != role {
+			continue
+		}
+		if role == "assistant" && len(msg.ToolCalls) > 0 && strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		cleaned := cleanSessionPreviewText(msg.Content, 100)
+		if cleaned != "" {
+			return cleaned
+		}
+	}
+	return ""
+}
+
+func cleanSessionPreviewText(text string, limit int) string {
+	cleaned := strings.TrimSpace(text)
+	if cleaned == "" {
+		return ""
+	}
+	cleaned = strings.ReplaceAll(cleaned, "\r", " ")
+	cleaned = strings.ReplaceAll(cleaned, "\n", " ")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	if cleaned == "" {
+		return ""
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if len([]rune(cleaned)) <= limit {
+		return cleaned
+	}
+	runes := []rune(cleaned)
+	return string(runes[:limit]) + "..."
 }
 
 // sessionMessagesToAgentMessages 将 session 消息转换为 Agent 消息

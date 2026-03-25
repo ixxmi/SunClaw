@@ -26,16 +26,36 @@ const (
 
 // ContextBuilder 上下文构建器
 type ContextBuilder struct {
-	memory    *MemoryStore
-	workspace string
+	memory               *MemoryStore
+	bootstrapStore       *MemoryStore
+	bootstrapDirResolver func(ownerID string) string
+	workspace            string
 }
 
 // NewContextBuilder 创建上下文构建器
 func NewContextBuilder(memory *MemoryStore, workspace string) *ContextBuilder {
 	return &ContextBuilder{
-		memory:    memory,
-		workspace: workspace,
+		memory:         memory,
+		bootstrapStore: memory,
+		workspace:      workspace,
 	}
+}
+
+// NewContextBuilderWithBootstrap 创建上下文构建器，并允许为 bootstrap 文件指定独立来源目录。
+func NewContextBuilderWithBootstrap(memory *MemoryStore, workspace string, bootstrapStore *MemoryStore) *ContextBuilder {
+	if bootstrapStore == nil {
+		bootstrapStore = memory
+	}
+	return &ContextBuilder{
+		memory:         memory,
+		bootstrapStore: bootstrapStore,
+		workspace:      workspace,
+	}
+}
+
+// SetBootstrapDirResolver 设置按主 agent owner 解析认知目录的回调。
+func (b *ContextBuilder) SetBootstrapDirResolver(resolver func(ownerID string) string) {
+	b.bootstrapDirResolver = resolver
 }
 
 // BuildToolsSummary 构建工具列表摘要段落。
@@ -144,30 +164,25 @@ func (b *ContextBuilder) buildSystemPromptWithSkills(skillsContent string, mode 
 		parts = append(parts, b.buildDocsSection())
 	}
 
-	// 9. Bootstrap 文件（工作区上下文）
-	if bootstrap := b.loadBootstrapFiles(); bootstrap != "" {
-		parts = append(parts, "## Workspace Files (injected)\n\n"+bootstrap)
-	}
-
-	// 10. 消息和回复指导（仅 full 模式）
+	// 9. 消息和回复指导（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildMessagingSection())
 	}
 
-	// 11. 静默回复规则（仅 full 模式）
+	// 10. 静默回复规则（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildSilentReplies())
 	}
 
-	// 12. 心跳机制（仅 full 模式）
+	// 11. 心跳机制（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildHeartbeats())
 	}
 
-	// 13. 工作区信息
+	// 12. 工作区信息
 	parts = append(parts, b.buildWorkspace())
 
-	// 14. 运行时信息（仅 full 模式）
+	// 13. 运行时信息（仅 full 模式）
 	if !isMinimal {
 		parts = append(parts, b.buildRuntime())
 	}
@@ -676,6 +691,24 @@ func (b *ContextBuilder) buildSelectedSkills(selectedSkillNames []string, skills
 	return sb.String()
 }
 
+// buildSkillsContext 构建当前轮需要注入的技能上下文。
+// - 未选择技能时：注入可用技能摘要，供 LLM 决定是否调用 use_skill
+// - 已选择技能时：注入所选技能全文，进入第二阶段执行
+func (b *ContextBuilder) buildSkillsContext(skills []*Skill, loadedSkills []string, mode PromptMode) string {
+	if len(skills) == 0 {
+		return ""
+	}
+
+	if len(loadedSkills) > 0 {
+		selected := b.buildSelectedSkills(loadedSkills, skills)
+		if strings.TrimSpace(selected) != "" {
+			return selected
+		}
+	}
+
+	return b.buildSkillsPrompt(skills, mode)
+}
+
 // BuildMessages 构建消息列表
 func (b *ContextBuilder) BuildMessages(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string) []Message {
 	return b.BuildMessagesWithMode(history, currentMessage, skills, loadedSkills, PromptModeFull)
@@ -686,15 +719,8 @@ func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, curren
 	// 首先验证历史消息，过滤掉孤立的 tool 消息
 	validHistory := b.validateHistoryMessages(history)
 
-	// 构建系统提示词：根据是否已加载技能决定注入内容
-	var skillsContent string
-	if len(loadedSkills) > 0 {
-		// 第二阶段：注入已选中技能的完整内容
-		skillsContent = b.buildSelectedSkills(loadedSkills, skills)
-	} else {
-		// 第一阶段：只注入技能摘要
-		skillsContent = b.buildSkillsPrompt(skills, mode)
-	}
+	// 构建系统提示词：未选 skill 时注入摘要，已选 skill 时注入正文
+	skillsContent := b.buildSkillsContext(skills, loadedSkills, mode)
 
 	systemPrompt := b.buildSystemPromptWithSkills(skillsContent, mode)
 
@@ -793,18 +819,68 @@ func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, curren
 	return messages
 }
 
-// loadBootstrapFiles 加载 bootstrap 文件
-func (b *ContextBuilder) loadBootstrapFiles() string {
+func (b *ContextBuilder) resolveBootstrapStore(ownerID string) *MemoryStore {
+	if b.bootstrapDirResolver != nil && strings.TrimSpace(ownerID) != "" {
+		if dir := strings.TrimSpace(b.bootstrapDirResolver(ownerID)); dir != "" {
+			return NewMemoryStore(dir)
+		}
+	}
+	if b.bootstrapStore != nil {
+		return b.bootstrapStore
+	}
+	return b.memory
+}
+
+func (b *ContextBuilder) defaultBootstrapStore() *MemoryStore {
+	if b.bootstrapStore != nil {
+		return b.bootstrapStore
+	}
+	return b.memory
+}
+
+// loadBootstrapFilesForOwner 加载指定主 agent owner 的 bootstrap 文件。
+func (b *ContextBuilder) loadBootstrapFilesForOwner(ownerID string) string {
 	var parts []string
 
 	files := []string{"IDENTITY.md", "AGENTS.md", "SOUL.md", "USER.md"}
+	store := b.resolveBootstrapStore(ownerID)
 	for _, filename := range files {
-		if content, err := b.memory.ReadBootstrapFile(filename); err == nil && content != "" {
+		if store == nil {
+			break
+		}
+		if content, err := store.ReadBootstrapFile(filename); err == nil && content != "" {
 			parts = append(parts, fmt.Sprintf("### %s\n\n%s", filename, content))
 		}
 	}
 
+	if len(parts) == 0 && store != nil {
+		if content, err := store.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
+			parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
+		}
+	}
+
+	// 主 agent 的专属目录还没有认知文件时，回退到根工作区的 BOOTSTRAP.md 引导。
+	if len(parts) == 0 && strings.TrimSpace(ownerID) != "" {
+		rootStore := b.defaultBootstrapStore()
+		if rootStore != nil && (store == nil || rootStore.workspace != store.workspace) {
+			if content, err := rootStore.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
+				parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
+			}
+		}
+	}
+
 	return joinNonEmpty(parts, "\n\n")
+}
+
+func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
+	if bootstrap := b.loadBootstrapFilesForOwner(ownerID); bootstrap != "" {
+		return "## Workspace Files (injected)\n\n" + bootstrap
+	}
+	return ""
+}
+
+func (b *ContextBuilder) buildBootstrapSection() string {
+	return b.buildBootstrapSectionForOwner("")
 }
 
 // validateHistoryMessages 验证历史消息，过滤掉孤立的 tool 消息

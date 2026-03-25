@@ -34,6 +34,8 @@ func TestSubagentSpawnTool_RunTimeoutOverrideAndOriginFromContext(t *testing.T) 
 
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, "session_key", "agent:main:chat1")
+	ctx = context.WithValue(ctx, "agent_id", "architect")
+	ctx = context.WithValue(ctx, "bootstrap_owner_id", "vibecoding")
 	ctx = context.WithValue(ctx, "channel", "feishu")
 	ctx = context.WithValue(ctx, "account_id", "acc-1")
 	ctx = context.WithValue(ctx, "chat_id", "chat-xyz")
@@ -53,6 +55,9 @@ func TestSubagentSpawnTool_RunTimeoutOverrideAndOriginFromContext(t *testing.T) 
 	}
 	if spawned.RunTimeoutSeconds != 42 {
 		t.Fatalf("expected timeout override 42, got %d", spawned.RunTimeoutSeconds)
+	}
+	if spawned.BootstrapOwnerID != "vibecoding" {
+		t.Fatalf("expected bootstrap owner vibecoding, got %q", spawned.BootstrapOwnerID)
 	}
 	if reg.last == nil || reg.last.RequesterOrigin == nil {
 		t.Fatalf("expected requester origin to be registered")

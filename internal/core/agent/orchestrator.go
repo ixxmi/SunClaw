@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -17,8 +18,9 @@ import (
 type contextKey string
 
 const (
-	SessionKeyContextKey contextKey = "session_key"
-	AgentIDContextKey    contextKey = "agent_id"
+	SessionKeyContextKey     contextKey = "session_key"
+	AgentIDContextKey        contextKey = "agent_id"
+	BootstrapOwnerContextKey contextKey = "bootstrap_owner_id"
 )
 
 // toolResultPair is used to pass tool execution results from goroutines
@@ -442,6 +444,27 @@ func extractContentLength(msg AgentMessage) int {
 	return total
 }
 
+func isBootstrapGuideModeContent(content string) bool {
+	if content == "" {
+		return false
+	}
+	if !strings.Contains(content, "### BOOTSTRAP.md") {
+		return false
+	}
+	cognitiveHeaders := []string{
+		"### IDENTITY.md",
+		"### AGENTS.md",
+		"### SOUL.md",
+		"### USER.md",
+	}
+	for _, header := range cognitiveHeaders {
+		if strings.Contains(content, header) {
+			return false
+		}
+	}
+	return true
+}
+
 // streamAssistantResponse calls the LLM and streams the response
 func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *AgentState) (AgentMessage, error) {
 	logger.Debug("=== streamAssistantResponse Start ===",
@@ -482,17 +505,37 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	o.emit(NewEvent(EventMessageStart))
 
 	// Build system prompt with skills.
-	// IMPORTANT: keep agent-specific system prompt (state.SystemPrompt) effective.
+	// IMPORTANT: keep agent-specific system prompt (state.SystemPrompt) effective,
+	// but inject skill summary/full content dynamically at request time so custom
+	// prompts can still participate in the two-phase skill workflow.
 	fullMessages := []providers.Message{}
+	skillsContent := ""
+	bootstrapContent := ""
+	if o.config.ContextBuilder != nil {
+		skillsContent = o.config.ContextBuilder.buildSkillsContext(o.config.Skills, state.LoadedSkills, PromptModeFull)
+		bootstrapContent = o.config.ContextBuilder.buildBootstrapSectionForOwner(state.BootstrapOwnerID)
+	}
+	bootstrapModeNotice := ""
+	if isBootstrapGuideModeContent(bootstrapContent) {
+		bootstrapModeNotice = `## Bootstrap Mode
+
+This main agent does not have agent-specific cognitive files yet (` + "`IDENTITY.md`" + `, ` + "`AGENTS.md`" + `, ` + "`SOUL.md`" + `, ` + "`USER.md`" + `).
+
+Treat ` + "`BOOTSTRAP.md`" + ` below as authoritative for identity bootstrapping.
+Any fixed identity or role wording elsewhere in this system prompt defines only temporary operational behavior, not the final self-identity.
+
+If the user asks who you are, do not answer with a fixed identity such as "I am SunClaw" unless that identity has already been explicitly written into ` + "`IDENTITY.md`" + `.
+Instead, explain that this agent is not fully defined yet, use the bootstrap guide to establish identity with the user, and then write the resulting cognitive files.`
+	}
 	if state.SystemPrompt != "" {
 		// state.SystemPrompt already includes base instructions + optional agent-specific instructions.
 		systemPrompt := state.SystemPrompt
-		if len(state.LoadedSkills) > 0 && o.config.ContextBuilder != nil {
-			selectedSkills := o.config.ContextBuilder.buildSelectedSkills(state.LoadedSkills, o.config.Skills)
-			if strings.TrimSpace(selectedSkills) != "" {
-				systemPrompt = systemPrompt + "\n\n---\n\n" + selectedSkills
-			}
-		}
+		systemPrompt = joinNonEmpty([]string{
+			systemPrompt,
+			bootstrapModeNotice,
+			bootstrapContent,
+			skillsContent,
+		}, "\n\n---\n\n")
 		fullMessages = append(fullMessages, providers.Message{
 			Role:    "system",
 			Content: systemPrompt,
@@ -503,15 +546,11 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 			zap.Int("loaded_skills", len(state.LoadedSkills)))
 	} else if o.config.ContextBuilder != nil {
 		// Fallback: build from context builder when state prompt is empty.
-		skillsContent := ""
-		if len(state.LoadedSkills) > 0 {
-			// Second phase: inject full content of loaded skills
-			skillsContent = o.config.ContextBuilder.buildSelectedSkills(state.LoadedSkills, o.config.Skills)
-		} else if len(o.config.Skills) > 0 {
-			// First phase: inject skill summary (available skills list)
-			skillsContent = o.config.ContextBuilder.buildSkillsPrompt(o.config.Skills, PromptModeFull)
-		}
-		systemPrompt := o.config.ContextBuilder.buildSystemPromptWithSkills(skillsContent, PromptModeFull)
+		systemPrompt := joinNonEmpty([]string{
+			o.config.ContextBuilder.buildSystemPromptWithSkills(skillsContent, PromptModeFull),
+			bootstrapModeNotice,
+			bootstrapContent,
+		}, "\n\n---\n\n")
 		fullMessages = append(fullMessages, providers.Message{
 			Role:    "system",
 			Content: systemPrompt,
@@ -728,8 +767,10 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 			// Create context with session key and agent_id for tools to access
 			toolCtx := context.WithValue(ctx, SessionKeyContextKey, state.SessionKey)
 			toolCtx = context.WithValue(toolCtx, AgentIDContextKey, state.AgentID)
+			toolCtx = context.WithValue(toolCtx, BootstrapOwnerContextKey, state.BootstrapOwnerID)
 			toolCtx = context.WithValue(toolCtx, "session_key", state.SessionKey)
 			toolCtx = context.WithValue(toolCtx, "agent_id", state.AgentID)
+			toolCtx = context.WithValue(toolCtx, "bootstrap_owner_id", state.BootstrapOwnerID)
 
 			// Add timeout for tool execution (safety net in case tool doesn't handle its own timeout)
 			toolTimeout := o.config.ToolTimeout
@@ -758,11 +799,19 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 				}
 				err = pair.err
 			case <-execCtx.Done():
-				err = fmt.Errorf("tool execution timed out after %v", toolTimeout)
-				logger.Error("Tool execution timeout",
-					zap.String("tool_id", tc.ID),
-					zap.String("tool_name", tc.Name),
-					zap.Duration("timeout", toolTimeout))
+				if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+					err = fmt.Errorf("tool execution timed out after %v", toolTimeout)
+					logger.Error("Tool execution timeout",
+						zap.String("tool_id", tc.ID),
+						zap.String("tool_name", tc.Name),
+						zap.Duration("timeout", toolTimeout))
+				} else {
+					err = execCtx.Err()
+					logger.Warn("Tool execution canceled",
+						zap.String("tool_id", tc.ID),
+						zap.String("tool_name", tc.Name),
+						zap.String("reason", err.Error()))
+				}
 			}
 
 			// Cancel context immediately after use to avoid resource leak in loop

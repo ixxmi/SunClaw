@@ -224,6 +224,13 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// 创建上下文构建器
 	contextBuilder := agent.NewContextBuilder(memoryStore, workspaceDir)
+	resolveBootstrapDir := func(ownerID string) string {
+		if ownerID == "" {
+			return workspaceDir
+		}
+		return workspace.AgentBootstrapDir(workspaceDir, ownerID)
+	}
+	contextBuilder.SetBootstrapDirResolver(resolveBootstrapDir)
 
 	// 创建工具注册表
 	toolRegistry := agent.NewToolRegistry()
@@ -241,6 +248,7 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// 注册文件系统工具
 	fsTool := tools.NewFileSystemTool(cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths, workspaceDir)
+	fsTool.SetConfigDirResolver(resolveBootstrapDir)
 	for _, tool := range fsTool.GetTools() {
 		if err := toolRegistry.RegisterExisting(tool); err != nil {
 			logger.Warn("Failed to register tool", zap.String("tool", tool.Name()))

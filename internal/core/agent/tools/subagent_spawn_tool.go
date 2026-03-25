@@ -166,6 +166,7 @@ type SubagentSpawnResult struct {
 	Warning           string `json:"warning,omitempty"`
 	ChildSystemPrompt string `json:"child_system_prompt,omitempty"` // 子 Agent 专属 System Prompt
 	Task              string `json:"task,omitempty"`                // 子 Agent 要执行的任务描述
+	BootstrapOwnerID  string `json:"bootstrap_owner_id,omitempty"`  // 子 Agent 继承的主 agent 认知 owner
 }
 
 // SubagentRegistryInterface 分身注册表接口
@@ -306,9 +307,16 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	if requesterAgentID == "" {
 		requesterAgentID = "default"
 	}
+	bootstrapOwnerID := requesterAgentID
+	if bid := ctx.Value("bootstrap_owner_id"); bid != nil {
+		if id, ok := bid.(string); ok && strings.TrimSpace(id) != "" {
+			bootstrapOwnerID = id
+		}
+	}
 
 	logger.Info("sessions_spawn called",
 		zap.String("requester_agent_id", requesterAgentID),
+		zap.String("bootstrap_owner_id", bootstrapOwnerID),
 		zap.String("requester_session_key", requesterSessionKey),
 		zap.String("target_agent_id_param", spawnParams.AgentID),
 		zap.String("task_preview", normalizeText(spawnParams.Task)))
@@ -401,6 +409,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 			RunTimeoutSeconds: spawnParams.RunTimeoutSeconds,
 			ChildSystemPrompt: childSystemPrompt,
 			Task:              spawnParams.Task,
+			BootstrapOwnerID:  bootstrapOwnerID,
 		}
 		if err := t.onSpawn(spawnResult); err != nil {
 			logger.Error("Failed to handle subagent spawn",
@@ -417,6 +426,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		RunID:             runID,
 		RunTimeoutSeconds: spawnParams.RunTimeoutSeconds,
 		ChildSystemPrompt: childSystemPrompt,
+		BootstrapOwnerID:  bootstrapOwnerID,
 	}
 
 	logger.Debug("Subagent spawned",

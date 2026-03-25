@@ -10,9 +10,10 @@ import (
 
 // FileSystemTool 文件系统工具
 type FileSystemTool struct {
-	allowedPaths []string
-	deniedPaths  []string
-	workspace    string // 工作区路径，用于配置文件更新
+	allowedPaths        []string
+	deniedPaths         []string
+	workspace           string // 默认工作区路径
+	configDirResolverFn func(agentID string) string
 }
 
 // NewFileSystemTool 创建文件系统工具
@@ -22,6 +23,12 @@ func NewFileSystemTool(allowedPaths, deniedPaths []string, workspace string) *Fi
 		deniedPaths:  deniedPaths,
 		workspace:    workspace,
 	}
+}
+
+// SetConfigDirResolver 设置认知配置目录解析器。
+// 参数是 bootstrap owner，即主 agent 的 ID。
+func (t *FileSystemTool) SetConfigDirResolver(resolver func(ownerID string) string) {
+	t.configDirResolverFn = resolver
 }
 
 // ReadFile 读取文件
@@ -209,14 +216,14 @@ func (t *FileSystemTool) UpdateConfig(ctx context.Context, params map[string]int
 		return "", fmt.Errorf("invalid file type: %s (must be one of: identity, agents, soul, user)", fileType)
 	}
 
-	// 构建完整路径
-	if t.workspace == "" {
+	configDir := t.resolveConfigDir(ctx)
+	if configDir == "" {
 		return "", fmt.Errorf("workspace path is not configured")
 	}
-	path := filepath.Join(t.workspace, filename)
+	path := filepath.Join(configDir, filename)
 
 	// 确保目录存在
-	if err := os.MkdirAll(t.workspace, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
@@ -248,11 +255,11 @@ func (t *FileSystemTool) ReadConfig(ctx context.Context, params map[string]inter
 		return "", fmt.Errorf("invalid file type: %s (must be one of: identity, agents, soul, user)", fileType)
 	}
 
-	// 构建完整路径
-	if t.workspace == "" {
+	configDir := t.resolveConfigDir(ctx)
+	if configDir == "" {
 		return "", fmt.Errorf("workspace path is not configured")
 	}
-	path := filepath.Join(t.workspace, filename)
+	path := filepath.Join(configDir, filename)
 
 	// 读取文件
 	content, err := os.ReadFile(path)
@@ -264,6 +271,22 @@ func (t *FileSystemTool) ReadConfig(ctx context.Context, params map[string]inter
 	}
 
 	return string(content), nil
+}
+
+func (t *FileSystemTool) resolveConfigDir(ctx context.Context) string {
+	if t.configDirResolverFn != nil && ctx != nil {
+		if ownerID, ok := ctx.Value("bootstrap_owner_id").(string); ok && strings.TrimSpace(ownerID) != "" {
+			if resolved := strings.TrimSpace(t.configDirResolverFn(ownerID)); resolved != "" {
+				return resolved
+			}
+		}
+		if agentID, ok := ctx.Value("agent_id").(string); ok && strings.TrimSpace(agentID) != "" {
+			if resolved := strings.TrimSpace(t.configDirResolverFn(agentID)); resolved != "" {
+				return resolved
+			}
+		}
+	}
+	return t.workspace
 }
 
 // GetTools 获取所有文件系统工具
@@ -348,7 +371,7 @@ func (t *FileSystemTool) GetTools() []Tool {
 		tools = append(tools,
 			NewBaseTool(
 				"update_config",
-				"Update a configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md). Changes take effect in the next conversation.",
+				"Update the current agent's configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md). Changes take effect in the next conversation.",
 				map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -368,7 +391,7 @@ func (t *FileSystemTool) GetTools() []Tool {
 			),
 			NewBaseTool(
 				"read_config",
-				"Read a configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md)",
+				"Read the current agent's configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md)",
 				map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
