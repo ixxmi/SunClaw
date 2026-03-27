@@ -233,76 +233,11 @@ func (m *AgentManager) SetupFromConfig(cfg *config.Config, contextBuilder *Conte
 	}
 	logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// 4. 为配置了 allow_agents 的 Agent 动态注入可派生 Agent 目录
-	m.injectSpawnableAgentDescriptions(cfg)
-
-	// 5. 设置分身支持
+	// 4. 设置分身支持
 	m.setupSubagentSupport(cfg, contextBuilder)
 
-	// 更新所有已创建 Agent 的工具列表。
-	// - 配置了 allow_tools → 只保留白名单内的工具（子 agent 专属能力）
-	// - 未配置 allow_tools → 全部工具，LLM 自行按需选择
-	allTools := m.tools.ListExisting()
-	agentCfgMap := make(map[string]config.AgentConfig, len(cfg.Agents.List))
-	for _, agentCfg := range cfg.Agents.List {
-		agentCfgMap[agentCfg.ID] = agentCfg
-	}
-	for agentID, agent := range m.agents {
-		agentCfg := agentCfgMap[agentID]
-		var filtered []Tool
-		if agentCfg.Subagents != nil && len(agentCfg.Subagents.AllowTools) > 0 {
-			// 有 allow_tools：严格白名单，只保留列出的工具
-			policy := ResolveToolPolicy(agentCfg.Subagents.DenyTools, agentCfg.Subagents.AllowTools)
-			for _, t := range ToAgentTools(allTools) {
-				if policy.IsToolAllowed(t.Name()) {
-					filtered = append(filtered, t)
-				}
-			}
-			logger.Info("Agent tools filtered by allow_tools",
-				zap.String("agent_id", agentID),
-				zap.Int("allow_tools", len(agentCfg.Subagents.AllowTools)),
-				zap.Int("filtered_tools", len(filtered)))
-		} else if agentCfg.Subagents != nil && len(agentCfg.Subagents.DenyTools) > 0 {
-			// 只有 deny_tools：排除黑名单
-			policy := ResolveToolPolicy(agentCfg.Subagents.DenyTools, nil)
-			for _, t := range ToAgentTools(allTools) {
-				if policy.IsToolAllowed(t.Name()) {
-					filtered = append(filtered, t)
-				}
-			}
-			logger.Info("Agent tools filtered by deny_tools",
-				zap.String("agent_id", agentID),
-				zap.Int("deny_tools", len(agentCfg.Subagents.DenyTools)),
-				zap.Int("filtered_tools", len(filtered)))
-		} else {
-			// 未配置限制：全部工具
-			filtered = ToAgentTools(allTools)
-		}
-		agent.SetTools(filtered)
-	}
-
-	// 对配置了自定义 system_prompt 的 agent，将其实际可用工具列表追加到提示词末尾。
-	// 此时工具已按 allow_tools 过滤完毕，追加的是真实可用集合。
-	if contextBuilder != nil {
-		for _, agentCfg := range cfg.Agents.List {
-			if agentCfg.SystemPrompt == "" {
-				continue // 未配置自定义 prompt 的 agent 使用内置提示词，工具列表已内置
-			}
-			a, ok := m.agents[agentCfg.ID]
-			if !ok {
-				continue
-			}
-			agentTools := a.GetTools()
-			toolsSummary := contextBuilder.BuildToolsSummary(agentTools)
-			if toolsSummary != "" {
-				current := a.GetSystemPrompt()
-				a.SetSystemPrompt(current + "\n\n---\n\n" + toolsSummary)
-				logger.Info("Appended tools summary to custom system_prompt",
-					zap.String("agent_id", agentCfg.ID),
-					zap.Int("tools_count", len(agentTools)))
-			}
-		}
-	}
+	// 5. 按配置应用 Agent 运行时策略（system_prompt、allow_tools/deny_tools、动态目录）。
+	m.applyAgentRuntimeConfig(cfg)
 
 	logger.Info("Agent manager setup complete",
 		zap.Int("agents", len(m.agents)),
@@ -484,18 +419,16 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	subagentState.SessionKey = result.ChildSessionKey
 	subagentState.Tools = subagentTools
 
-	// 使用目标 Agent 完整的 system_prompt（已含工具列表摘要、可派生 Agent 目录等），
-	// 再追加本次具体任务上下文，降级时才用 spawn 工具生成的通用模板
-	childSystemPrompt := targetAgent.GetSystemPrompt()
-	if childSystemPrompt == "" {
-		childSystemPrompt = result.ChildSystemPrompt
-	} else {
-		childSystemPrompt = childSystemPrompt + "\n\n---\n\n## Current Task\n" + result.Task
-		logger.Info("Subagent using agent system_prompt with task context",
-			zap.String("agent_id", agentID),
-			zap.Int("prompt_len", len(childSystemPrompt)))
-	}
-	subagentState.SystemPrompt = childSystemPrompt
+	// 子 agent 继承目标 Agent 的第 4 层 core prompt，
+	// 本次运行的分身职责和任务约束放入单独的 SubagentDescriptor，
+	// 最终完整 system prompt 由 orchestrator 在运行时统一装配。
+	subagentState.SystemPrompt = targetAgent.GetSystemPrompt()
+	subagentState.SubagentDescriptor = result.ChildSystemPrompt
+	subagentState.IsSubagent = true
+	logger.Info("Subagent using layered prompt assembly",
+		zap.String("agent_id", agentID),
+		zap.Int("core_prompt_len", len(subagentState.SystemPrompt)),
+		zap.Int("descriptor_len", len(subagentState.SubagentDescriptor)))
 
 	// 构建子 Agent 独立 LoopConfig（使用目标 Agent 的专属 provider 和 model）
 	subagentLoopConfig := &LoopConfig{
@@ -777,16 +710,16 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 		return fmt.Errorf("failed to create agent %s: %w", cfg.ID, err)
 	}
 
-	// 设置 system prompt 优先级：
-	// 1. 配置文件中配置了 system_prompt → 直接使用，完全替换内置提示词
-	// 2. 未配置 → 保留 NewAgent 已构建的内置提示词（含工具列表、工作区文件等）
+	// 设置第 4 层 agent core 优先级：
+	// 1. 配置文件中配置了 system_prompt → 直接使用
+	// 2. 未配置 → 保留 NewAgent 已构建的系统通用认知
 	if cfg.SystemPrompt != "" {
 		agent.SetSystemPrompt(cfg.SystemPrompt)
-		logger.Info("Agent using config system_prompt (overrides built-in)",
+		logger.Info("Agent using config system_prompt as agent core",
 			zap.String("agent_id", cfg.ID),
 			zap.Int("prompt_len", len(cfg.SystemPrompt)))
 	} else {
-		logger.Info("Agent using built-in system_prompt",
+		logger.Info("Agent using built-in generic core as agent core",
 			zap.String("agent_id", cfg.ID),
 			zap.Int("prompt_len", len(agent.GetSystemPrompt())))
 	}
@@ -911,7 +844,7 @@ func (m *AgentManager) RouteInbound(ctx context.Context, msg *bus.InboundMessage
 
 // handleAgentSwitchCommand 处理 /agent 切换指令，返回结果给用户
 func (m *AgentManager) handleAgentSwitchCommand(ctx context.Context, cmd *agentSwitchResult, msg *bus.InboundMessage) error {
-	sessionKey := m.buildSessionKey(msg)
+	baseSessionKey := m.buildBaseSessionKey(msg)
 	sessionKeyCandidates := m.buildSessionKeyCandidates(msg)
 	currentDecision := m.resolveInboundRoute(msg)
 	allAgentIDs := m.ListAgents()
@@ -923,7 +856,8 @@ func (m *AgentManager) handleAgentSwitchCommand(ctx context.Context, cmd *agentS
 	m.mu.RUnlock()
 
 	logger.Info("[AgentSwitch] switch command received",
-		zap.String("session_key", sessionKey),
+		zap.String("base_session_key", baseSessionKey),
+		zap.Strings("session_key_candidates", sessionKeyCandidates),
 		zap.String("cmd_agent_id", cmd.AgentID),
 		zap.Bool("is_query", cmd.IsQuery),
 		zap.Bool("is_clear", cmd.IsClear),
@@ -958,9 +892,9 @@ func (m *AgentManager) handleAgentSwitchCommand(ctx context.Context, cmd *agentS
 			)
 		} else {
 			m.clearSessionRoutes(sessionKeyCandidates)
-			m.sessionRouter.SetAgentID(sessionKey, targetID)
+			m.sessionRouter.SetAgentID(baseSessionKey, targetID)
 			logger.Info("[AgentSwitch] agent switched",
-				zap.String("session_key", sessionKey),
+				zap.String("base_session_key", baseSessionKey),
 				zap.String("target_agent_id", targetID),
 			)
 			replyText = buildAgentSwitchReply(cmd, targetID, "session", defaultAgentID, allAgentIDs)
@@ -1090,18 +1024,17 @@ func (m *AgentManager) buildSessionKeyCandidates(msg *bus.InboundMessage) []stri
 
 	canonical := m.buildSessionKey(msg)
 	baseKey := m.buildBaseSessionKey(msg)
-	keys := []string{canonical}
-	if baseKey != canonical {
-		keys = append(keys, baseKey)
+	keys := []string{baseKey}
+	if canonical != "" && canonical != baseKey {
+		keys = append(keys, canonical)
 	}
-	rawAccountID := strings.TrimSpace(msg.AccountID)
-	if rawAccountID == "" {
+	if rawAccountID := strings.TrimSpace(msg.AccountID); rawAccountID == "" {
 		legacyBase := strings.Replace(baseKey, ":default", ":", 1)
 		if legacyBase != baseKey {
 			keys = append(keys, legacyBase)
 		}
 		legacyCanonical := strings.Replace(canonical, ":default", ":", 1)
-		if legacyCanonical != canonical {
+		if legacyCanonical != "" && legacyCanonical != canonical && legacyCanonical != legacyBase {
 			keys = append(keys, legacyCanonical)
 		}
 	}
@@ -1287,10 +1220,10 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 	// 获取 Agent 的 orchestrator
 	orchestrator := agent.GetOrchestrator()
 
-	// 同步本次请求的 sessionKey 到 agent state，
-	// spawn tool 在工具 context 里读 SessionKeyContextKey 时能取到正确值，
-	// 避免 fallback 到初始化时的空值（""）或 "main"
-	orchestrator.state.SessionKey = sessionKey
+	// 为本次请求创建独立的 AgentState，避免并发请求共享状态导致竞争
+	// 使用 Clone() 深拷贝，确保每个请求有独立的 Messages、SteeringQueue、FollowUpQueue 等
+	runState := orchestrator.state.Clone()
+	runState.SessionKey = sessionKey // 设置本次请求的 sessionKey
 
 	// 为本次 Run 克隆一份独立的 LoopConfig，避免并发请求互相覆盖回调。
 	// 子 agent 完成后把结果 push 到 m.followUpQueues[sessionKey]，
@@ -1307,7 +1240,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 		}
 		return msgs, nil
 	}
-	runOrchestrator := NewOrchestrator(&runConfig, orchestrator.state)
+	runOrchestrator := NewOrchestrator(&runConfig, runState)
 
 	// 加载历史消息并添加当前消息
 	// 使用配置的最大历史消息数限制，避免 token 超限
@@ -1868,6 +1801,7 @@ func (m *AgentManager) ReloadBindings(cfg *config.Config) error {
 	defer m.mu.Unlock()
 
 	m.cfg = cfg
+	m.applyAgentRuntimeConfig(cfg)
 	m.bindings = make(map[string]*BindingEntry)
 
 	m.defaultAgent = nil
@@ -1895,6 +1829,70 @@ func (m *AgentManager) ReloadBindings(cfg *config.Config) error {
 	}
 
 	return nil
+}
+
+func (m *AgentManager) applyAgentRuntimeConfig(cfg *config.Config) {
+	allTools := m.tools.ListExisting()
+	agentCfgMap := make(map[string]config.AgentConfig, len(cfg.Agents.List))
+	for _, agentCfg := range cfg.Agents.List {
+		agentCfgMap[agentCfg.ID] = agentCfg
+	}
+
+	for agentID, agent := range m.agents {
+		agentCfg, ok := agentCfgMap[agentID]
+		if !ok {
+			continue
+		}
+
+		if strings.TrimSpace(agentCfg.SystemPrompt) != "" {
+			agent.SetSystemPrompt(agentCfg.SystemPrompt)
+		} else {
+			agent.SetSystemPrompt(agent.context.buildBuiltinGenericCore(PromptModeFull))
+		}
+
+		var filtered []Tool
+		if agentCfg.Subagents != nil && len(agentCfg.Subagents.AllowTools) > 0 {
+			policy := ResolveConfiguredToolPolicy(agentCfg.Subagents.DenyTools, agentCfg.Subagents.AllowTools)
+			for _, t := range ToAgentTools(allTools) {
+				if policy.IsToolAllowed(t.Name()) {
+					filtered = append(filtered, t)
+				}
+			}
+			missingConfigured := diffConfiguredTools(agentCfg.Subagents.AllowTools, filtered)
+			logger.Info("Agent tools filtered by allow_tools",
+				zap.String("agent_id", agentID),
+				zap.Int("allow_tools", len(agentCfg.Subagents.AllowTools)),
+				zap.Int("filtered_tools", len(filtered)),
+				zap.Strings("final_tools", toolNames(filtered)),
+				zap.Strings("missing_configured_tools", missingConfigured))
+			if len(missingConfigured) > 0 {
+				logger.Warn("Configured allow_tools are not registered in runtime",
+					zap.String("agent_id", agentID),
+					zap.Strings("missing_tools", missingConfigured))
+			}
+		} else if agentCfg.Subagents != nil && len(agentCfg.Subagents.DenyTools) > 0 {
+			policy := ResolveConfiguredToolPolicy(agentCfg.Subagents.DenyTools, nil)
+			for _, t := range ToAgentTools(allTools) {
+				if policy.IsToolAllowed(t.Name()) {
+					filtered = append(filtered, t)
+				}
+			}
+			logger.Info("Agent tools filtered by deny_tools",
+				zap.String("agent_id", agentID),
+				zap.Int("deny_tools", len(agentCfg.Subagents.DenyTools)),
+				zap.Int("filtered_tools", len(filtered)),
+				zap.Strings("final_tools", toolNames(filtered)))
+		} else {
+			filtered = ToAgentTools(allTools)
+			logger.Info("Agent tools using full registry",
+				zap.String("agent_id", agentID),
+				zap.Int("filtered_tools", len(filtered)),
+				zap.Strings("final_tools", toolNames(filtered)))
+		}
+		agent.SetTools(filtered)
+	}
+
+	m.injectSpawnableAgentDescriptions(cfg)
 }
 
 // processMessages 处理入站消息
@@ -1973,20 +1971,15 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 	}
 
 	for _, agentCfg := range cfg.Agents.List {
-		// 只有配置了 sessions_spawn（即能 spawn）的 agent 才需要注入目录
-		// 判断依据：Subagents 不为 nil，或者没有在 deny_tools 里禁掉 sessions_spawn
-		// 简单判断：只要不在自身的 deny_tools 里禁掉 sessions_spawn，就视为可 spawn
-		if agentCfg.Subagents != nil {
-			spawnDenied := false
-			for _, dt := range agentCfg.Subagents.DenyTools {
-				if strings.EqualFold(strings.TrimSpace(dt), "sessions_spawn") {
-					spawnDenied = true
-					break
-				}
-			}
-			if spawnDenied {
-				continue
-			}
+		agent, ok := m.agents[agentCfg.ID]
+		if !ok {
+			continue
+		}
+		if !hasToolNamed(agent.GetTools(), "sessions_spawn") {
+			agent.SetSpawnableAgentCatalog("")
+			logger.Info("Skipped spawnable agent descriptions because sessions_spawn is unavailable",
+				zap.String("agent_id", agentCfg.ID))
+			continue
 		}
 
 		var candidates []config.AgentConfig
@@ -2039,24 +2032,58 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 
 		// 拼接目录段落
 		var sb strings.Builder
-		sb.WriteString("\n\n## 可派生 Agent 目录\n")
+		sb.WriteString("## 可派生 Agent 目录\n")
 		sb.WriteString("调用 sessions_spawn 时**必须**设置 `agent_id` 字段，指定由哪个 Agent 执行任务：\n")
 		for _, e := range entries {
 			sb.WriteString(fmt.Sprintf("\n- **agent_id: \"%s\"** — %s — %s\n", e.id, e.name, e.description))
 		}
 		sb.WriteString("\n> ⚠️ 不传 agent_id 则子任务将由当前 Agent 自己执行，无法利用专属模型能力。\n")
 
-		// 追加到该 Agent 的 system_prompt
-		agent, ok := m.agents[agentCfg.ID]
-		if !ok {
-			continue
-		}
-		existing := agent.GetSystemPrompt()
-		agent.SetSystemPrompt(existing + sb.String())
+		// 保存到该 Agent 的独立动态层，由运行时统一装配。
+		agent.SetSpawnableAgentCatalog(strings.TrimSpace(sb.String()))
 
 		logger.Info("Injected spawnable agent descriptions",
 			zap.String("agent_id", agentCfg.ID),
 			zap.Int("spawnable_count", len(entries)),
 			zap.Bool("auto_discover", agentCfg.Subagents == nil || len(agentCfg.Subagents.AllowAgents) == 0))
 	}
+}
+
+func hasToolNamed(tools []Tool, name string) bool {
+	for _, tool := range tools {
+		if strings.EqualFold(strings.TrimSpace(tool.Name()), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(tools []Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+func diffConfiguredTools(configured []string, actual []Tool) []string {
+	actualSet := make(map[string]struct{}, len(actual))
+	for _, tool := range actual {
+		actualSet[strings.ToLower(strings.TrimSpace(tool.Name()))] = struct{}{}
+	}
+
+	var missing []string
+	for _, name := range configured {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := actualSet[normalized]; ok {
+			continue
+		}
+		missing = append(missing, strings.TrimSpace(name))
+	}
+	sort.Strings(missing)
+	return missing
 }

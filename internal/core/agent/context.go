@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -59,14 +58,13 @@ func (b *ContextBuilder) SetBootstrapDirResolver(resolver func(ownerID string) s
 }
 
 // BuildToolsSummary 构建工具列表摘要段落。
-// 供配置了自定义 system_prompt 的 agent 使用，将其追加到自定义提示词末尾，
-// 确保 LLM 知道有哪些工具可用。
+// 该段内容属于第 7 层工具层，由运行时统一装配进最终 system prompt。
 func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 	if len(tools) == 0 {
 		return ""
 	}
 
-	// 内置工具的详细描述（与 buildIdentityAndTools 保持一致）
+	// 内置工具的人类可读描述，用于运行时工具层摘要。
 	toolDescriptions := map[string]string{
 		"browser_navigate":       "导航到 URL 并等待页面加载",
 		"browser_screenshot":     "对页面截图进行视觉分析",
@@ -108,93 +106,40 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		strings.Join(lines, "\n"))
 }
 
-// BuildSystemPrompt 构建系统提示词
+// BuildSystemPrompt 构建完整 system prompt。
+// 该方法保留给兼容入口使用，内部统一走 AssemblePrompt。
 func (b *ContextBuilder) BuildSystemPrompt(skills []*Skill) string {
 	return b.BuildSystemPromptWithMode(skills, PromptModeFull)
 }
 
-// BuildSystemPromptWithMode 使用指定模式构建系统提示词
+// BuildSystemPromptWithMode 使用指定模式构建 system prompt。
+// 该方法保留给兼容入口使用，内部统一走 AssemblePrompt。
 func (b *ContextBuilder) BuildSystemPromptWithMode(skills []*Skill, mode PromptMode) string {
-	skillsContent := b.buildSkillsPrompt(skills, mode)
-	return b.buildSystemPromptWithSkills(skillsContent, mode)
+	assembled := b.AssemblePrompt(&PromptAssemblyParams{
+		Mode:        PromptAssemblyModeMain,
+		PromptMode:  mode,
+		Skills:      skills,
+		ToolSummary: b.buildLegacyBuiltinToolLayer(mode),
+	})
+	return assembled.SystemPrompt
 }
 
-// buildSystemPromptWithSkills 使用指定的技能内容和模式构建系统提示词
+// buildSystemPromptWithSkills 使用指定的技能内容和模式构建 system prompt。
+// 该方法保留给兼容入口使用，内部统一走 AssemblePrompt。
 func (b *ContextBuilder) buildSystemPromptWithSkills(skillsContent string, mode PromptMode) string {
-	isMinimal := mode == PromptModeMinimal || mode == PromptModeNone
-
-	// 对于 "none" 模式，只返回基本身份行
-	if mode == PromptModeNone {
-		return "You are a personal assistant running inside GoClaw."
-	}
-
-	var parts []string
-
-	// 1. 核心身份 + 工具列表
-	parts = append(parts, b.buildIdentityAndTools())
-
-	// 2. Tool Call Style
-	parts = append(parts, b.buildToolCallStyle())
-
-	// 3. 安全提示
-	parts = append(parts, b.buildSafety())
-
-	// 4. 沟通风格（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildCommunicationStyle())
-	}
-
-	// 5. 错误处理指导（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildErrorHandling())
-	}
-
-	// 6. 技能系统
-	if skillsContent != "" {
-		parts = append(parts, skillsContent)
-	}
-
-	// 7. GoClaw CLI 快速参考（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildCLIReference())
-	}
-
-	// 8. 文档路径（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildDocsSection())
-	}
-
-	// 9. 消息和回复指导（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildMessagingSection())
-	}
-
-	// 10. 静默回复规则（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildSilentReplies())
-	}
-
-	// 11. 心跳机制（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildHeartbeats())
-	}
-
-	// 12. 工作区信息
-	parts = append(parts, b.buildWorkspace())
-
-	// 13. 运行时信息（仅 full 模式）
-	if !isMinimal {
-		parts = append(parts, b.buildRuntime())
-	}
-
-	return fmt.Sprintf("%s\n\n", joinNonEmpty(parts, "\n\n---\n\n"))
+	return b.AssemblePrompt(&PromptAssemblyParams{
+		Mode:           PromptAssemblyModeMain,
+		PromptMode:     mode,
+		SkillsOverride: skillsContent,
+		ToolSummary:    b.buildLegacyBuiltinToolLayer(mode),
+	}).SystemPrompt
 }
 
-// buildIdentityAndTools 构建核心身份和工具列表
-func (b *ContextBuilder) buildIdentityAndTools() string {
-	now := time.Now()
+func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
+	if mode == PromptModeNone {
+		return ""
+	}
 
-	// 定义核心工具摘要 - 参考了 OpenClaw 的详细描述风格
 	coreToolSummaries := map[string]string{
 		"browser_navigate":       "Navigate to a URL and wait for page load",
 		"browser_screenshot":     "Take page screenshots for visual analysis",
@@ -213,86 +158,37 @@ func (b *ContextBuilder) buildIdentityAndTools() string {
 		"send_message":           "Send a proactive text message to the current or specified chat. Use this for acknowledgement, progress updates, or intentional multi-message delivery",
 		"send_file":              "Send one image or file to the current or specified chat",
 		"message":                "Send messages and channel actions (polls, reactions, buttons)",
-		"cron":                   "Manage goclaw's built-in cron/scheduler service. This is the ONLY WAY to manage scheduled tasks. DO NOT use system 'crontab' commands. Supports: add (create), list/ls (view all), rm/remove (delete), enable, disable, run (execute immediately), status, runs (history)",
-		"reminder":               "Schedule future proactive follow-ups back into the current chat, including delayed replies and timed reminders",
-		"session_status":         "Show session usage/time/model state (use for 'what model are we using?' questions)",
 		"sessions_spawn":         "Spawn a child agent to handle a longer or more specialized subtask; it will auto-announce when finished",
 		"memory_search":          "Search stored memories and prior notes",
 		"memory_add":             "Save useful information into memory",
+		"cron":                   "Manage goclaw's built-in cron/scheduler service",
+		"reminder":               "Schedule future proactive follow-ups back into the current chat",
+		"session_status":         "Show session usage/time/model state",
 	}
 
-	// 构建工具列表 - 按功能分组
 	toolOrder := []string{
-		// 文件操作
 		"read_file", "write_file", "list_files",
-		// Shell 命令
 		"run_shell", "process",
-		// 浏览器工具
 		"browser_navigate", "browser_screenshot", "browser_get_text",
 		"browser_click", "browser_fill_input", "browser_execute_script",
-		// 网络
 		"web_search", "web_fetch",
-		// 技能和消息
 		"use_skill", "send_message", "send_file", "message",
-		// 编排和记忆
 		"sessions_spawn", "memory_search", "memory_add",
-		// 系统能力
 		"cron", "reminder", "session_status",
 	}
 
-	var toolLines []string
+	lines := make([]string, 0, len(toolOrder))
 	for _, tool := range toolOrder {
 		if summary, ok := coreToolSummaries[tool]; ok {
-			toolLines = append(toolLines, fmt.Sprintf("- %s: %s", tool, summary))
-		} else {
-			toolLines = append(toolLines, fmt.Sprintf("- %s", tool))
+			lines = append(lines, fmt.Sprintf("- %s: %s", tool, summary))
 		}
 	}
 
-	return fmt.Sprintf(`# Identity
+	return fmt.Sprintf(`## Tooling
 
-You are **SunClaw**, a personal AI assistant running on the user's system.
-You are NOT a passive chat bot. You are a **DOER** that executes tasks directly.
-Your mission: complete user requests using all available means, minimizing human intervention.
-
-**Current Time**: %s
-**Workspace**: %s
-
-## Tooling
-
-Tool availability (filtered by policy):
+Tool availability (legacy summary):
 Tool names are case-sensitive. Call tools exactly as listed.
-%s
-TOOLS.md does not control tool availability; it is user guidance for how to use external tools.
-
-### Task Complexity Guidelines
-
-- **Simple tasks**: Use tools directly
-- **Moderate tasks**: Use tools, keep the user oriented with short, human updates
-- **Complex/Long tasks**: Consider spawning a sub-agent. Completion is push-based: it will auto-announce when done
-- **Before non-trivial work**: Briefly acknowledge the request and say what you will do next
-- **For long waits**: Avoid rapid poll loops. Use run_shell with background mode, or process(action=poll, timeout=<ms>)
-- **For noticeable waits**: Use send_message to avoid going silent; short progress updates are better than silence
-- **For final delivery**: Prefer one coherent answer by default; split into multiple user-visible messages only when it clearly helps
-
-### Skill-First Workflow (HIGHEST PRIORITY)
-
-1. **ALWAYS check the Skills section first** before using any other tools
-2. If a matching skill is found, use the use_skill tool with the skill name
-3. If no matching skill: use built-in tools
-4. Only after checking skills should you proceed with built-in tools
-
-### Core Rules
-
-- For ANY search request ("search for", "find", "google search", etc.): IMMEDIATELY call web_search tool. DO NOT provide manual instructions or advice.
-- When the user asks for information: USE YOUR TOOLS to get it. Do NOT explain how to get it.
-- DO NOT tell the user "I cannot" or "here's how to do it yourself". ACTUALLY DO IT with tools.
-- If you have tools available for a task, use them. No permission needed for safe operations.
-- **NEVER HALLUCINATE SEARCH RESULTS**: When presenting search results, ONLY use the exact data returned by the tool. If no results were found, clearly state that no results were found.
-- When a tool fails: analyze the error, try an alternative approach WITHOUT asking the user unless absolutely necessary.`,
-		now.Format("2006-01-02 15:04:05 MST"),
-		b.workspace,
-		strings.Join(toolLines, "\n"))
+%s`, strings.Join(lines, "\n"))
 }
 
 // buildToolCallStyle 构建详细的工具调用风格指导
@@ -711,18 +607,32 @@ func (b *ContextBuilder) buildSkillsContext(skills []*Skill, loadedSkills []stri
 
 // BuildMessages 构建消息列表
 func (b *ContextBuilder) BuildMessages(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string) []Message {
-	return b.BuildMessagesWithMode(history, currentMessage, skills, loadedSkills, PromptModeFull)
+	return b.BuildMessagesWithRuntime(history, currentMessage, skills, loadedSkills, nil, "", PromptModeFull)
 }
 
 // BuildMessagesWithMode 使用指定模式构建消息列表
 func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string, mode PromptMode) []Message {
+	return b.BuildMessagesWithRuntime(history, currentMessage, skills, loadedSkills, nil, "", mode)
+}
+
+// BuildMessagesWithRuntime 使用指定模式和运行时参数构建消息列表。
+func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string, tools []Tool, bootstrapOwnerID string, mode PromptMode) []Message {
 	// 首先验证历史消息，过滤掉孤立的 tool 消息
 	validHistory := b.validateHistoryMessages(history)
 
-	// 构建系统提示词：未选 skill 时注入摘要，已选 skill 时注入正文
-	skillsContent := b.buildSkillsContext(skills, loadedSkills, mode)
-
-	systemPrompt := b.buildSystemPromptWithSkills(skillsContent, mode)
+	toolSummary := ""
+	if len(tools) == 0 {
+		toolSummary = b.buildLegacyBuiltinToolLayer(mode)
+	}
+	systemPrompt := b.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		PromptMode:       mode,
+		BootstrapOwnerID: bootstrapOwnerID,
+		Skills:           skills,
+		LoadedSkills:     loadedSkills,
+		Tools:            tools,
+		ToolSummary:      toolSummary,
+	}).SystemPrompt
 
 	messages := []Message{
 		{
@@ -838,42 +748,19 @@ func (b *ContextBuilder) defaultBootstrapStore() *MemoryStore {
 	return b.memory
 }
 
-// loadBootstrapFilesForOwner 加载指定主 agent owner 的 bootstrap 文件。
-func (b *ContextBuilder) loadBootstrapFilesForOwner(ownerID string) string {
-	var parts []string
-
-	files := []string{"IDENTITY.md", "AGENTS.md", "SOUL.md", "USER.md"}
-	store := b.resolveBootstrapStore(ownerID)
-	for _, filename := range files {
-		if store == nil {
-			break
-		}
-		if content, err := store.ReadBootstrapFile(filename); err == nil && content != "" {
-			parts = append(parts, fmt.Sprintf("### %s\n\n%s", filename, content))
-		}
-	}
-
-	if len(parts) == 0 && store != nil {
-		if content, err := store.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
-			parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
-		}
-	}
-
-	// 主 agent 的专属目录还没有认知文件时，回退到根工作区的 BOOTSTRAP.md 引导。
-	if len(parts) == 0 && strings.TrimSpace(ownerID) != "" {
-		rootStore := b.defaultBootstrapStore()
-		if rootStore != nil && (store == nil || rootStore.workspace != store.workspace) {
-			if content, err := rootStore.ReadBootstrapFile("BOOTSTRAP.md"); err == nil && content != "" {
-				parts = append(parts, fmt.Sprintf("### %s\n\n%s", "BOOTSTRAP.md", content))
-			}
-		}
-	}
-
-	return joinNonEmpty(parts, "\n\n")
-}
-
 func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
-	if bootstrap := b.loadBootstrapFilesForOwner(ownerID); bootstrap != "" {
+	bundle := b.loadBootstrapBundleForOwner(ownerID)
+	parts := []string{
+		wrapPromptFileLayer("", "IDENTITY.md", bundle.Identity),
+		wrapPromptFileLayer("", "AGENTS.md", bundle.Agents),
+		wrapPromptFileLayer("", "SOUL.md", bundle.Soul),
+		wrapPromptFileLayer("", "USER.md", bundle.User),
+	}
+	if !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+		parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
+	}
+	bootstrap := joinNonEmpty(parts, "\n\n")
+	if bootstrap != "" {
 		return "## Workspace Files (injected)\n\n" + bootstrap
 	}
 	return ""

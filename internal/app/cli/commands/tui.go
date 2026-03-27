@@ -571,7 +571,11 @@ func runAgentIteration(
 			}
 		}
 
-		messages := contextBuilder.BuildMessages(history, "", skills, loadedSkills)
+		var promptTools []agent.Tool
+		if toolRegistry != nil {
+			promptTools = agent.ToAgentTools(toolRegistry.List())
+		}
+		messages := contextBuilder.BuildMessagesWithRuntime(history, "", skills, loadedSkills, promptTools, "", agent.PromptModeFull)
 		providerMessages := make([]providers.Message, len(messages))
 		for i, msg := range messages {
 			var tcs []providers.ToolCall

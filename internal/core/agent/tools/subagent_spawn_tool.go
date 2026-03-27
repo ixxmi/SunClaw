@@ -72,11 +72,13 @@ func BuildSubagentSystemPrompt(params *SubagentSystemPromptParams) string {
 		"2. **Complete the task** - Your final message will be automatically reported to the main agent",
 		"3. **Don't initiate** - No heartbeats, no proactive actions, no side quests",
 		"4. **Be ephemeral** - You may be terminated after task completion. That's fine.",
+		"5. **Keep scope minimal** - If the task bundles multiple phases, modules, or goals, complete only the smallest clear slice you can finish well and report the remainder as follow-up work",
 		"",
 		"## Output Format",
 		"When complete, your final response should include:",
 		"- What you accomplished or found",
 		"- Any relevant details the main agent should know",
+		"- If the requested scope was still too broad, state which smallest slice you completed and what should be split into next steps",
 		"- Keep it concise but informative",
 		"",
 		"## What You DON'T Do",
@@ -323,8 +325,17 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 
 	// 确定目标 Agent ID
 	targetAgentID := requesterAgentID
+	if strings.TrimSpace(spawnParams.AgentID) == "" && t.requiresExplicitAgentID(requesterAgentID) {
+		result := &SubagentSpawnResult{
+			Status: "forbidden",
+			Error:  "sessions_spawn requires explicit agent_id for this agent; choose one from the allowed agent catalog",
+		}
+		return t.marshalResult(result), nil
+	}
 	if spawnParams.AgentID != "" {
 		targetAgentID = spawnParams.AgentID
+		// 跨 Agent 派发时，子 agent 的认知文件应来自目标 Agent 本身。
+		bootstrapOwnerID = targetAgentID
 	}
 
 	// 验证跨 Agent 创建权限
@@ -546,4 +557,17 @@ func (t *SubagentSpawnTool) checkCrossAgentPermission(requesterID, targetID stri
 	}
 
 	return false
+}
+
+func (t *SubagentSpawnTool) requiresExplicitAgentID(requesterID string) bool {
+	if t.getAgentConfig == nil {
+		return false
+	}
+
+	agentCfg := t.getAgentConfig(requesterID)
+	if agentCfg == nil || agentCfg.Subagents == nil {
+		return false
+	}
+
+	return len(agentCfg.Subagents.AllowAgents) > 0
 }

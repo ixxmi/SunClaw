@@ -107,20 +107,30 @@ const (
 
 // AgentState represents the current state of the agent
 type AgentState struct {
+	// SystemPrompt 存放第 4 层的 agent core：
+	// - 主 agent：自定义 prompt，或回退到系统通用认知
+	// - 子 agent：目标 agent 的 core prompt
+	// 最终完整 system prompt 由运行时统一装配。
 	SystemPrompt string
 	Model        string
 	Provider     string
 	AgentID      string // 当前 Agent ID，用于工具上下文传递
 	// BootstrapOwnerID 标识当前运行应使用哪一个主 agent 的认知文件。
-	// 主 agent 运行时通常等于 AgentID；子 agent 运行时继承请求它的主 agent。
+	// 主 agent 运行时通常等于 AgentID；子 agent 运行时通常等于目标 agent。
 	BootstrapOwnerID string
 	ThinkingLevel    string // off, minimal, low, medium, high, xhigh
 	Tools            []Tool
-	Messages         []AgentMessage
-	IsStreaming      bool
-	StreamMessage    *AgentMessage // Current streaming message
-	PendingTools     map[string]bool
-	Error            error
+	// SpawnableAgentCatalog 仅用于主 agent，表示可派生 agent 的动态目录。
+	SpawnableAgentCatalog string
+	// SubagentDescriptor 仅用于子 agent，表示这次运行时的分身职责和任务约束。
+	SubagentDescriptor string
+	// IsSubagent 标记当前 state 是否用于子 agent。
+	IsSubagent    bool
+	Messages      []AgentMessage
+	IsStreaming   bool
+	StreamMessage *AgentMessage // Current streaming message
+	PendingTools  map[string]bool
+	Error         error
 
 	// 循环控制计数器（参考 picoclaw agent-loop 设计）
 	LLMCallCount      int // LLM 实际调用次数（不含注入轮）
@@ -373,24 +383,27 @@ func (s *AgentState) Clone() *AgentState {
 	}
 
 	return &AgentState{
-		SystemPrompt:     s.SystemPrompt,
-		Model:            s.Model,
-		Provider:         s.Provider,
-		AgentID:          s.AgentID,
-		BootstrapOwnerID: s.BootstrapOwnerID,
-		ThinkingLevel:    s.ThinkingLevel,
-		Tools:            append([]Tool{}, s.Tools...),
-		Messages:         messages,
-		IsStreaming:      s.IsStreaming,
-		StreamMessage:    streamMsg,
-		PendingTools:     pendingTools,
-		Error:            s.Error,
-		SteeringQueue:    steering,
-		SteeringMode:     s.SteeringMode,
-		FollowUpQueue:    followUp,
-		FollowUpMode:     s.FollowUpMode,
-		SessionKey:       s.SessionKey,
-		LoadedSkills:     loadedSkills,
+		SystemPrompt:          s.SystemPrompt,
+		Model:                 s.Model,
+		Provider:              s.Provider,
+		AgentID:               s.AgentID,
+		BootstrapOwnerID:      s.BootstrapOwnerID,
+		ThinkingLevel:         s.ThinkingLevel,
+		Tools:                 append([]Tool{}, s.Tools...),
+		SpawnableAgentCatalog: s.SpawnableAgentCatalog,
+		SubagentDescriptor:    s.SubagentDescriptor,
+		IsSubagent:            s.IsSubagent,
+		Messages:              messages,
+		IsStreaming:           s.IsStreaming,
+		StreamMessage:         streamMsg,
+		PendingTools:          pendingTools,
+		Error:                 s.Error,
+		SteeringQueue:         steering,
+		SteeringMode:          s.SteeringMode,
+		FollowUpQueue:         followUp,
+		FollowUpMode:          s.FollowUpMode,
+		SessionKey:            s.SessionKey,
+		LoadedSkills:          loadedSkills,
 	}
 }
 

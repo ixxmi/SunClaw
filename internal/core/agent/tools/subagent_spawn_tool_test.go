@@ -82,3 +82,80 @@ func TestSubagentSpawnTool_OnSpawnFailureReturnsError(t *testing.T) {
 		t.Fatalf("unexpected output: %s", out)
 	}
 }
+
+func TestSubagentSpawnTool_CrossAgentUsesTargetBootstrapOwner(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
+		if agentID == "vibecoding" {
+			return &config.AgentConfig{
+				ID: "vibecoding",
+				Subagents: &config.AgentSubagentConfig{
+					AllowAgents: []string{"coder"},
+				},
+			}
+		}
+		return &config.AgentConfig{ID: agentID}
+	})
+
+	var spawned *SubagentSpawnResult
+	tool.SetOnSpawn(func(spawnParams *SubagentSpawnResult) error {
+		spawned = spawnParams
+		return nil
+	})
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
+	ctx = context.WithValue(ctx, "bootstrap_owner_id", "vibecoding")
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"task":     "implement current step",
+		"agent_id": "coder",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Subagent spawned successfully") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	if spawned == nil {
+		t.Fatalf("expected onSpawn callback to be called")
+	}
+	if spawned.BootstrapOwnerID != "coder" {
+		t.Fatalf("expected bootstrap owner to switch to target agent, got %q", spawned.BootstrapOwnerID)
+	}
+}
+
+func TestSubagentSpawnTool_RequiresExplicitAgentIDWhenAllowAgentsConfigured(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
+		if agentID == "vibecoding" {
+			return &config.AgentConfig{
+				ID: "vibecoding",
+				Subagents: &config.AgentSubagentConfig{
+					AllowAgents: []string{"coder", "frontend"},
+				},
+			}
+		}
+		return &config.AgentConfig{ID: agentID}
+	})
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"task": "implement current step",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Forbidden:") {
+		t.Fatalf("expected forbidden output, got %s", out)
+	}
+	if !strings.Contains(out, "requires explicit agent_id") {
+		t.Fatalf("expected explicit agent_id error, got %s", out)
+	}
+}

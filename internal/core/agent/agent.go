@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,7 +65,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 	}
 
 	state := NewAgentState()
-	state.SystemPrompt = cfg.Context.BuildSystemPrompt(nil)
+	state.SystemPrompt = cfg.Context.buildBuiltinGenericCore(PromptModeFull)
 	state.Model = getModelName(cfg.Provider)
 	state.Provider = "provider"
 	state.AgentID = cfg.AgentID
@@ -548,17 +549,44 @@ func (a *Agent) Reset() {
 
 	agentID := a.state.AgentID
 	bootstrapOwnerID := a.state.BootstrapOwnerID
+	agentCorePrompt := a.state.SystemPrompt
+	spawnableAgentCatalog := a.state.SpawnableAgentCatalog
+	subagentDescriptor := a.state.SubagentDescriptor
+	isSubagent := a.state.IsSubagent
+	currentTools := append([]Tool{}, a.state.Tools...)
 	if bootstrapOwnerID == "" {
 		bootstrapOwnerID = agentID
 	}
 	a.state = NewAgentState()
-	a.state.SystemPrompt = a.context.BuildSystemPrompt(nil)
+	a.state.SystemPrompt = agentCorePrompt
+	if strings.TrimSpace(a.state.SystemPrompt) == "" {
+		a.state.SystemPrompt = a.context.buildBuiltinGenericCore(PromptModeFull)
+	}
 	a.state.Model = getModelName(a.provider)
 	a.state.Provider = "provider"
 	a.state.AgentID = agentID
 	a.state.BootstrapOwnerID = bootstrapOwnerID
+	a.state.SpawnableAgentCatalog = spawnableAgentCatalog
+	a.state.SubagentDescriptor = subagentDescriptor
+	a.state.IsSubagent = isSubagent
 	a.state.SessionKey = "main"
-	a.state.Tools = ToAgentTools(a.tools.ListExisting())
+	a.state.Tools = currentTools
+}
+
+// SetSpawnableAgentCatalog updates the dynamic spawnable agent catalog for the main agent.
+func (a *Agent) SetSpawnableAgentCatalog(catalog string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.state.SpawnableAgentCatalog = catalog
+}
+
+// GetSpawnableAgentCatalog returns the dynamic spawnable agent catalog.
+func (a *Agent) GetSpawnableAgentCatalog() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	return a.state.SpawnableAgentCatalog
 }
 
 // SetSteeringMode sets how steering messages are delivered
