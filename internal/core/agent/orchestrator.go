@@ -504,60 +504,42 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	// Emit message start
 	o.emit(NewEvent(EventMessageStart))
 
-	// Build system prompt with skills.
-	// IMPORTANT: keep agent-specific system prompt (state.SystemPrompt) effective,
-	// but inject skill summary/full content dynamically at request time so custom
-	// prompts can still participate in the two-phase skill workflow.
 	fullMessages := []providers.Message{}
-	skillsContent := ""
-	bootstrapContent := ""
+	systemPrompt := ""
 	if o.config.ContextBuilder != nil {
-		skillsContent = o.config.ContextBuilder.buildSkillsContext(o.config.Skills, state.LoadedSkills, PromptModeFull)
-		bootstrapContent = o.config.ContextBuilder.buildBootstrapSectionForOwner(state.BootstrapOwnerID)
-	}
-	bootstrapModeNotice := ""
-	if isBootstrapGuideModeContent(bootstrapContent) {
-		bootstrapModeNotice = `## Bootstrap Mode
-
-This main agent does not have agent-specific cognitive files yet (` + "`IDENTITY.md`" + `, ` + "`AGENTS.md`" + `, ` + "`SOUL.md`" + `, ` + "`USER.md`" + `).
-
-Treat ` + "`BOOTSTRAP.md`" + ` below as authoritative for identity bootstrapping.
-Any fixed identity or role wording elsewhere in this system prompt defines only temporary operational behavior, not the final self-identity.
-
-If the user asks who you are, do not answer with a fixed identity such as "I am SunClaw" unless that identity has already been explicitly written into ` + "`IDENTITY.md`" + `.
-Instead, explain that this agent is not fully defined yet, use the bootstrap guide to establish identity with the user, and then write the resulting cognitive files.`
-	}
-	if state.SystemPrompt != "" {
-		// state.SystemPrompt already includes base instructions + optional agent-specific instructions.
-		systemPrompt := state.SystemPrompt
-		systemPrompt = joinNonEmpty([]string{
-			systemPrompt,
-			bootstrapModeNotice,
-			bootstrapContent,
-			skillsContent,
-		}, "\n\n---\n\n")
-		fullMessages = append(fullMessages, providers.Message{
-			Role:    "system",
-			Content: systemPrompt,
+		assemblyMode := PromptAssemblyModeMain
+		if state.IsSubagent {
+			assemblyMode = PromptAssemblyModeSubagent
+		}
+		assembled := o.config.ContextBuilder.AssemblePrompt(&PromptAssemblyParams{
+			Mode:                  assemblyMode,
+			PromptMode:            PromptModeFull,
+			AgentCorePrompt:       state.SystemPrompt,
+			BootstrapOwnerID:      state.BootstrapOwnerID,
+			SpawnableAgentCatalog: state.SpawnableAgentCatalog,
+			SubagentDescriptor:    state.SubagentDescriptor,
+			Skills:                o.config.Skills,
+			LoadedSkills:          state.LoadedSkills,
+			Tools:                 state.Tools,
 		})
+		systemPrompt = assembled.SystemPrompt
+		logger.Info("System prompt assembled",
+			zap.Int("prompt_length", len(systemPrompt)),
+			zap.Int("layer_count", len(assembled.Layers)),
+			zap.Bool("is_subagent", state.IsSubagent),
+			zap.Int("loaded_skills", len(state.LoadedSkills)))
+	} else if state.SystemPrompt != "" {
+		systemPrompt = state.SystemPrompt
 		logger.Info("System prompt source: state.SystemPrompt",
 			zap.Int("prompt_length", len(systemPrompt)),
-			zap.Bool("has_config_prompt", !strings.Contains(systemPrompt, "# Identity\n\nYou are **GoClaw**")),
+			zap.Bool("is_subagent", state.IsSubagent),
 			zap.Int("loaded_skills", len(state.LoadedSkills)))
-	} else if o.config.ContextBuilder != nil {
-		// Fallback: build from context builder when state prompt is empty.
-		systemPrompt := joinNonEmpty([]string{
-			o.config.ContextBuilder.buildSystemPromptWithSkills(skillsContent, PromptModeFull),
-			bootstrapModeNotice,
-			bootstrapContent,
-		}, "\n\n---\n\n")
+	}
+	if systemPrompt != "" {
 		fullMessages = append(fullMessages, providers.Message{
 			Role:    "system",
 			Content: systemPrompt,
 		})
-		logger.Info("System prompt source: contextBuilder",
-			zap.Int("prompt_length", len(systemPrompt)),
-			zap.Int("loaded_skills", len(state.LoadedSkills)))
 	}
 	fullMessages = append(fullMessages, providerMsgs...)
 

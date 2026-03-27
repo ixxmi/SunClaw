@@ -189,3 +189,26 @@ func TestBuildBootstrapSectionFallsBackToBootstrapGuideWhenNoCognitiveFiles(t *t
 		t.Fatalf("expected bootstrap guide content, got %q", got)
 	}
 }
+
+func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	msgs := builder.BuildMessagesWithRuntime(nil, "hello", nil, nil, []Tool{
+		&summaryOnlyTool{name: "read_file"},
+	}, "", PromptModeFull)
+
+	if len(msgs) == 0 {
+		t.Fatalf("expected messages to be built")
+	}
+	systemPrompt := msgs[0].Content
+	if !strings.Contains(systemPrompt, "## 可用工具") {
+		t.Fatalf("expected runtime tool layer in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "**read_file**") {
+		t.Fatalf("expected runtime tool summary to include read_file, got %q", systemPrompt)
+	}
+	if strings.Contains(systemPrompt, "Tool availability (legacy summary)") {
+		t.Fatalf("did not expect legacy tool summary when runtime tools are provided, got %q", systemPrompt)
+	}
+}

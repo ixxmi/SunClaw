@@ -311,6 +311,28 @@ func ResolveToolPolicy(denyTools []string, allowTools []string) *ToolPolicy {
 	return policy
 }
 
+// ResolveConfiguredToolPolicy 仅按配置解析工具策略，不注入任何隐藏默认拒绝列表。
+// 用于主 Agent 的运行时工具集过滤，保证 allow_tools / deny_tools 与最终提示词一致。
+func ResolveConfiguredToolPolicy(denyTools []string, allowTools []string) *ToolPolicy {
+	policy := &ToolPolicy{
+		Deny:  make(map[string]bool),
+		Allow: make(map[string]bool),
+	}
+
+	for _, tool := range denyTools {
+		policy.Deny[tool] = true
+	}
+
+	if len(allowTools) > 0 {
+		policy.AllowOnly = true
+		for _, tool := range allowTools {
+			policy.Allow[tool] = true
+		}
+	}
+
+	return policy
+}
+
 // ToolPolicy 工具策略
 type ToolPolicy struct {
 	Deny      map[string]bool

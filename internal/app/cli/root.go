@@ -19,6 +19,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/channels"
 	"github.com/smallnest/goclaw/internal/core/config"
 	"github.com/smallnest/goclaw/internal/core/cron"
+	"github.com/smallnest/goclaw/internal/core/memory"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -293,6 +294,23 @@ func runStart(cmd *cobra.Command, args []string) {
 		if err := toolRegistry.RegisterExisting(tool); err != nil {
 			logger.Warn("Failed to register tool", zap.String("tool", tool.Name()), zap.Error(err))
 		}
+	}
+
+	// 注册 memory 和 session 状态工具
+	searchMgr, err := memory.GetMemorySearchManager(cfg.Memory, workspaceDir)
+	if err != nil {
+		logger.Warn("Failed to initialize memory search manager", zap.Error(err))
+	} else {
+		defer func() { _ = searchMgr.Close() }()
+		if err := toolRegistry.RegisterExisting(tools.NewMemoryTool(searchMgr)); err != nil {
+			logger.Warn("Failed to register memory_search tool", zap.Error(err))
+		}
+		if err := toolRegistry.RegisterExisting(tools.NewMemoryAddTool(searchMgr)); err != nil {
+			logger.Warn("Failed to register memory_add tool", zap.Error(err))
+		}
+	}
+	if err := toolRegistry.RegisterExisting(tools.NewSessionStatusTool(sessionMgr)); err != nil {
+		logger.Warn("Failed to register session_status tool", zap.Error(err))
 	}
 
 	// 注册浏览器工具（如果启用）

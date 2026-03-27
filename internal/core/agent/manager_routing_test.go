@@ -48,7 +48,7 @@ func TestOutboundReplyTarget_IgnoresInternalUUIDWithoutPlatformMessageID(t *test
 	}
 }
 
-func TestResolveInboundRoute_PrefersSessionRouteOverBinding(t *testing.T) {
+func TestResolveInboundRoute_PrefersBaseSessionRouteOverBindingAcrossLogicalSession(t *testing.T) {
 	reviewer := &Agent{}
 	defaultAgent := &Agent{}
 
@@ -63,13 +63,18 @@ func TestResolveInboundRoute_PrefersSessionRouteOverBinding(t *testing.T) {
 				Agent:   defaultAgent,
 			},
 		},
-		defaultAgent:   defaultAgent,
-		defaultAgentID: "default",
-		sessionRouter:  NewSessionAgentRouter(""),
+		defaultAgent:         defaultAgent,
+		defaultAgentID:       "default",
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
 	}
 
 	msg := &bus.InboundMessage{Channel: "slack", ChatID: "C123"}
-	mgr.sessionRouter.SetAgentID(mgr.buildSessionKey(msg), "reviewer")
+	baseKey := mgr.buildBaseSessionKey(msg)
+	mgr.sessionRouter.SetAgentID(baseKey, "reviewer")
+	if _, err := mgr.sessionContextRouter.Switch(baseKey, "feature-a"); err != nil {
+		t.Fatalf("switch logical session: %v", err)
+	}
 
 	decision := mgr.resolveInboundRoute(msg)
 	if decision.agent != reviewer {
@@ -77,6 +82,9 @@ func TestResolveInboundRoute_PrefersSessionRouteOverBinding(t *testing.T) {
 	}
 	if decision.agentID != "reviewer" || decision.source != "session" {
 		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if decision.matchedSessionKey != baseKey {
+		t.Fatalf("expected base session key match, got %q", decision.matchedSessionKey)
 	}
 }
 
@@ -144,10 +152,11 @@ func TestRouteInbound_AgentSwitchIsThreadScoped(t *testing.T) {
 			"default":  {},
 			"reviewer": {},
 		},
-		bindings:       make(map[string]*BindingEntry),
-		defaultAgentID: "default",
-		bus:            messageBus,
-		sessionRouter:  NewSessionAgentRouter(""),
+		bindings:             make(map[string]*BindingEntry),
+		defaultAgentID:       "default",
+		bus:                  messageBus,
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
 	}
 
 	msg := &bus.InboundMessage{
@@ -178,9 +187,9 @@ func TestRouteInbound_AgentSwitchIsThreadScoped(t *testing.T) {
 		t.Fatalf("timed out waiting for switch ack")
 	}
 
-	threadKey := mgr.buildSessionKey(msg)
-	if got := mgr.sessionRouter.GetAgentID(threadKey); got != "reviewer" {
-		t.Fatalf("expected thread session to bind reviewer, got %q", got)
+	threadBaseKey := mgr.buildBaseSessionKey(msg)
+	if got := mgr.sessionRouter.GetAgentID(threadBaseKey); got != "reviewer" {
+		t.Fatalf("expected thread base session to bind reviewer, got %q", got)
 	}
 
 	otherThread := &bus.InboundMessage{
@@ -190,7 +199,7 @@ func TestRouteInbound_AgentSwitchIsThreadScoped(t *testing.T) {
 			"thread_id": "thread-2",
 		},
 	}
-	if got := mgr.sessionRouter.GetAgentID(mgr.buildSessionKey(otherThread)); got != "" {
+	if got := mgr.sessionRouter.GetAgentID(mgr.buildBaseSessionKey(otherThread)); got != "" {
 		t.Fatalf("expected other thread to remain unbound, got %q", got)
 	}
 }
@@ -232,7 +241,7 @@ func TestHandleAgentSwitchCommand_ClearRemovesLegacySessionKeys(t *testing.T) {
 	}
 }
 
-func TestHandleAgentSwitchCommand_DefaultSetsExplicitSessionRouteOverBinding(t *testing.T) {
+func TestHandleAgentSwitchCommand_DefaultSetsExplicitBaseSessionRouteOverBinding(t *testing.T) {
 	messageBus := bus.NewMessageBus(16)
 
 	defaultAgent := &Agent{}
@@ -250,10 +259,11 @@ func TestHandleAgentSwitchCommand_DefaultSetsExplicitSessionRouteOverBinding(t *
 				Agent:     mainAgent,
 			},
 		},
-		defaultAgent:   defaultAgent,
-		defaultAgentID: "default",
-		bus:            messageBus,
-		sessionRouter:  NewSessionAgentRouter(""),
+		defaultAgent:         defaultAgent,
+		defaultAgentID:       "default",
+		bus:                  messageBus,
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
 	}
 
 	msg := &bus.InboundMessage{
@@ -269,8 +279,9 @@ func TestHandleAgentSwitchCommand_DefaultSetsExplicitSessionRouteOverBinding(t *
 		t.Fatalf("handleAgentSwitchCommand error: %v", err)
 	}
 
-	if got := mgr.sessionRouter.GetAgentID(mgr.buildSessionKey(msg)); got != "default" {
-		t.Fatalf("expected explicit session route to default, got %q", got)
+	baseKey := mgr.buildBaseSessionKey(msg)
+	if got := mgr.sessionRouter.GetAgentID(baseKey); got != "default" {
+		t.Fatalf("expected explicit base session route to default, got %q", got)
 	}
 
 	followup := &bus.InboundMessage{
@@ -279,9 +290,158 @@ func TestHandleAgentSwitchCommand_DefaultSetsExplicitSessionRouteOverBinding(t *
 		ChatID:    "XueMingYang",
 		Content:   "你是谁？",
 	}
+	if _, err := mgr.sessionContextRouter.Switch(baseKey, "foo"); err != nil {
+		t.Fatalf("switch logical session: %v", err)
+	}
 	decision := mgr.resolveInboundRoute(followup)
 	if decision.agent != defaultAgent || decision.agentID != "default" || decision.source != "session" {
-		t.Fatalf("expected explicit default session route, got %+v", decision)
+		t.Fatalf("expected explicit default base session route, got %+v", decision)
+	}
+	if decision.matchedSessionKey != baseKey {
+		t.Fatalf("expected base session key match, got %q", decision.matchedSessionKey)
+	}
+}
+
+func TestHandleAgentSwitchCommand_ClearRestoresBindingAfterLogicalSessionSwitch(t *testing.T) {
+	messageBus := bus.NewMessageBus(16)
+
+	defaultAgent := &Agent{}
+	mainAgent := &Agent{}
+	cooperAgent := &Agent{}
+	mgr := &AgentManager{
+		agents: map[string]*Agent{
+			"default": defaultAgent,
+			"main":    mainAgent,
+			"cooper":  cooperAgent,
+		},
+		bindings: map[string]*BindingEntry{
+			buildBindingKey("wework", "default"): {
+				AgentID:   "main",
+				Channel:   "wework",
+				AccountID: "default",
+				Agent:     mainAgent,
+			},
+		},
+		defaultAgent:         defaultAgent,
+		defaultAgentID:       "default",
+		bus:                  messageBus,
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
+	}
+
+	switchMsg := &bus.InboundMessage{
+		ID:        "msg-switch-cooper",
+		Channel:   "wework",
+		AccountID: "default",
+		ChatID:    "XueMingYang",
+		Content:   "/agent cooper",
+		Timestamp: time.Now(),
+	}
+	if err := mgr.handleAgentSwitchCommand(context.Background(), parseAgentSwitchCommand(switchMsg.Content), switchMsg); err != nil {
+		t.Fatalf("switch to cooper error: %v", err)
+	}
+
+	baseKey := mgr.buildBaseSessionKey(switchMsg)
+	if _, err := mgr.sessionContextRouter.Switch(baseKey, "foo"); err != nil {
+		t.Fatalf("switch logical session: %v", err)
+	}
+
+	clearMsg := &bus.InboundMessage{
+		ID:        "msg-clear-after-switch",
+		Channel:   "wework",
+		AccountID: "default",
+		ChatID:    "XueMingYang",
+		Content:   "/agent clear",
+		Timestamp: time.Now(),
+	}
+	if err := mgr.handleAgentSwitchCommand(context.Background(), parseAgentSwitchCommand(clearMsg.Content), clearMsg); err != nil {
+		t.Fatalf("clear agent switch error: %v", err)
+	}
+
+	if got := mgr.sessionRouter.GetAgentID(baseKey); got != "" {
+		t.Fatalf("expected base session route cleared, got %q", got)
+	}
+
+	decision := mgr.resolveInboundRoute(&bus.InboundMessage{
+		Channel:   "wework",
+		AccountID: "default",
+		ChatID:    "XueMingYang",
+		Content:   "follow up",
+	})
+	if decision.agent != mainAgent || decision.agentID != "main" || decision.source != "binding" {
+		t.Fatalf("expected binding route after clear, got %+v", decision)
+	}
+}
+
+func TestHandleSessionSwitchCommand_DoesNotWriteOrOverrideAgentRoute(t *testing.T) {
+	messageBus := bus.NewMessageBus(16)
+
+	cooperAgent := &Agent{}
+	mgr := &AgentManager{
+		agents: map[string]*Agent{
+			"cooper": cooperAgent,
+		},
+		bus:                  messageBus,
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
+	}
+
+	msg := &bus.InboundMessage{
+		ID:        "msg-session-switch-only",
+		Channel:   "wework",
+		AccountID: "default",
+		ChatID:    "XueMingYang",
+		Content:   "/session switch foo",
+		Timestamp: time.Now(),
+	}
+	baseKey := mgr.buildBaseSessionKey(msg)
+	mgr.sessionRouter.SetAgentID(baseKey, "cooper")
+
+	if err := mgr.handleSessionSwitchCommand(context.Background(), parseSessionSwitchCommand(msg.Content), msg); err != nil {
+		t.Fatalf("handleSessionSwitchCommand error: %v", err)
+	}
+
+	if got := mgr.sessionRouter.GetAgentID(baseKey); got != "cooper" {
+		t.Fatalf("expected base session agent route unchanged, got %q", got)
+	}
+	logicalKey := mgr.buildSessionKey(msg)
+	if logicalKey == baseKey {
+		t.Fatalf("expected logical session key after switch to differ from base key")
+	}
+	if got := mgr.sessionRouter.GetAgentID(logicalKey); got != "" {
+		t.Fatalf("expected no logical session agent route written, got %q", got)
+	}
+}
+
+func TestResolveInboundRoute_SupportsLegacyLogicalSessionKeyFallback(t *testing.T) {
+	reviewer := &Agent{}
+	defaultAgent := &Agent{}
+
+	mgr := &AgentManager{
+		agents: map[string]*Agent{
+			"reviewer": reviewer,
+			"default":  defaultAgent,
+		},
+		defaultAgent:         defaultAgent,
+		defaultAgentID:       "default",
+		sessionRouter:        NewSessionAgentRouter(""),
+		sessionContextRouter: NewSessionContextRouter(""),
+	}
+
+	msg := &bus.InboundMessage{Channel: "slack", ChatID: "C123"}
+	baseKey := mgr.buildBaseSessionKey(msg)
+	logicalKey, err := mgr.sessionContextRouter.Switch(baseKey, "feature-a")
+	if err != nil {
+		t.Fatalf("switch logical session: %v", err)
+	}
+	mgr.sessionRouter.SetAgentID(logicalKey, "reviewer")
+
+	decision := mgr.resolveInboundRoute(msg)
+	if decision.agent != reviewer || decision.agentID != "reviewer" || decision.source != "session" {
+		t.Fatalf("expected legacy logical session route to be honored, got %+v", decision)
+	}
+	if decision.matchedSessionKey != logicalKey {
+		t.Fatalf("expected logical session key match, got %q", decision.matchedSessionKey)
 	}
 }
 

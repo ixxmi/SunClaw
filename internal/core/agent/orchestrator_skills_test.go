@@ -167,8 +167,11 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "## Workspace Files (injected)") {
-		t.Fatalf("expected bootstrap section in system prompt, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "## Soul") {
+		t.Fatalf("expected soul layer in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "### SOUL.md") {
+		t.Fatalf("expected SOUL.md marker in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "vibecoding bootstrap soul") {
 		t.Fatalf("expected bootstrap content in system prompt, got %q", systemPrompt)
@@ -216,7 +219,7 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
 		"## Bootstrap Mode",
-		"do not answer with a fixed identity such as \"I am SunClaw\"",
+		"do not answer with a fixed identity unless that identity has already been explicitly written into `IDENTITY.md`",
 		"figure out who you are first",
 	}
 	for _, want := range checks {
