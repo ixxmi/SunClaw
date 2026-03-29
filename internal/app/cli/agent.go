@@ -16,6 +16,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -98,8 +99,8 @@ func runAgent(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(workspace, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create workspace: %v\n", err)
+	if err := workspacepkg.NewManager(workspace).Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to prepare workspace: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -121,11 +122,6 @@ func runAgent(cmd *cobra.Command, args []string) {
 
 	// Create memory store
 	memoryStore := agent.NewMemoryStore(workspace)
-	if err := memoryStore.EnsureBootstrapFiles(); err != nil {
-		if agentVerbose {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to create bootstrap files: %v\n", err)
-		}
-	}
 
 	// Create context builder
 	contextBuilder := agent.NewContextBuilder(memoryStore, workspace)

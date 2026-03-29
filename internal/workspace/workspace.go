@@ -57,18 +57,12 @@ func GetDefaultWorkspaceDir() (string, error) {
 	return filepath.Join(home, ".goclaw", "workspace"), nil
 }
 
-// Ensure 确保 workspace 目录存在且包含所有必要的文件
+// Ensure 确保运行时所需的 workspace 目录结构存在。
+// 该方法不会再默认把认知模板复制到用户工作区。
 func (m *Manager) Ensure() error {
 	// 确保 workspace 目录存在
 	if err := os.MkdirAll(m.workspaceDir, 0755); err != nil {
 		return fmt.Errorf("failed to create workspace directory: %w", err)
-	}
-
-	// 复制缺失的 bootstrap 文件
-	for _, filename := range BootstrapFiles {
-		if err := m.ensureFile(filename); err != nil {
-			return fmt.Errorf("failed to ensure %s: %w", filename, err)
-		}
 	}
 
 	// 确保 memory 目录存在
@@ -90,6 +84,22 @@ func (m *Manager) Ensure() error {
 	if _, err := os.Stat(heartbeatStateFile); os.IsNotExist(err) {
 		if err := m.createHeartbeatState(heartbeatStateFile); err != nil {
 			return fmt.Errorf("failed to create heartbeat state: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// InstallTemplates 显式安装缺失的 workspace 模板文件。
+// 仅在用户明确要求安装模板时调用。
+func (m *Manager) InstallTemplates() error {
+	if err := os.MkdirAll(m.workspaceDir, 0755); err != nil {
+		return fmt.Errorf("failed to create workspace directory: %w", err)
+	}
+
+	for _, filename := range BootstrapFiles {
+		if err := m.ensureFile(filename); err != nil {
+			return fmt.Errorf("failed to ensure %s: %w", filename, err)
 		}
 	}
 
@@ -306,4 +316,13 @@ func CopyFromFS(targetDir string) error {
 
 		return nil
 	})
+}
+
+// ReadEmbeddedTemplate 读取内置模板文件内容。
+func ReadEmbeddedTemplate(filename string) (string, error) {
+	content, err := templatesFS.ReadFile(filepath.Join("templates", filename))
+	if err != nil {
+		return "", fmt.Errorf("failed to read embedded template %s: %w", filename, err)
+	}
+	return string(content), nil
 }

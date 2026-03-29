@@ -159,6 +159,11 @@ type AgentState struct {
 	// Skills support
 	LoadedSkills     []string
 	CompressionCount int
+
+	// SkillsEnabled 控制主 agent 提示词拼接时是否加载技能。
+	// 子 agent 任何情况下都不拼接技能，此字段仅对主 agent 有效。
+	// nil 表示默认开启（true），显式设置为 false 时关闭技能拼接。
+	SkillsEnabled *bool
 }
 
 // AddPendingSubagent 记录一个新派发的子 agent（线程安全）
@@ -416,6 +421,7 @@ func (s *AgentState) Clone() *AgentState {
 		ContextSummary:        s.ContextSummary,
 		LoadedSkills:          loadedSkills,
 		CompressionCount:      s.CompressionCount,
+		SkillsEnabled:         s.SkillsEnabled,
 	}
 }
 

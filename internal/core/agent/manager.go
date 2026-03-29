@@ -23,6 +23,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	platformerrors "github.com/smallnest/goclaw/internal/platform/errors"
 	"github.com/smallnest/goclaw/internal/workspace"
 	"go.uber.org/zap"
 )
@@ -432,6 +433,11 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	effectiveMaxTokens := targetAgent.orchestrator.config.MaxTokens
 	if result.MaxTokens > 0 {
 		effectiveMaxTokens = result.MaxTokens
+	} else {
+		// 子 agent 默认收紧 completion token，避免长思考或长输出把请求处理时间拖到网关超时。
+		if effectiveMaxTokens <= 0 || effectiveMaxTokens > 2048 {
+			effectiveMaxTokens = 2048
+		}
 	}
 	effectiveTemperature := targetAgent.orchestrator.config.Temperature
 	if result.Temperature > 0 {
@@ -811,6 +817,24 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 					break
 				}
 			}
+
+			// 显式绑定 profile 的 agent 默认会绕过全局 rotation/failover。
+			// 当上游出现 502/503/504/timeout 时，这会让子 agent 直接失败。
+			// 这里保留指定 profile 作为首选提供商，同时用全局轮换提供商作为故障转移后备。
+			if globalCfg.Providers.Failover.Enabled && len(globalCfg.Providers.Profiles) > 1 {
+				if fallbackProvider, fbErr := providers.NewRotationProviderFromConfig(globalCfg); fbErr != nil {
+					logger.Warn("Failed to create fallback provider for agent profile; using direct provider only",
+						zap.String("agent_id", cfg.ID),
+						zap.String("profile", cfg.Provider),
+						zap.Error(fbErr))
+				} else {
+					agentProvider = providers.NewFailoverProvider(p, fallbackProvider, platformerrors.NewSimpleErrorClassifier())
+					agentProviderType = cfg.Provider + "+failover"
+					logger.Info("Agent profile provider wrapped with global failover",
+						zap.String("agent_id", cfg.ID),
+						zap.String("primary_profile", cfg.Provider))
+				}
+			}
 		}
 	}
 
@@ -839,6 +863,7 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 		ContextWindow:      guessContextWindow(model),
 		SkillsLoader:       m.skillsLoader,
 		ShrimpBrain:        m.shrimpBrain,
+		SkillsEnabled:      cfg.SkillsEnabled,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create agent %s: %w", cfg.ID, err)

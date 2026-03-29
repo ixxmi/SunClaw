@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
 func TestBuildSystemPromptIncludesHumanCommunicationGuidance(t *testing.T) {
@@ -169,10 +171,6 @@ func TestBuildBootstrapSectionFallsBackToBootstrapGuideWhenNoCognitiveFiles(t *t
 	workspaceDir := t.TempDir()
 	ownerDir := filepath.Join(t.TempDir(), "agents", "new-agent", "bootstrap")
 
-	if err := os.WriteFile(filepath.Join(workspaceDir, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nfirst-run ritual"), 0644); err != nil {
-		t.Fatalf("write BOOTSTRAP.md: %v", err)
-	}
-
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
 	builder.SetBootstrapDirResolver(func(ownerID string) string {
 		if ownerID == "new-agent" {
@@ -185,7 +183,11 @@ func TestBuildBootstrapSectionFallsBackToBootstrapGuideWhenNoCognitiveFiles(t *t
 	if !strings.Contains(got, "BOOTSTRAP.md") {
 		t.Fatalf("expected BOOTSTRAP.md section, got %q", got)
 	}
-	if !strings.Contains(got, "first-run ritual") {
+	bootstrapTemplate, err := workspacepkg.ReadEmbeddedTemplate("BOOTSTRAP.md")
+	if err != nil {
+		t.Fatalf("read BOOTSTRAP template: %v", err)
+	}
+	if !strings.Contains(got, strings.TrimSpace(bootstrapTemplate)) {
 		t.Fatalf("expected bootstrap guide content, got %q", got)
 	}
 }

@@ -42,6 +42,17 @@ Then open `SOUL.md` together and talk about:
 
 Write it down. Make it real.
 
+Then open `AGENTS.md` together and define the long-lived collaboration rules, such as:
+
+- What your default responsibilities are
+- What you should do automatically before asking
+- When you should ask first instead of acting
+- How you should behave in group chats, external actions, or risky situations
+- If this is a specialist or orchestrator agent, what work you should own vs delegate
+
+Keep `AGENTS.md` about stable operating rules and collaboration boundaries.
+Do not fill it with one-off tasks from the current conversation.
+
 ## Connect (Optional)
 
 Ask how they want to reach you:

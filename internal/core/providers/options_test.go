@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -61,5 +62,38 @@ func TestBuildAnthropicParamsUsesThinkingOption(t *testing.T) {
 	}
 	if string(params.Model) != "claude-sonnet-4-6" {
 		t.Fatalf("expected normalized anthropic model, got %q", string(params.Model))
+	}
+}
+
+func TestIsRetryableOpenAIStatusIncludesGatewayTimeout(t *testing.T) {
+	if !isRetryableOpenAIStatus(http.StatusGatewayTimeout) {
+		t.Fatalf("expected 504 to be retryable")
+	}
+}
+
+func TestOpenAIProviderChatReturnsRetryableHTTPErrorForHTMLGatewayTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write([]byte("<html><body>504 Gateway Time-out</body></html>"))
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAIProvider("test-key", server.URL, "gpt-5.4", 1024)
+	if err != nil {
+		t.Fatalf("NewOpenAIProvider error: %v", err)
+	}
+
+	_, err = provider.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var httpErr *openAIHTTPStatusError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected openAIHTTPStatusError, got %T: %v", err, err)
+	}
+	if !httpErr.retryable {
+		t.Fatalf("expected retryable HTTP error, got %#v", httpErr)
 	}
 }

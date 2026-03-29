@@ -30,7 +30,11 @@ type toolResultPair struct {
 	err    error
 }
 
-const maxToolResultChars = 20000
+const (
+	defaultToolResultChars  = 20000
+	readFileToolResultChars = 12000
+	runShellToolResultChars = 12000
+)
 
 // Orchestrator manages the agent execution loop
 // Based on pi-mono's agent-loop.ts design
@@ -547,12 +551,14 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	systemPrompt := ""
 	if o.config.ContextBuilder != nil {
 		assemblyMode := PromptAssemblyModeMain
+		promptMode := PromptModeFull
 		if state.IsSubagent {
 			assemblyMode = PromptAssemblyModeSubagent
+			promptMode = PromptModeMinimal
 		}
 		assembled := o.config.ContextBuilder.AssemblePrompt(&PromptAssemblyParams{
 			Mode:                  assemblyMode,
-			PromptMode:            PromptModeFull,
+			PromptMode:            promptMode,
 			AgentCorePrompt:       state.SystemPrompt,
 			BootstrapOwnerID:      state.BootstrapOwnerID,
 			WorkspaceRoot:         state.WorkspaceRoot,
@@ -560,6 +566,7 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 			SubagentDescriptor:    state.SubagentDescriptor,
 			Skills:                o.config.Skills,
 			LoadedSkills:          state.LoadedSkills,
+			SkillsEnabled:         state.SkillsEnabled,
 			SessionSummary:        state.ContextSummary,
 			Tools:                 state.Tools,
 		})
@@ -888,7 +895,7 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 		}
 
 		// Log tool execution result
-		result.Content = truncateToolResultBlocks(result.Content, maxToolResultChars)
+		result.Content = truncateToolResultBlocks(result.Content, toolResultCharBudget(tc.Name))
 		if err != nil {
 			logger.Error("[❌Tool execution failed]",
 				zap.String("tool_id", tc.ID),
@@ -916,8 +923,9 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 
 		if err != nil {
 			resultMsg.Metadata["error"] = err.Error()
-			// 保留原始 content（可能已有部分结果），追加错误信息
-			resultMsg.Content = []ContentBlock{TextContent{Text: fmt.Sprintf("[Tool Error] %s", err.Error())}}
+			resultMsg.Content = truncateToolResultBlocks([]ContentBlock{
+				TextContent{Text: fmt.Sprintf("[Tool Error] %s", err.Error())},
+			}, toolResultCharBudget(tc.Name))
 		}
 
 		if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" {
@@ -964,9 +972,10 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 			}
 		}
 
-		// sessions_spawn 成功：计入待完成子 agent
-		// runLoop 将在 outerCheck 持续等待，直到所有子 agent 结果通过 follow-up 队列返回
-		if tc.Name == "sessions_spawn" && err == nil {
+		// sessions_spawn 只有在真正派发成功时才计入待完成子 agent。
+		// 某些失败路径会返回文本错误但 err=nil；这里必须避免把 pending 计数加错，
+		// 否则 runLoop 会一直等待一个根本不存在的子 agent 结果。
+		if shouldTrackPendingSubagent(tc.Name, result, err) {
 			state.AddPendingSubagent()
 			logger.Info("Subagent spawned, pending count +1",
 				zap.Int64("pending_subagents", atomic.LoadInt64(&state.PendingSubagents)))
@@ -988,6 +997,15 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 	logger.Debug("=== Execute Tool Calls End ===",
 		zap.Int("count", len(results)))
 	return results, nil
+}
+
+func shouldTrackPendingSubagent(toolName string, result ToolResult, err error) bool {
+	if toolName != "sessions_spawn" || err != nil {
+		return false
+	}
+
+	text := strings.TrimSpace(extractToolResultContent(result.Content))
+	return strings.HasPrefix(text, "Subagent spawned successfully.")
 }
 
 // emit sends an event to the event channel (non-blocking)
@@ -1279,4 +1297,15 @@ func truncateToolResultBlocks(content []ContentBlock, maxChars int) []ContentBlo
 	}
 
 	return result
+}
+
+func toolResultCharBudget(toolName string) int {
+	switch toolName {
+	case "read_file", "read_config":
+		return readFileToolResultChars
+	case "run_shell":
+		return runShellToolResultChars
+	default:
+		return defaultToolResultChars
+	}
 }

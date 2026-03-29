@@ -201,7 +201,7 @@ func runStart(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
 
-	// 创建 workspace 管理器并确保文件存在
+	// 创建 workspace 管理器并确保运行时目录存在
 	workspaceMgr := workspace.NewManager(workspaceDir)
 	if err := workspaceMgr.Ensure(); err != nil {
 		logger.Warn("Failed to ensure workspace files", zap.Error(err))
@@ -529,10 +529,14 @@ func runInstall(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 创建 workspace 管理器并确保文件存在
+	// 创建 workspace 管理器并确保运行时目录存在
 	workspaceMgr := workspace.NewManager(workspaceDir)
 	if err := workspaceMgr.Ensure(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to ensure workspace: %v\n", err)
+		os.Exit(1)
+	}
+	if err := workspaceMgr.InstallTemplates(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to install workspace templates: %v\n", err)
 		os.Exit(1)
 	}
 

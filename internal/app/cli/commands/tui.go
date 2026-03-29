@@ -21,6 +21,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -220,6 +221,10 @@ func runTUI(cmd *cobra.Command, args []string) {
 	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
+	if err := workspacepkg.NewManager(workspace).Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to prepare workspace: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create message bus
 	messageBus := bus.NewMessageBus(100)
@@ -235,7 +240,6 @@ func runTUI(cmd *cobra.Command, args []string) {
 
 	// Create memory store
 	memoryStore := agent.NewMemoryStore(workspace)
-	_ = memoryStore.EnsureBootstrapFiles()
 
 	// Create context builder
 	contextBuilder := agent.NewContextBuilder(memoryStore, workspace)

@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/smallnest/goclaw/internal/core/config"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
+)
+
+const (
+	delegatedTaskMaxRunes    = 400
+	delegatedContextMaxRunes = 2400
+	delegatedListMaxItems    = 8
+	delegatedItemMaxRunes    = 180
 )
 
 // SubagentTypes - 分身相关类型定义（避免循环导入）
@@ -749,7 +757,7 @@ func buildDelegatedTask(params *SubagentSpawnToolParams) string {
 		return ""
 	}
 
-	baseTask := strings.TrimSpace(params.Task)
+	baseTask := limitText(strings.TrimSpace(params.Task), delegatedTaskMaxRunes)
 	if !hasStructuredDelegationFields(params) {
 		return baseTask
 	}
@@ -759,18 +767,18 @@ func buildDelegatedTask(params *SubagentSpawnToolParams) string {
 		sections = append(sections, "## 当前步骤目标\n"+baseTask)
 	}
 	if ctx := strings.TrimSpace(params.Context); ctx != "" {
-		sections = append(sections, "## 必要上下文\n"+ctx)
+		sections = append(sections, "## 必要上下文\n"+limitText(ctx, delegatedContextMaxRunes))
 	}
-	if files := formatBulletList(params.RelevantFiles); files != "" {
+	if files := formatBulletListLimited(params.RelevantFiles, delegatedListMaxItems, delegatedItemMaxRunes); files != "" {
 		sections = append(sections, "## 相关文件\n"+files)
 	}
-	if constraints := formatBulletList(params.Constraints); constraints != "" {
+	if constraints := formatBulletListLimited(params.Constraints, delegatedListMaxItems, delegatedItemMaxRunes); constraints != "" {
 		sections = append(sections, "## 约束条件\n"+constraints)
 	}
-	if deliverables := formatBulletList(params.Deliverables); deliverables != "" {
+	if deliverables := formatBulletListLimited(params.Deliverables, delegatedListMaxItems, delegatedItemMaxRunes); deliverables != "" {
 		sections = append(sections, "## 期望产出\n"+deliverables)
 	}
-	if doneWhen := formatBulletList(params.DoneWhen); doneWhen != "" {
+	if doneWhen := formatBulletListLimited(params.DoneWhen, delegatedListMaxItems, delegatedItemMaxRunes); doneWhen != "" {
 		sections = append(sections, "## 完成标准\n"+doneWhen)
 	}
 
@@ -819,14 +827,48 @@ func parseStringSlice(raw interface{}) []string {
 }
 
 func formatBulletList(items []string) string {
+	return formatBulletListLimited(items, len(items), delegatedItemMaxRunes)
+}
+
+func formatBulletListLimited(items []string, maxItems, maxRunes int) string {
 	if len(items) == 0 {
 		return ""
 	}
-	lines := make([]string, 0, len(items))
+	if maxItems <= 0 {
+		maxItems = len(items)
+	}
+	lines := make([]string, 0, minSubagentInt(len(items), maxItems)+1)
+	count := 0
 	for _, item := range items {
 		if trimmed := strings.TrimSpace(item); trimmed != "" {
-			lines = append(lines, "- "+trimmed)
+			lines = append(lines, "- "+limitText(trimmed, maxRunes))
+			count++
+			if count >= maxItems {
+				break
+			}
 		}
 	}
+	if len(items) > count {
+		lines = append(lines, fmt.Sprintf("- ... 省略其余 %d 项", len(items)-count))
+	}
 	return strings.Join(lines, "\n")
+}
+
+func limitText(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || maxRunes <= 0 {
+		return text
+	}
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return text
+	}
+	runes := []rune(text)
+	return strings.TrimSpace(string(runes[:maxRunes])) + "...(truncated)"
+}
+
+func minSubagentInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

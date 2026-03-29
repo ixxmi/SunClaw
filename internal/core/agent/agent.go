@@ -53,6 +53,7 @@ type NewAgentConfig struct {
 	ContextWindow      int
 	SkillsLoader       *SkillsLoader
 	ShrimpBrain        *ShrimpBrainTracker
+	SkillsEnabled      *bool // nil 表示默认开启（true），false 表示关闭技能拼接
 }
 
 // NewAgent creates a new agent
@@ -79,6 +80,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 	state.SessionKey = "main"
 	state.Tools = ToAgentTools(cfg.Tools.ListExisting())
 	state.LoadedSkills = []string{} // Initialize with empty loaded skills
+	state.SkillsEnabled = cfg.SkillsEnabled
 
 	// Load skills list
 	var skills []*Skill

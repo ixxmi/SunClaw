@@ -38,6 +38,7 @@ type PromptAssemblyParams struct {
 	Skills                []*Skill
 	LoadedSkills          []string
 	SkillsOverride        string
+	SkillsEnabled         *bool // nil 表示默认开启（true），false 表示关闭
 	SessionSummary        string
 	Tools                 []Tool
 	ToolSummary           string
@@ -50,18 +51,34 @@ type PromptAssemblyResult struct {
 }
 
 type bootstrapBundle struct {
-	Soul           string
-	Identity       string
-	Agents         string
-	User           string
-	BootstrapGuide string
+	Soul              string
+	SoulEffective     bool
+	Identity          string
+	IdentityEffective bool
+	Agents            string
+	AgentsEffective   bool
+	User              string
+	UserEffective     bool
+	BootstrapGuide    string
 }
 
-func (b bootstrapBundle) HasCognitiveFiles() bool {
-	return strings.TrimSpace(b.Soul) != "" ||
-		strings.TrimSpace(b.Identity) != "" ||
-		strings.TrimSpace(b.Agents) != "" ||
-		strings.TrimSpace(b.User) != ""
+func (b bootstrapBundle) HasAnyEffectiveCognition() bool {
+	return b.SoulEffective || b.IdentityEffective || b.AgentsEffective || b.UserEffective
+}
+
+func (b bootstrapBundle) HasCompleteEffectiveCognition() bool {
+	return b.SoulEffective && b.IdentityEffective && b.AgentsEffective && b.UserEffective
+}
+
+func (b bootstrapBundle) NeedsBootstrapGuide() bool {
+	return !b.HasCompleteEffectiveCognition()
+}
+
+func effectiveCognitionContent(content string, effective bool) string {
+	if !effective {
+		return ""
+	}
+	return content
 }
 
 // AssemblePrompt 按分层顺序和回退规则构建最终 system prompt。
@@ -99,15 +116,16 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		})
 	}
 
-	appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
-	appendLayer("soul", 20, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", bundle.Soul))
-	appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", bundle.Identity))
-	appendLayer("agent_core", 40, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
+	includeBootstrapGuide := !isSubagent && bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != ""
 
-	includeBootstrapGuide := !isSubagent && !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != ""
+	appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
+	appendLayer("soul", 20, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", effectiveCognitionContent(bundle.Soul, bundle.SoulEffective)))
+	appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", effectiveCognitionContent(bundle.Identity, bundle.IdentityEffective)))
 	if includeBootstrapGuide {
-		appendLayer("bootstrap_mode_notice", 45, "BOOTSTRAP.md", b.buildBootstrapModeNotice())
+		appendLayer("bootstrap_mode_notice", 35, "BOOTSTRAP.md", b.buildBootstrapModeNotice())
+		appendLayer("bootstrap_guide", 38, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
 	}
+	appendLayer("agent_core", 40, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
@@ -115,17 +133,25 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		appendLayer("subagent_spawnable_catalog", 55, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
 	default:
 		collaboration := joinNonEmpty([]string{
-			wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", bundle.Agents),
+			wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", effectiveCognitionContent(bundle.Agents, bundle.AgentsEffective)),
 			strings.TrimSpace(params.SpawnableAgentCatalog),
 		}, "\n\n---\n\n")
 		appendLayer("collaboration", 50, "AGENTS.md+dynamic_catalog", collaboration)
 	}
 
 	skillsLayer := ""
+	// 子 agent 任何情况下都不拼接技能
+	// 主 agent 根据 SkillsEnabled 配置决定是否拼接（nil 或 true 时拼接，false 时不拼接）
 	if !isSubagent {
-		skillsLayer = strings.TrimSpace(params.SkillsOverride)
-		if skillsLayer == "" {
-			skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
+		shouldLoadSkills := true // 默认开启
+		if params.SkillsEnabled != nil && !*params.SkillsEnabled {
+			shouldLoadSkills = false
+		}
+		if shouldLoadSkills {
+			skillsLayer = strings.TrimSpace(params.SkillsOverride)
+			if skillsLayer == "" {
+				skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
+			}
 		}
 	}
 	appendLayer("skills", 60, "runtime_skills", skillsLayer)
@@ -137,11 +163,8 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	appendLayer("context_summary", 75, "session_summary", b.buildContextSummary(params.SessionSummary))
 
 	contextParts := []string{
-		wrapPromptFileLayer("## User Context", "USER.md", bundle.User),
+		wrapPromptFileLayer("## User Context", "USER.md", effectiveCognitionContent(bundle.User, bundle.UserEffective)),
 		b.buildRuntimeContext(mode, params.WorkspaceRoot),
-	}
-	if includeBootstrapGuide {
-		contextParts = append(contextParts, wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
 	}
 	appendLayer("context", 80, "runtime_context", joinNonEmpty(contextParts, "\n\n---\n\n"))
 
@@ -291,10 +314,16 @@ func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot stri
 func (b *ContextBuilder) buildBootstrapModeNotice() string {
 	return `## Bootstrap Mode
 
-This agent does not have agent-specific cognitive files yet (` + "`IDENTITY.md`" + `, ` + "`AGENTS.md`" + `, ` + "`SOUL.md`" + `, ` + "`USER.md`" + `).
+One or more agent-specific cognitive files are still missing, empty, or left as template content (` + "`IDENTITY.md`" + `, ` + "`AGENTS.md`" + `, ` + "`SOUL.md`" + `, ` + "`USER.md`" + `).
 
 Treat ` + "`BOOTSTRAP.md`" + ` below as the temporary guide for establishing identity and cognition.
 Any fixed identity or role wording elsewhere in this system prompt is only temporary operational behavior, not the final self-identity.
+
+Bootstrap behavior rules:
+- During bootstrap, ` + "`BOOTSTRAP.md`" + ` overrides agent-core role wording for first-run onboarding, greetings, and identity questions.
+- If the user says "你好", "hi", "hello", asks "你是谁", "你叫什么", or asks what you are, do not give a generic assistant introduction.
+- Do not reply with generic introductions like "I am an AI assistant", "我是一个 AI 助手", "I am SunClaw", or any other fixed self-description that is not already written in ` + "`IDENTITY.md`" + `.
+- Your first job is to say that you have not been initialized yet, then guide the user to define your identity, role, vibe, and the user profile.
 
 If the user asks who you are, do not answer with a fixed identity unless that identity has already been explicitly written into ` + "`IDENTITY.md`" + `.`
 }
@@ -312,6 +341,7 @@ func wrapPromptFileLayer(title, filename, content string) string {
 
 func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot string) bootstrapBundle {
 	store := b.resolveBootstrapStore(ownerID, workspaceRoot)
+	templates := b.resolveBootstrapTemplates()
 	bundle := bootstrapBundle{}
 
 	readFromStore := func(target *string, filename string, s *MemoryStore) {
@@ -324,12 +354,19 @@ func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot stri
 	}
 
 	readFromStore(&bundle.Soul, "SOUL.md", store)
+	bundle.SoulEffective = isEffectiveCognition(bundle.Soul, templates.Soul)
 	readFromStore(&bundle.Identity, "IDENTITY.md", store)
+	bundle.IdentityEffective = isEffectiveCognition(bundle.Identity, templates.Identity)
 	readFromStore(&bundle.Agents, "AGENTS.md", store)
+	bundle.AgentsEffective = isEffectiveCognition(bundle.Agents, templates.Agents)
 	readFromStore(&bundle.User, "USER.md", store)
+	bundle.UserEffective = isEffectiveCognition(bundle.User, templates.User)
 
-	if !bundle.HasCognitiveFiles() {
+	if bundle.NeedsBootstrapGuide() {
 		readFromStore(&bundle.BootstrapGuide, "BOOTSTRAP.md", store)
+		if strings.TrimSpace(bundle.BootstrapGuide) == "" {
+			bundle.BootstrapGuide = templates.BootstrapGuide
+		}
 	}
 
 	// Isolation rule: do not fall back to root workspace BOOTSTRAP.md when within an owner workspace.
@@ -337,4 +374,16 @@ func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot stri
 	// This fallback has been removed to enforce workspace isolation.
 
 	return bundle
+}
+
+func isEffectiveCognition(content, template string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return true
+	}
+	return content != template
 }

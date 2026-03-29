@@ -384,6 +384,7 @@ func isRetryableOpenAIStatus(statusCode int) bool {
 		http.StatusTooEarly,
 		http.StatusInternalServerError,
 		http.StatusBadGateway,
+		http.StatusGatewayTimeout,
 		http.StatusServiceUnavailable:
 		return true
 	default:
@@ -432,6 +433,14 @@ func (p *OpenAIProvider) doRequestOnce(ctx context.Context, jsonData []byte, bod
 			zap.String("request_preview", openaiResponsePreview(jsonData, 1024)),
 			zap.String("response_preview", openaiResponsePreview(bodyBytes, 512)))
 		if openaiLooksLikeHTML(bodyBytes, contentType) {
+			if isRetryableOpenAIStatus(resp.StatusCode) {
+				return nil, &openAIHTTPStatusError{
+					statusCode:  resp.StatusCode,
+					statusText:  http.StatusText(resp.StatusCode),
+					bodyPreview: openaiResponsePreview(bodyBytes, 256),
+					retryable:   true,
+				}
+			}
 			return nil, fmt.Errorf(
 				"openai: %s returned HTML instead of JSON (check base_url). status=%d body=%s",
 				p.baseURL, resp.StatusCode, openaiResponsePreview(bodyBytes, 128))

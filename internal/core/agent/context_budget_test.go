@@ -112,8 +112,8 @@ func TestIsContextOverflowErrorRecognizesProviderContextMessage(t *testing.T) {
 
 func TestTruncateToolResultBlocksCapsOversizedOutput(t *testing.T) {
 	got := truncateToolResultBlocks([]ContentBlock{
-		TextContent{Text: strings.Repeat("a", maxToolResultChars+500)},
-	}, maxToolResultChars)
+		TextContent{Text: strings.Repeat("a", defaultToolResultChars+500)},
+	}, defaultToolResultChars)
 
 	if len(got) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(got))
@@ -127,5 +127,17 @@ func TestTruncateToolResultBlocksCapsOversizedOutput(t *testing.T) {
 	}
 	if !strings.HasPrefix(text.Text, strings.Repeat("a", 128)) {
 		t.Fatalf("expected original prefix to be preserved")
+	}
+}
+
+func TestToolResultCharBudgetUsesPerToolOverrides(t *testing.T) {
+	if got := toolResultCharBudget("read_file"); got != readFileToolResultChars {
+		t.Fatalf("read_file budget = %d, want %d", got, readFileToolResultChars)
+	}
+	if got := toolResultCharBudget("run_shell"); got != runShellToolResultChars {
+		t.Fatalf("run_shell budget = %d, want %d", got, runShellToolResultChars)
+	}
+	if got := toolResultCharBudget("web_search"); got != defaultToolResultChars {
+		t.Fatalf("default budget = %d, want %d", got, defaultToolResultChars)
 	}
 }

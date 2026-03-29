@@ -74,7 +74,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		"browser_click":          "点击页面元素（通过选择器或坐标）",
 		"browser_fill_input":     "填充输入框和文本域",
 		"browser_execute_script": "在页面上下文中执行 JavaScript",
-		"read_file":              "读取文件内容（支持大文件行范围）",
+		"read_file":              "读取文件内容（仅简单小文件全量返回，其余走紧凑预览，可按行范围读取）",
 		"write_file":             "创建或覆盖文件（按需创建目录）",
 		"list_files":             "列出目录内容（-r 递归）",
 		"run_shell":              "执行 shell 命令。禁止使用 crontab，定时任务必须用 cron 工具",
@@ -149,7 +149,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_click":          "Click elements on the page (by selector or coordinates)",
 		"browser_fill_input":     "Fill input fields and textareas",
 		"browser_execute_script": "Execute JavaScript in page context",
-		"read_file":              "Read file contents (supports line ranges for large files)",
+		"read_file":              "Read file contents (raw only for simple small files, otherwise compact preview, supports line ranges)",
 		"write_file":             "Create or overwrite files (creates directories as needed)",
 		"list_files":             "List directory contents (recursive with -r)",
 		"run_shell":              "Run shell commands. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead (this is the ONLY way to manage scheduled tasks in goclaw)",
@@ -747,12 +747,12 @@ func (b *ContextBuilder) defaultBootstrapStore(workspaceRoot string) *MemoryStor
 func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 	bundle := b.loadBootstrapBundleForOwner(ownerID, "")
 	parts := []string{
-		wrapPromptFileLayer("", "IDENTITY.md", bundle.Identity),
-		wrapPromptFileLayer("", "AGENTS.md", bundle.Agents),
-		wrapPromptFileLayer("", "SOUL.md", bundle.Soul),
-		wrapPromptFileLayer("", "USER.md", bundle.User),
+		wrapPromptFileLayer("", "IDENTITY.md", effectiveCognitionContent(bundle.Identity, bundle.IdentityEffective)),
+		wrapPromptFileLayer("", "AGENTS.md", effectiveCognitionContent(bundle.Agents, bundle.AgentsEffective)),
+		wrapPromptFileLayer("", "SOUL.md", effectiveCognitionContent(bundle.Soul, bundle.SoulEffective)),
+		wrapPromptFileLayer("", "USER.md", effectiveCognitionContent(bundle.User, bundle.UserEffective)),
 	}
-	if !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+	if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
 		parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
 	}
 	bootstrap := joinNonEmpty(parts, "\n\n")

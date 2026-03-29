@@ -190,10 +190,6 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 	})
 	provider := &promptCaptureProvider{}
 
-	if err := os.WriteFile(filepath.Join(workspaceDir, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nfigure out who you are first"), 0644); err != nil {
-		t.Fatalf("write root BOOTSTRAP.md: %v", err)
-	}
-
 	state := NewAgentState()
 	state.SystemPrompt = "你是 SunClaw 的 vibecoding 主编排 Agent。"
 	state.BootstrapOwnerID = "vibecoding"
@@ -220,7 +216,7 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 	checks := []string{
 		"## Bootstrap Mode",
 		"do not answer with a fixed identity unless that identity has already been explicitly written into `IDENTITY.md`",
-		"figure out who you are first",
+		"BOOTSTRAP.md - Hello, World",
 	}
 	for _, want := range checks {
 		if !strings.Contains(systemPrompt, want) {
@@ -246,10 +242,6 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 			Description: "Use when the user asks about weather or forecast.",
 			Content:     "# Weather\n\nDetailed instructions.",
 		},
-	}
-
-	if err := os.WriteFile(filepath.Join(workspaceDir, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nfigure out who you are first"), 0644); err != nil {
-		t.Fatalf("write root BOOTSTRAP.md: %v", err)
 	}
 
 	state := NewAgentState()
@@ -286,7 +278,7 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		"## Selected Skills (active)",
 		"## Bootstrap Mode",
 		"## Bootstrap Guide",
-		"figure out who you are first",
+		"BOOTSTRAP.md - Hello, World",
 	} {
 		if strings.Contains(systemPrompt, marker) {
 			t.Fatalf("did not expect %q in subagent system prompt, got %q", marker, systemPrompt)

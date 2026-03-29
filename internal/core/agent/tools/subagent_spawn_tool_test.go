@@ -258,3 +258,37 @@ func TestSubagentSpawnTool_PassesRuntimeOverridesAndNestedSpawnHint(t *testing.T
 		t.Fatalf("expected nested spawn guidance in child prompt, got %q", spawned.ChildSystemPrompt)
 	}
 }
+
+func TestSubagentSpawnTool_TruncatesOversizedDelegationContext(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	var spawned *SubagentSpawnResult
+	tool.SetOnSpawn(func(spawnParams *SubagentSpawnResult) error {
+		spawned = spawnParams
+		return nil
+	})
+
+	manyFiles := make([]interface{}, 0, delegatedListMaxItems+3)
+	for i := 0; i < delegatedListMaxItems+3; i++ {
+		manyFiles = append(manyFiles, strings.Repeat("a", delegatedItemMaxRunes+20))
+	}
+
+	_, err := tool.Execute(context.Background(), map[string]interface{}{
+		"task":           strings.Repeat("t", delegatedTaskMaxRunes+50),
+		"context":        strings.Repeat("c", delegatedContextMaxRunes+200),
+		"relevant_files": manyFiles,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if spawned == nil {
+		t.Fatalf("expected onSpawn callback to be called")
+	}
+	if !strings.Contains(spawned.Task, "...(truncated)") {
+		t.Fatalf("expected task truncation markers, got %q", spawned.Task)
+	}
+	if !strings.Contains(spawned.Task, "省略其余") {
+		t.Fatalf("expected omitted-items marker, got %q", spawned.Task)
+	}
+}

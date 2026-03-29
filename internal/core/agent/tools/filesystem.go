@@ -1,13 +1,33 @@
 package tools
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/workspace"
+)
+
+const (
+	readFileInlineMaxBytes      = 24 * 1024
+	readFileInlineMaxLines      = 120
+	readFileRangeDefaultLines   = 160
+	readFileRangeMaxLines       = 200
+	readFilePreviewHeadLines    = 80
+	readFilePreviewTailLines    = 20
+	readFileSummaryMaxLineRunes = 220
+	readFileSummaryHeadLines    = 80
+	readFileSummaryTailLines    = 20
+	readFileBinaryProbeBytes    = 4096
+	readFileControlByteFraction = 0.10
 )
 
 // FileSystemTool 文件系统工具
@@ -45,12 +65,49 @@ func (t *FileSystemTool) ReadFile(ctx context.Context, params map[string]interfa
 		return "", fmt.Errorf("access to path %s is not allowed", path)
 	}
 
-	content, err := os.ReadFile(path)
+	startLine, hasStart, err := optionalPositiveInt(params, "start_line")
 	if err != nil {
 		return "", err
 	}
+	endLine, hasEnd, err := optionalPositiveInt(params, "end_line")
+	if err != nil {
+		return "", err
+	}
+	if hasStart || hasEnd {
+		requestedStartLine := startLine
+		requestedEndLine := endLine
+		startLine, endLine, rangeCapped := normalizeReadFileLineRange(startLine, endLine)
+		return readFileLineRange(path, startLine, endLine, requestedStartLine, requestedEndLine, rangeCapped)
+	}
 
-	return string(content), nil
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", path)
+	}
+
+	probe, err := readFilePrefix(path, readFileBinaryProbeBytes)
+	if err != nil {
+		return "", err
+	}
+	if looksLikeBinary(probe) {
+		return formatBinaryFileNotice(path, info.Size()), nil
+	}
+
+	if info.Size() <= readFileInlineMaxBytes {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		if looksLikeBinary(content) {
+			return formatBinaryFileNotice(path, info.Size()), nil
+		}
+		return renderSmallTextFile(path, info.Size(), string(content)), nil
+	}
+
+	return buildLargeFilePreview(path, info.Size())
 }
 
 // WriteFile 写入文件
@@ -276,35 +333,66 @@ func (t *FileSystemTool) ReadConfig(ctx context.Context, params map[string]inter
 }
 
 func (t *FileSystemTool) resolveConfigDir(ctx context.Context) string {
-	explicitWorkspaceRoot := ""
-	if ctx != nil {
-		if root, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(root) != "" {
-			explicitWorkspaceRoot = strings.TrimSpace(root)
-		}
-	}
+	explicitWorkspaceRoot := t.resolveWorkspaceRoot(ctx)
 
-	if t.configDirResolverFn != nil && ctx != nil {
+	if ctx != nil {
 		if ownerID, ok := ctx.Value("bootstrap_owner_id").(string); ok && strings.TrimSpace(ownerID) != "" {
+			ownerID = strings.TrimSpace(ownerID)
 			if explicitWorkspaceRoot != "" {
 				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, ownerID)
 			}
-			if resolved := strings.TrimSpace(t.configDirResolverFn(ownerID)); resolved != "" {
-				return resolved
+			if t.configDirResolverFn != nil {
+				if resolved := strings.TrimSpace(t.configDirResolverFn(ownerID)); resolved != "" {
+					return resolved
+				}
 			}
 		}
 		if agentID, ok := ctx.Value("agent_id").(string); ok && strings.TrimSpace(agentID) != "" {
+			agentID = strings.TrimSpace(agentID)
 			if explicitWorkspaceRoot != "" {
 				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, agentID)
 			}
-			if resolved := strings.TrimSpace(t.configDirResolverFn(agentID)); resolved != "" {
-				return resolved
+			if t.configDirResolverFn != nil {
+				if resolved := strings.TrimSpace(t.configDirResolverFn(agentID)); resolved != "" {
+					return resolved
+				}
 			}
 		}
 	}
+
 	if explicitWorkspaceRoot != "" {
 		return explicitWorkspaceRoot
 	}
 	return strings.TrimSpace(t.workspace)
+}
+
+func (t *FileSystemTool) resolveWorkspaceRoot(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+
+	if root, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(root) != "" {
+		return strings.TrimSpace(root)
+	}
+
+	channel, _ := ctx.Value("channel").(string)
+	accountID, _ := ctx.Value("account_id").(string)
+	senderID, _ := ctx.Value("sender_id").(string)
+	tenantID, _ := ctx.Value("tenant_id").(string)
+	channel = strings.TrimSpace(channel)
+	accountID = strings.TrimSpace(accountID)
+	senderID = strings.TrimSpace(senderID)
+	tenantID = strings.TrimSpace(tenantID)
+	if channel == "" || senderID == "" {
+		return ""
+	}
+
+	return strings.TrimSpace((namespaces.Identity{
+		TenantID:  tenantID,
+		Channel:   channel,
+		AccountID: accountID,
+		SenderID:  senderID,
+	}).WorkspaceDir(t.workspace))
 }
 
 // GetTools 获取所有文件系统工具
@@ -312,13 +400,23 @@ func (t *FileSystemTool) GetTools() []Tool {
 	tools := []Tool{
 		NewBaseTool(
 			"read_file",
-			"Read the contents of a file",
+			"Read a file. Small/simple text files may be returned in full; dense or large files return a compact preview. Supports start_line/end_line, but wide ranges are capped.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"path": map[string]interface{}{
 						"type":        "string",
 						"description": "Path to the file to read",
+					},
+					"start_line": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional 1-based start line. If omitted but end_line is set, a window ending at end_line is returned.",
+						"minimum":     1,
+					},
+					"end_line": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional 1-based end line. If omitted but start_line is set, a default window starting at start_line is returned.",
+						"minimum":     1,
 					},
 				},
 				"required": []string{"path"},
@@ -427,4 +525,346 @@ func (t *FileSystemTool) GetTools() []Tool {
 	}
 
 	return tools
+}
+
+func optionalPositiveInt(params map[string]interface{}, key string) (int, bool, error) {
+	raw, exists := params[key]
+	if !exists || raw == nil {
+		return 0, false, nil
+	}
+
+	switch v := raw.(type) {
+	case int:
+		if v < 1 {
+			return 0, false, fmt.Errorf("%s must be >= 1", key)
+		}
+		return v, true, nil
+	case int32:
+		if v < 1 {
+			return 0, false, fmt.Errorf("%s must be >= 1", key)
+		}
+		return int(v), true, nil
+	case int64:
+		if v < 1 {
+			return 0, false, fmt.Errorf("%s must be >= 1", key)
+		}
+		return int(v), true, nil
+	case float64:
+		if v < 1 || v != float64(int(v)) {
+			return 0, false, fmt.Errorf("%s must be a positive integer", key)
+		}
+		return int(v), true, nil
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < 1 {
+			return 0, false, fmt.Errorf("%s must be a positive integer", key)
+		}
+		return n, true, nil
+	default:
+		return 0, false, fmt.Errorf("%s must be a positive integer", key)
+	}
+}
+
+func normalizeReadFileLineRange(startLine, endLine int) (int, int, bool) {
+	capped := false
+	if startLine <= 0 && endLine <= 0 {
+		return 1, readFileRangeDefaultLines, false
+	}
+	if startLine <= 0 {
+		startLine = endLine - readFileRangeDefaultLines + 1
+		if startLine < 1 {
+			startLine = 1
+		}
+	}
+	if endLine <= 0 {
+		endLine = startLine + readFileRangeDefaultLines - 1
+	}
+	if endLine-startLine+1 > readFileRangeMaxLines {
+		endLine = startLine + readFileRangeMaxLines - 1
+		capped = true
+	}
+	return startLine, endLine, capped
+}
+
+func readFilePrefix(path string, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)))
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func looksLikeBinary(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return true
+	}
+	if utf8.Valid(data) {
+		return false
+	}
+
+	controlBytes := 0
+	for _, b := range data {
+		switch {
+		case b == '\n', b == '\r', b == '\t':
+		case b < 0x20:
+			controlBytes++
+		}
+	}
+
+	return float64(controlBytes)/float64(len(data)) >= readFileControlByteFraction
+}
+
+func readFileLineRange(path string, startLine, endLine, requestedStartLine, requestedEndLine int, rangeCapped bool) (string, error) {
+	if startLine < 1 || endLine < startLine {
+		return "", fmt.Errorf("invalid line range: %d-%d", startLine, endLine)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	selectedLines := make([]string, 0, minInt(endLine-startLine+1, readFileRangeMaxLines))
+	totalLines := 0
+	actualStart := 0
+	actualEnd := 0
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			return "", readErr
+		}
+
+		if len(line) > 0 {
+			totalLines++
+			if totalLines >= startLine && totalLines <= endLine {
+				if actualStart == 0 {
+					actualStart = totalLines
+				}
+				actualEnd = totalLines
+				selectedLines = append(selectedLines, line)
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if totalLines > endLine {
+			break
+		}
+	}
+
+	if totalLines == 0 {
+		return fmt.Sprintf("[read_file] %s is empty", path), nil
+	}
+	if actualStart == 0 {
+		return fmt.Sprintf("[read_file] requested lines %d-%d, but %s only has %d lines", startLine, endLine, path, totalLines), nil
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("[read_file] %s lines %d-%d\n", path, actualStart, actualEnd))
+	if requestedStartLine > 0 || requestedEndLine > 0 {
+		normalizedRequestedStart := startLine
+		normalizedRequestedEnd := endLine
+		if requestedStartLine > 0 {
+			normalizedRequestedStart = requestedStartLine
+		}
+		if requestedEndLine > 0 {
+			normalizedRequestedEnd = requestedEndLine
+		}
+		if rangeCapped {
+			result.WriteString(fmt.Sprintf("[read_file] Requested range %d-%d was capped to %d-%d (max %d lines).\n", normalizedRequestedStart, normalizedRequestedEnd, startLine, endLine, readFileRangeMaxLines))
+		}
+	}
+	result.WriteString(renderReadFileBody(selectedLines, readFileInlineMaxLines, readFileSummaryHeadLines, readFileSummaryTailLines))
+	return result.String(), nil
+}
+
+func buildLargeFilePreview(path string, fileSize int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	head := make([]string, 0, readFilePreviewHeadLines)
+	tail := make([]string, 0, readFilePreviewTailLines)
+	totalLines := 0
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			return "", readErr
+		}
+
+		if len(line) > 0 {
+			totalLines++
+			if len(head) < readFilePreviewHeadLines {
+				head = append(head, line)
+			}
+			if readFilePreviewTailLines > 0 {
+				if len(tail) < readFilePreviewTailLines {
+					tail = append(tail, line)
+				} else {
+					copy(tail, tail[1:])
+					tail[len(tail)-1] = line
+				}
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	omittedLines := totalLines - len(head) - len(tail)
+	if omittedLines < 0 {
+		omittedLines = 0
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("[read_file] %s is large (%s, %d lines). Returning a preview.\n", path, formatByteSize(fileSize), totalLines))
+	result.WriteString(fmt.Sprintf("[read_file] Use start_line/end_line to fetch a narrower range. Default range window is %d lines, max %d lines.\n\n", readFileRangeDefaultLines, readFileRangeMaxLines))
+	result.WriteString(fmt.Sprintf("--- file head (lines 1-%d) ---\n", len(head)))
+	result.WriteString(renderReadFileLines(head))
+
+	if omittedLines > 0 {
+		current := result.String()
+		if current != "" && !strings.HasSuffix(current, "\n") {
+			result.WriteString("\n")
+		}
+		result.WriteString(fmt.Sprintf("\n--- omitted %d lines ---\n", omittedLines))
+		result.WriteString(fmt.Sprintf("--- file tail (lines %d-%d) ---\n", totalLines-len(tail)+1, totalLines))
+		result.WriteString(renderReadFileLines(tail))
+	}
+
+	return result.String(), nil
+}
+
+func renderSmallTextFile(path string, fileSize int64, content string) string {
+	lines := splitReadFileLines(content)
+	if shouldReturnRawReadFile(content, lines) {
+		return content
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("[read_file] %s is compact in bytes (%s) but dense in content. Returning a compact preview.\n", path, formatByteSize(fileSize)))
+	result.WriteString(fmt.Sprintf("[read_file] Use start_line/end_line to fetch a narrower range. Default range window is %d lines, max %d lines.\n\n", readFileRangeDefaultLines, readFileRangeMaxLines))
+	result.WriteString(renderReadFileBody(lines, readFileInlineMaxLines, readFileSummaryHeadLines, readFileSummaryTailLines))
+	return result.String()
+}
+
+func shouldReturnRawReadFile(content string, lines []string) bool {
+	if len(content) > readFileInlineMaxBytes {
+		return false
+	}
+	if len(lines) > readFileInlineMaxLines {
+		return false
+	}
+	for _, line := range lines {
+		if runeCountWithoutTrailingNewline(line) > readFileSummaryMaxLineRunes {
+			return false
+		}
+	}
+	return true
+}
+
+func renderReadFileBody(lines []string, fullLimit, headLimit, tailLimit int) string {
+	if len(lines) <= fullLimit {
+		return renderReadFileLines(lines)
+	}
+
+	var result strings.Builder
+	result.WriteString(renderReadFileLines(lines[:headLimit]))
+	if result.Len() > 0 && !strings.HasSuffix(result.String(), "\n") {
+		result.WriteString("\n")
+	}
+	result.WriteString(fmt.Sprintf("\n--- omitted %d lines ---\n", len(lines)-headLimit-tailLimit))
+	result.WriteString(renderReadFileLines(lines[len(lines)-tailLimit:]))
+	return result.String()
+}
+
+func renderReadFileLines(lines []string) string {
+	var result strings.Builder
+	truncatedLines := 0
+	for _, line := range lines {
+		shortened, changed := compactReadFileLine(line)
+		if changed {
+			truncatedLines++
+		}
+		result.WriteString(shortened)
+	}
+
+	if truncatedLines > 0 {
+		if result.Len() > 0 && !strings.HasSuffix(result.String(), "\n") {
+			result.WriteString("\n")
+		}
+		result.WriteString(fmt.Sprintf("\n--- %d long line(s) truncated to %d chars ---\n", truncatedLines, readFileSummaryMaxLineRunes))
+	}
+
+	return result.String()
+}
+
+func compactReadFileLine(line string) (string, bool) {
+	hasNewline := strings.HasSuffix(line, "\n")
+	core := strings.TrimSuffix(line, "\n")
+	runes := []rune(core)
+	if len(runes) <= readFileSummaryMaxLineRunes {
+		return line, false
+	}
+
+	shortened := string(runes[:readFileSummaryMaxLineRunes]) + "...(truncated)"
+	if hasNewline {
+		shortened += "\n"
+	}
+	return shortened, true
+}
+
+func splitReadFileLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.SplitAfter(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func formatBinaryFileNotice(path string, size int64) string {
+	return fmt.Sprintf("[read_file] %s appears to be a binary file (%s). Use a more specific tool or command to inspect it.", path, formatByteSize(size))
+}
+
+func formatByteSize(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
