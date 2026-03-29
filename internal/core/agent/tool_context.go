@@ -21,6 +21,12 @@ func withInboundToolContext(ctx context.Context, msg *bus.InboundMessage) contex
 	ctx = context.WithValue(ctx, "sender_id", msg.SenderID)
 
 	if msg.Metadata != nil {
+		for _, key := range []string{"tenant_id", "tenantId", "org_id", "orgId", "enterprise_id", "enterpriseId", "corp_id", "corpId"} {
+			if tenantID, ok := msg.Metadata[key].(string); ok && strings.TrimSpace(tenantID) != "" {
+				ctx = context.WithValue(ctx, "tenant_id", tenantID)
+				break
+			}
+		}
 		if chatType, ok := msg.Metadata["chat_type"].(string); ok && strings.TrimSpace(chatType) != "" {
 			ctx = context.WithValue(ctx, "chat_type", chatType)
 		}

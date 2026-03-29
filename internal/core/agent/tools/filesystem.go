@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/smallnest/goclaw/internal/workspace"
 )
 
 // FileSystemTool 文件系统工具
@@ -274,19 +276,35 @@ func (t *FileSystemTool) ReadConfig(ctx context.Context, params map[string]inter
 }
 
 func (t *FileSystemTool) resolveConfigDir(ctx context.Context) string {
+	explicitWorkspaceRoot := ""
+	if ctx != nil {
+		if root, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(root) != "" {
+			explicitWorkspaceRoot = strings.TrimSpace(root)
+		}
+	}
+
 	if t.configDirResolverFn != nil && ctx != nil {
 		if ownerID, ok := ctx.Value("bootstrap_owner_id").(string); ok && strings.TrimSpace(ownerID) != "" {
+			if explicitWorkspaceRoot != "" {
+				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, ownerID)
+			}
 			if resolved := strings.TrimSpace(t.configDirResolverFn(ownerID)); resolved != "" {
 				return resolved
 			}
 		}
 		if agentID, ok := ctx.Value("agent_id").(string); ok && strings.TrimSpace(agentID) != "" {
+			if explicitWorkspaceRoot != "" {
+				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, agentID)
+			}
 			if resolved := strings.TrimSpace(t.configDirResolverFn(agentID)); resolved != "" {
 				return resolved
 			}
 		}
 	}
-	return t.workspace
+	if explicitWorkspaceRoot != "" {
+		return explicitWorkspaceRoot
+	}
+	return strings.TrimSpace(t.workspace)
 }
 
 // GetTools 获取所有文件系统工具

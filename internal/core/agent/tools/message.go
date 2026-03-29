@@ -94,7 +94,7 @@ func (t *MessageTool) SendFile(ctx context.Context, params map[string]interface{
 		content = ""
 	}
 
-	media, err := t.buildOutboundMedia(params)
+	media, err := t.buildOutboundMedia(ctx, params)
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +149,7 @@ func (t *MessageTool) resolveTarget(ctx context.Context, params map[string]inter
 	return channel, accountID, chatID, replyTo, nil
 }
 
-func (t *MessageTool) buildOutboundMedia(params map[string]interface{}) (bus.Media, error) {
+func (t *MessageTool) buildOutboundMedia(ctx context.Context, params map[string]interface{}) (bus.Media, error) {
 	mediaType, err := normalizeMessageToolMediaType(stringParam(params, "media_type"))
 	if err != nil {
 		return bus.Media{}, err
@@ -181,7 +181,7 @@ func (t *MessageTool) buildOutboundMedia(params map[string]interface{}) (bus.Med
 
 	switch {
 	case filePath != "":
-		resolvedPath, err := t.resolveFilePath(filePath)
+		resolvedPath, err := t.resolveFilePath(ctx, filePath)
 		if err != nil {
 			return bus.Media{}, err
 		}
@@ -220,14 +220,17 @@ func (t *MessageTool) buildOutboundMedia(params map[string]interface{}) (bus.Med
 	return media, nil
 }
 
-func (t *MessageTool) resolveFilePath(rawPath string) (string, error) {
+func (t *MessageTool) resolveFilePath(ctx context.Context, rawPath string) (string, error) {
 	trimmed := strings.TrimSpace(rawPath)
 	if trimmed == "" {
 		return "", fmt.Errorf("file_path cannot be empty")
 	}
 
 	if !filepath.IsAbs(trimmed) {
-		base := t.workspace
+		base := strings.TrimSpace(t.workspace)
+		if root := contextString(ctx, "workspace_root"); root != "" {
+			base = root
+		}
 		if strings.TrimSpace(base) == "" {
 			var err error
 			base, err = os.Getwd()

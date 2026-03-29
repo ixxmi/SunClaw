@@ -16,6 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const maxShellOutputBytes = 64 * 1024
+
 // ShellTool Shell 工具
 type ShellTool struct {
 	enabled       bool
@@ -138,13 +140,13 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 
 		go func() {
 			defer wg.Done()
-			stdoutBuf, stdoutErr = io.ReadAll(stdout)
+			stdoutBuf, stdoutErr = readLimitedOutput(stdout, maxShellOutputBytes)
 			stdout.Close()
 		}()
 
 		go func() {
 			defer wg.Done()
-			stderrBuf, stderrErr = io.ReadAll(stderr)
+			stderrBuf, stderrErr = readLimitedOutput(stderr, maxShellOutputBytes)
 			stderr.Close()
 		}()
 
@@ -270,7 +272,7 @@ func (t *ShellTool) execInSandbox(ctx context.Context, command string) (string, 
 		return "", fmt.Errorf("failed to read logs: %w", err)
 	}
 
-	return string(logs), nil
+	return truncateOutputString(string(logs), maxShellOutputBytes), nil
 }
 
 // isDenied 检查命令是否被拒绝
@@ -343,4 +345,26 @@ func (t *ShellTool) Close() error {
 		return t.dockerClient.Close()
 	}
 	return nil
+}
+
+func readLimitedOutput(r io.Reader, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return io.ReadAll(r)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) <= limit {
+		return data, nil
+	}
+	return append(data[:limit], []byte("\n\n... (shell output truncated)")...), nil
+}
+
+func truncateOutputString(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "\n\n... (shell output truncated)"
 }

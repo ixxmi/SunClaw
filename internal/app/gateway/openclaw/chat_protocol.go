@@ -362,6 +362,9 @@ func RegisterChatMethods(mh *MessageHandler, chatMgr *ChatManager) {
 			return nil, NewErrorInfo(ErrorInvalidParams, "idempotencyKey is required")
 		}
 
+		conn.TrackSession(params.SessionKey)
+		conn.Subscribe("chat")
+
 		resp, err := chatMgr.Send(&params, conn.ID())
 		if err != nil {
 			return nil, NewErrorInfo(ErrorInternalError, err.Error())
@@ -381,6 +384,9 @@ func RegisterChatMethods(mh *MessageHandler, chatMgr *ChatManager) {
 			return nil, NewErrorInfo(ErrorInvalidParams, "sessionKey is required")
 		}
 
+		conn.TrackSession(params.SessionKey)
+		conn.Subscribe("chat")
+
 		resp, err := chatMgr.GetHistory(&params)
 		if err != nil {
 			return nil, NewErrorInfo(ErrorInternalError, err.Error())
@@ -399,6 +405,9 @@ func RegisterChatMethods(mh *MessageHandler, chatMgr *ChatManager) {
 		if params.SessionKey == "" {
 			return nil, NewErrorInfo(ErrorInvalidParams, "sessionKey is required")
 		}
+
+		conn.TrackSession(params.SessionKey)
+		conn.Subscribe("chat")
 
 		if err := chatMgr.Abort(&params); err != nil {
 			return nil, NewErrorInfo(ErrorInternalError, err.Error())

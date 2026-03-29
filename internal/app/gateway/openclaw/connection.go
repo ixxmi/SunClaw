@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,8 @@ type Connection struct {
 	remoteAddr string
 
 	// 订阅
-	subscriptions map[string]bool
+	subscriptions  map[string]bool
+	sessionFilters map[string]bool
 
 	// 状态
 	connectedAt    time.Time
@@ -76,6 +78,7 @@ func NewConnection(conn *websocket.Conn, remoteAddr string, config *ConnectionCo
 		snapshotManager: config.SnapshotManager,
 		remoteAddr:      remoteAddr,
 		subscriptions:   make(map[string]bool),
+		sessionFilters:  make(map[string]bool),
 		connectedAt:     time.Now(),
 		lastActivityAt:  time.Now(),
 		sendChan:        make(chan []byte, config.SendBufferSize),
@@ -213,6 +216,39 @@ func (c *Connection) IsSubscribed(event string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.subscriptions[event]
+}
+
+// TrackSession associates the connection with a session key for scoped chat delivery.
+func (c *Connection) TrackSession(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sessionFilters[sessionKey] = true
+}
+
+// UntrackSession removes a session association.
+func (c *Connection) UntrackSession(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.sessionFilters, sessionKey)
+}
+
+// WatchesSession reports whether the connection is scoped to the session key.
+func (c *Connection) WatchesSession(sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sessionFilters[sessionKey]
 }
 
 // SendFrame 发送帧

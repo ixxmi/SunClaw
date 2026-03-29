@@ -74,7 +74,7 @@ func (p *FailoverProvider) chatWithFallback(ctx context.Context, messages []Mess
 // shouldFailover 判断是否应该故障转移
 func (p *FailoverProvider) shouldFailover(reason errors.FailoverReason) bool {
 	switch reason {
-	case errors.FailoverReasonAuth, errors.FailoverReasonRateLimit, errors.FailoverReasonBilling:
+	case errors.FailoverReasonAuth, errors.FailoverReasonRateLimit, errors.FailoverReasonBilling, errors.FailoverReasonTimeout:
 		return true
 	default:
 		return false

@@ -228,3 +228,104 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 		}
 	}
 }
+
+func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing.T) {
+	workspaceDir := t.TempDir()
+	ownerBootstrapDir := filepath.Join(t.TempDir(), "agents", "vibecoding", "bootstrap")
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "vibecoding" {
+			return ownerBootstrapDir
+		}
+		return workspaceDir
+	})
+	provider := &promptCaptureProvider{}
+	skills := []*Skill{
+		{
+			Name:        "weather",
+			Description: "Use when the user asks about weather or forecast.",
+			Content:     "# Weather\n\nDetailed instructions.",
+		},
+	}
+
+	if err := os.WriteFile(filepath.Join(workspaceDir, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nfigure out who you are first"), 0644); err != nil {
+		t.Fatalf("write root BOOTSTRAP.md: %v", err)
+	}
+
+	state := NewAgentState()
+	state.SystemPrompt = "Subagent target prompt"
+	state.IsSubagent = true
+	state.BootstrapOwnerID = "vibecoding"
+	state.SubagentDescriptor = "# Subagent Context\n\nFocus on the delegated task."
+	state.Messages = []AgentMessage{
+		{
+			Role:    RoleUser,
+			Content: []ContentBlock{TextContent{Text: "继续"}},
+		},
+	}
+
+	orchestrator := NewOrchestrator(&LoopConfig{
+		Provider:       provider,
+		ContextBuilder: builder,
+		Skills:         skills,
+	}, state)
+
+	if _, err := orchestrator.streamAssistantResponse(context.Background(), state); err != nil {
+		t.Fatalf("streamAssistantResponse error: %v", err)
+	}
+	if len(provider.messages) == 0 {
+		t.Fatalf("expected provider to receive messages")
+	}
+
+	systemPrompt := provider.messages[0].Content
+	if !strings.Contains(systemPrompt, "# Subagent Context") {
+		t.Fatalf("expected subagent descriptor in system prompt, got %q", systemPrompt)
+	}
+	for _, marker := range []string{
+		"## Skills (mandatory)",
+		"## Selected Skills (active)",
+		"## Bootstrap Mode",
+		"## Bootstrap Guide",
+		"figure out who you are first",
+	} {
+		if strings.Contains(systemPrompt, marker) {
+			t.Fatalf("did not expect %q in subagent system prompt, got %q", marker, systemPrompt)
+		}
+	}
+}
+
+func TestStreamAssistantResponse_SubagentIncludesSpawnableCatalogWhenPresent(t *testing.T) {
+	workspaceDir := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+	provider := &promptCaptureProvider{}
+
+	state := NewAgentState()
+	state.SystemPrompt = "Subagent target prompt"
+	state.IsSubagent = true
+	state.BootstrapOwnerID = "vibecoding"
+	state.SubagentDescriptor = "# Subagent Context\n\nFocus on the delegated task."
+	state.SpawnableAgentCatalog = "## 可派生 Agent 目录\n\n- **agent_id: \"coder\"** — Coder — 单步实现"
+	state.Messages = []AgentMessage{
+		{
+			Role:    RoleUser,
+			Content: []ContentBlock{TextContent{Text: "继续"}},
+		},
+	}
+
+	orchestrator := NewOrchestrator(&LoopConfig{
+		Provider:       provider,
+		ContextBuilder: builder,
+	}, state)
+
+	if _, err := orchestrator.streamAssistantResponse(context.Background(), state); err != nil {
+		t.Fatalf("streamAssistantResponse error: %v", err)
+	}
+	if len(provider.messages) == 0 {
+		t.Fatalf("expected provider to receive messages")
+	}
+
+	systemPrompt := provider.messages[0].Content
+	if !strings.Contains(systemPrompt, "## 可派生 Agent 目录") {
+		t.Fatalf("expected subagent system prompt to include spawnable catalog, got %q", systemPrompt)
+	}
+}

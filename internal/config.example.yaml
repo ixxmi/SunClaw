@@ -89,6 +89,7 @@ channels:
         enabled: false
 gateway:
     host: localhost
+    inbound_workers: 4
     port: 8080
     read_timeout: 30
     websocket:
@@ -155,6 +156,13 @@ providers:
         base_url: ""
         max_retries: 3
         timeout: 600
+    failover:
+        enabled: false
+        strategy: round_robin
+        default_cooldown: 2m
+        circuit_breaker:
+            failure_threshold: 2
+            timeout: 2m
 tools:
     browser:
         enabled: true

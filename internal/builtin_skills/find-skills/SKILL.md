@@ -1,247 +1,144 @@
 ---
 name: find-skills
-description: Helps users discover, install, and manage goclaw skills. Use when users ask "how do I do X", "find a skill for X", "is there a skill that can...", or express interest in extending capabilities. Provides guidance for finding skills in the goclaw ecosystem and the broader open agent skills community.
-version: 1.0.0
-author: Ducc
-metadata:
-  openclaw:
-    emoji: 🔍
-    always: false
-    requires:
-      os: [darwin, linux, windows]
+description: "Search and discover OpenClaw skills from various sources. Use when: user wants to find available skills, search for specific functionality, or discover new skills to install."
+homepage: https://clawhub.com
+metadata: { "openclaw": { "emoji": "🔍", "requires": { "bins": [] } } }
 ---
 
-# Find Skills
+# Find Skills Skill
 
-Helps discover and install skills for goclaw.
+Search and discover OpenClaw skills from various sources.
 
-## Triggers
+## When to Use
 
-**Discovery requests:**
-- "find a skill for X", "is there a skill for X"
-- "how do I do X" where X might have an existing skill
-- "can you do X" for specialized capabilities
-- "I need help with X"
+✅ **USE this skill when:**
 
-**Extension interest:**
-- "I wish I had X capability"
-- "Is there a tool for X?"
-- "extend agent capabilities"
-- "add new functionality"
+- "Find skills for [task]"
+- "Search for OpenClaw skills"
+- "What skills are available?"
+- "Discover new skills"
+- "Find skills by category"
 
-**Management:**
-- "list skills", "show installed skills"
-- "update skills", "remove skill"
-- "install skill", "add skill"
+## When NOT to Use
 
----
+❌ **DON'T use this skill when:**
 
-## Quick Start
+- Installing skills → use `clawhub install`
+- Managing installed skills → use `openclaw skills list`
+- Creating new skills → use skill-creator skill
 
-### List Installed Skills
+## Sources for Finding Skills
 
+### 1. ClawHub (Primary)
 ```bash
-goclaw skills list
-goclaw skills list --verbose  # Show detailed info including content
+# Search skills
+npx clawhub search "keyword"
+
+# Browse categories
+npx clawhub browse
 ```
 
-### Install from URL
+### 2. OpenClaw Directory
+- Website: https://www.openclawdirectory.dev/skills
+- Browse by category, popularity, or search
 
+### 3. LobeHub Skills Marketplace
+- Website: https://lobehub.com/skills
+- Community-contributed skills
+
+### 4. GitHub
+- Search: `openclaw skill` or `agent-skill`
+- Look for repositories with `SKILL.md` files
+
+### 5. Community Forums
+- SitePoint: https://www.sitepoint.com/community/
+- Discord: https://discord.com/invite/clawd
+
+## Search Strategies
+
+### By Functionality
 ```bash
-# From Git repository
-goclaw skills install https://github.com/user/skill-repo
+# Web search skills
+npx clawhub search "web search"
 
-# From local path
-goclaw skills install ./path/to/skill
+# Weather skills
+npx clawhub search "weather"
+
+# Document skills
+npx clawhub search "document"
 ```
 
-### Validate Skills
-
+### By Provider
 ```bash
-# Check if skill dependencies are satisfied
-goclaw skills validate skill-name
+# Tavily skills
+npx clawhub search "tavily"
+
+# GitHub skills
+npx clawhub search "github"
+
+# Calendar skills
+npx clawhub search "calendar"
 ```
 
-### Test Skills
-
+### By Popularity
 ```bash
-# Test a skill with a prompt
-goclaw skills test skill-name --prompt "your test prompt here"
+# Most installed skills
+npx clawhub search --sort installs
+
+# Most starred skills
+npx clawhub search --sort stars
 ```
 
----
+## Installation Tips
 
-## Skill Locations
+1. **Check requirements** before installing
+2. **Read SKILL.md** for usage instructions
+3. **Test in isolation** before production use
+4. **Check for updates** regularly
 
-Skills are stored in a unified location:
+## Common Skill Categories
 
-| Location | Description |
-|----------|-------------|
-| `~/.goclaw/skills` | All skills (user-installed and built-in) |
+### Core Skills
+- `weather` - Weather forecasts
+- `skill-creator` - Create new skills
+- `healthcheck` - Security audits
 
-Built-in skills are automatically copied to this directory on first run.
+### Integration Skills
+- `github` - GitHub operations
+- `feishu` - Feishu integration
+- `notion` - Notion API
 
----
+### Search Skills
+- `tavily-search` - Web search via Tavily
+- `web-search-plus` - Enhanced web search
 
-## Installing Skills
-
-### From Git Repository
-
-```bash
-# Basic installation
-goclaw skills install https://github.com/user/repo
-
-# The skill will be installed to ~/.goclaw/skills/<repo-name>
-```
-
-### From Local Path
-
-```bash
-# From a directory containing SKILL.md
-goclaw skills install /path/to/skill
-```
-
-### Updating Skills
-
-```bash
-# Update a specific skill (must be a Git repo)
-goclaw skills update skill-name
-```
-
-### Uninstalling Skills
-
-```bash
-# Remove a skill
-goclaw skills uninstall skill-name
-```
-
----
-
-## Finding Relevant Skills
-
-### 1. Search Built-in Skills
-
-Use `goclaw skills list` to see what's available:
-
-```bash
-goclaw skills list --verbose
-```
-
-### 2. Browse External Sources
-
-**Official goclaw skills:** Check the project repository for bundled skills.
-
-**Community sources:**
-- GitHub: Search for `goclaw skill` or `agent skill`
-- Skills compatible with OpenClaw/Agent Skills format can often be adapted
-
-### 3. Check Skill Metadata
-
-Each skill has a `description` field in its YAML frontmatter that indicates when it should be used:
-
-```yaml
----
-name: crawl4ai
-description: This skill should be used when users need to scrape websites,
-extract structured data, handle JavaScript-heavy pages, or build automated
-web data pipelines.
----
-```
-
----
-
-## Creating Custom Skills
-
-If no existing skill meets your needs, create one:
-
-### Initialize New Skill
-
-```bash
-cd ~/.goclaw/skills
-mkdir my-skill
-cd my-skill
-
-# Create SKILL.md with proper frontmatter
-```
-
-### SKILL.md Template
-
-```markdown
----
-name: my-skill
-description: Brief description of what this skill does and when to use it.
-version: 1.0.0
-author: Your Name
-metadata:
-  openclaw:
-    emoji: 🎯
-    always: false
-    requires:
-      bins: []        # Required binaries
-      anyBins: []     # At least one of these must exist
-      env: []         # Required environment variables
-      config: []      # Required config keys
-      os: [darwin, linux, windows]
----
-
-# My Skill
-
-## Overview
-
-Brief description of what this skill does.
-
-## Triggers
-
-When this skill should activate.
-
-## Quick Start
-
-Basic usage examples.
-
-## Reference
-
-Detailed documentation.
-```
-
----
-
-## Best Practices
-
-1. **Search first** - Check if a skill already exists before creating
-2. **Validate before use** - Run `goclaw skills validate <name>` to check dependencies
-3. **Test skills** - Use `goclaw skills test <name>` to verify behavior
-4. **Keep skills lean** - Skills should be concise and focused
-5. **Use references** - Move detailed docs to `references/` directory
-
----
+### Agent Skills
+- `proactive-agent` - Proactive automation
+- `coding-agent` - Code generation
 
 ## Troubleshooting
 
-### Skill not found
+### Rate Limits
+If you hit rate limits with clawhub:
+1. Wait 1 hour before retrying
+2. Use alternative sources (websites)
+3. Search manually on GitHub
 
-```bash
-# Check skill is in correct location
-ls -la ~/.goclaw/skills/
+### Installation Issues
+1. Check skill requirements
+2. Verify network connectivity
+3. Check OpenClaw version compatibility
 
-# Verify skill has SKILL.md
-ls ~/.goclaw/skills/<skill-name>/SKILL.md
-```
+## Best Practices
 
-### Dependencies not satisfied
+1. **Search before creating** - Don't reinvent the wheel
+2. **Read documentation** - Understand skill capabilities
+3. **Start simple** - Install one skill at a time
+4. **Test thoroughly** - Verify skill works as expected
+5. **Provide feedback** - Help improve skills
 
-```bash
-# Validate to see what's missing
-goclaw skills validate <skill-name>
+## Related Skills
 
-# Install missing binaries or set environment variables
-```
-
-### Skill not loading
-
-```bash
-# Check skill format is valid
-cat ~/.goclaw/skills/<skill-name>/SKILL.md
-
-# YAML frontmatter must start with `---`
-# and have a name and description field
-```
+- `clawhub` - ClawHub CLI tool
+- `skill-creator` - Create new skills
+- `healthcheck` - System health checks

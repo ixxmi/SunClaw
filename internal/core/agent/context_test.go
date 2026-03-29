@@ -194,7 +194,7 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
-	msgs := builder.BuildMessagesWithRuntime(nil, "hello", nil, nil, []Tool{
+	msgs := builder.BuildMessagesWithRuntime(nil, "", "hello", nil, nil, []Tool{
 		&summaryOnlyTool{name: "read_file"},
 	}, "", PromptModeFull)
 
@@ -210,5 +210,23 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 	}
 	if strings.Contains(systemPrompt, "Tool availability (legacy summary)") {
 		t.Fatalf("did not expect legacy tool summary when runtime tools are provided, got %q", systemPrompt)
+	}
+}
+
+func TestBuildMessagesWithRuntimeIncludesSessionSummary(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	msgs := builder.BuildMessagesWithRuntime(nil, "Earlier work summary", "hello", nil, nil, nil, "", PromptModeFull)
+	if len(msgs) == 0 {
+		t.Fatalf("expected messages to be built")
+	}
+
+	systemPrompt := msgs[0].Content
+	if !strings.Contains(systemPrompt, "## Context Summary") {
+		t.Fatalf("expected context summary layer in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Earlier work summary") {
+		t.Fatalf("expected session summary content in system prompt, got %q", systemPrompt)
 	}
 }

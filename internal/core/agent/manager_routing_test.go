@@ -19,7 +19,7 @@ func TestBuildSessionKey_NormalizesEmptyAccountIDAndIncludesThread(t *testing.T)
 	}
 
 	got := mgr.buildSessionKey(msg)
-	want := "slack:default:C123:thread:thread-1"
+	want := "tenant:default:channel:slack:account:default:sender:default:chat:C123:thread:thread-1"
 	if got != want {
 		t.Fatalf("buildSessionKey()=%q, want %q", got, want)
 	}

@@ -62,6 +62,21 @@ func TestAssemblePrompt_UsesCustomAgentCoreWithoutBuiltinGenericFallback(t *test
 	}
 }
 
+func TestAssemblePrompt_DoesNotIncludeSilentRepliesOrHeartbeats(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode: PromptAssemblyModeMain,
+	}).SystemPrompt
+
+	for _, marker := range []string{"## Silent Replies", "## Heartbeats", "SILENT_REPLY", "HEARTBEAT_OK"} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q in prompt, got %q", marker, got)
+		}
+	}
+}
+
 func TestAssemblePrompt_OrdersSoulIdentityCoreCollaborationAndContext(t *testing.T) {
 	workspace := t.TempDir()
 	ownerDir := t.TempDir()
@@ -116,21 +131,256 @@ func TestAssemblePrompt_OrdersSoulIdentityCoreCollaborationAndContext(t *testing
 	}
 }
 
-func TestAssemblePrompt_SubagentUsesDescriptorInsteadOfSpawnableCatalog(t *testing.T) {
+func TestAssemblePrompt_SubagentUsesDescriptorWithoutCatalogWhenNotProvided(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	if err := os.WriteFile(filepath.Join(workspace, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nmain bootstrap guide"), 0644); err != nil {
+		t.Fatalf("write BOOTSTRAP.md: %v", err)
+	}
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:               PromptAssemblyModeSubagent,
+		AgentCorePrompt:    "target agent core",
+		BootstrapOwnerID:   "vibecoding",
+		SubagentDescriptor: "# Subagent Context\n\nYou are a subagent for this step.",
+		Skills: []*Skill{
+			{
+				Name:        "weather",
+				Description: "Use for weather tasks.",
+				Content:     "# Weather\n\nDetailed instructions.",
+			},
+		},
+	}).SystemPrompt
+
+	if !strings.Contains(got, "# Subagent Context") {
+		t.Fatalf("expected subagent descriptor in prompt, got %q", got)
+	}
+	for _, marker := range []string{
+		"## 可派生 Agent 目录",
+		"## Skills (mandatory)",
+		"## Selected Skills (active)",
+		"## Bootstrap Mode",
+		"## Bootstrap Guide",
+		"main bootstrap guide",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q in subagent prompt, got %q", marker, got)
+		}
+	}
+}
+
+func TestAssemblePrompt_SubagentIncludesSpawnableCatalogWhenProvided(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	got := builder.AssemblePrompt(&PromptAssemblyParams{
 		Mode:                  PromptAssemblyModeSubagent,
 		AgentCorePrompt:       "target agent core",
-		SpawnableAgentCatalog: "## 可派生 Agent 目录\n\n- should not appear",
+		BootstrapOwnerID:      "vibecoding",
+		SpawnableAgentCatalog: "## 可派生 Agent 目录\n\n- **agent_id: \"coder\"** — Coder — 单步实现",
 		SubagentDescriptor:    "# Subagent Context\n\nYou are a subagent for this step.",
 	}).SystemPrompt
 
 	if !strings.Contains(got, "# Subagent Context") {
 		t.Fatalf("expected subagent descriptor in prompt, got %q", got)
 	}
-	if strings.Contains(got, "## 可派生 Agent 目录") {
-		t.Fatalf("did not expect spawnable catalog in subagent prompt, got %q", got)
+	if !strings.Contains(got, "## 可派生 Agent 目录") {
+		t.Fatalf("expected subagent prompt to include spawnable catalog, got %q", got)
+	}
+}
+
+func TestAssemblePrompt_SubagentSkipsLoadedSkillContent(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:               PromptAssemblyModeSubagent,
+		AgentCorePrompt:    "target agent core",
+		SubagentDescriptor: "# Subagent Context\n\nYou are a subagent for this step.",
+		LoadedSkills:       []string{"weather"},
+		Skills: []*Skill{
+			{
+				Name:        "weather",
+				Description: "Use for weather tasks.",
+				Content:     "# Weather\n\nDetailed instructions.",
+			},
+		},
+	}).SystemPrompt
+
+	for _, marker := range []string{"## Selected Skills (active)", "# Weather", "Detailed instructions."} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q in subagent prompt, got %q", marker, got)
+		}
+	}
+}
+
+// New tests for workspace isolation: remove root BOOTSTRAP fallback
+func TestAssemblePrompt_Isolation_NoFallbackToRootBootstrapWhenOwnerEmpty(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	// root workspace has BOOTSTRAP.md
+	if err := os.WriteFile(filepath.Join(workspace, "BOOTSTRAP.md"), []byte("root bootstrap content"), 0644); err != nil {
+		t.Fatalf("write root BOOTSTRAP.md: %v", err)
+	}
+
+	ownerDir := t.TempDir()
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspace
+	})
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		BootstrapOwnerID: "owner1",
+	}).SystemPrompt
+
+	// Should not include root bootstrap content or bootstrap sections
+	if strings.Contains(got, "root bootstrap content") {
+		t.Fatalf("expected prompt NOT to include root bootstrap content, got %q", got)
+	}
+	for _, marker := range []string{"## Bootstrap Mode", "## Bootstrap Guide"} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("expected no bootstrap sections when owner has no bootstrap and no cognition, got %q", got)
+		}
+	}
+}
+
+func TestAssemblePrompt_Isolation_OwnerBootstrapPreferredOverRoot(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	// root workspace has BOOTSTRAP.md
+	if err := os.WriteFile(filepath.Join(workspace, "BOOTSTRAP.md"), []byte("root bootstrap content"), 0644); err != nil {
+		t.Fatalf("write root BOOTSTRAP.md: %v", err)
+	}
+
+	// owner workspace has its own BOOTSTRAP.md
+	ownerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ownerDir, "BOOTSTRAP.md"), []byte("owner bootstrap content"), 0644); err != nil {
+		t.Fatalf("write owner BOOTSTRAP.md: %v", err)
+	}
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspace
+	})
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		BootstrapOwnerID: "owner1",
+	}).SystemPrompt
+
+	// Should include owner's bootstrap, not root's
+	if !strings.Contains(got, "owner bootstrap content") {
+		t.Fatalf("expected prompt to include owner bootstrap content, got %q", got)
+	}
+	if strings.Contains(got, "root bootstrap content") {
+		t.Fatalf("did not expect prompt to include root bootstrap content when owner has BOOTSTRAP, got %q", got)
+	}
+	for _, marker := range []string{"## Bootstrap Mode", "## Bootstrap Guide"} {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected bootstrap sections when owner has bootstrap, missing %q in %q", marker, got)
+		}
+	}
+}
+
+// New tests for cognitive isolation: SOUL/IDENTITY/AGENTS/USER should never fall back to root when owner workspace is set
+func TestAssemblePrompt_Isolation_NoFallbackToRootCognitionWhenOwnerEmpty(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	// root has cognitive files
+	rootFiles := map[string]string{
+		"SOUL.md":     "root soul content",
+		"IDENTITY.md": "root identity content",
+		"AGENTS.md":   "root agents content",
+		"USER.md":     "root user content",
+	}
+	for name, content := range rootFiles {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write root %s: %v", name, err)
+		}
+	}
+
+	ownerDir := t.TempDir()
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspace
+	})
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		BootstrapOwnerID: "owner1",
+		AgentCorePrompt:  "custom core",
+	}).SystemPrompt
+
+	// None of the root cognitive contents should appear
+	for _, notWant := range rootFiles {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("expected prompt NOT to include root cognition content %q", notWant)
+		}
+	}
+}
+
+func TestAssemblePrompt_Isolation_OwnerCognitionPreferredOverRoot(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	// root has cognitive files
+	rootFiles := map[string]string{
+		"SOUL.md":     "root soul content",
+		"IDENTITY.md": "root identity content",
+		"AGENTS.md":   "root agents content",
+		"USER.md":     "root user content",
+	}
+	for name, content := range rootFiles {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write root %s: %v", name, err)
+		}
+	}
+
+	// owner has its own cognitive files
+	ownerDir := t.TempDir()
+	ownerFiles := map[string]string{
+		"SOUL.md":     "owner soul content",
+		"IDENTITY.md": "owner identity content",
+		"AGENTS.md":   "owner agents content",
+		"USER.md":     "owner user content",
+	}
+	for name, content := range ownerFiles {
+		if err := os.WriteFile(filepath.Join(ownerDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write owner %s: %v", name, err)
+		}
+	}
+
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspace
+	})
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		BootstrapOwnerID: "owner1",
+	}).SystemPrompt
+
+	// Owner contents should appear; root contents should not
+	for _, want := range ownerFiles {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected prompt to include owner cognition content %q, got %q", want, got)
+		}
+	}
+	for _, notWant := range rootFiles {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("did not expect root cognition content %q in prompt when owner exists", notWant)
+		}
 	}
 }

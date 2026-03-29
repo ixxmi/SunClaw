@@ -77,6 +77,15 @@ func TestIs(t *testing.T) {
 	}
 }
 
+func TestSimpleErrorClassifierTreatsGatewayTimeoutAsTimeout(t *testing.T) {
+	classifier := NewSimpleErrorClassifier()
+	err := errors.New("failed to generate content: HTTP 504 (Gateway Timeout): error code: 504")
+
+	if got := classifier.ClassifyError(err); got != FailoverReasonTimeout {
+		t.Fatalf("expected timeout classification, got %s", got)
+	}
+}
+
 func TestIsRetryable(t *testing.T) {
 	tests := []struct {
 		name      string

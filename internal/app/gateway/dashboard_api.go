@@ -18,19 +18,20 @@ import (
 )
 
 type dashboardSnapshot struct {
-	GeneratedAt string               `json:"generatedAt"`
-	Chat        dashboardChat        `json:"chat"`
-	Overview    dashboardOverview    `json:"overview"`
-	Channels    []dashboardChannel   `json:"channels"`
-	Instances   []dashboardInstance  `json:"instances"`
-	Sessions    []dashboardSession   `json:"sessions"`
-	CronJobs    []dashboardCronJob   `json:"cronJobs"`
-	Skills      []dashboardSkill     `json:"skills"`
-	Nodes       []dashboardNode      `json:"nodes"`
-	Config      dashboardConfigView  `json:"config"`
-	Debug       []dashboardDebugItem `json:"debug"`
-	Logs        []dashboardLogItem   `json:"logs"`
-	Docs        []dashboardDocItem   `json:"docs"`
+	GeneratedAt string                    `json:"generatedAt"`
+	Chat        dashboardChat             `json:"chat"`
+	Overview    dashboardOverview         `json:"overview"`
+	ShrimpBrain agent.ShrimpBrainSnapshot `json:"shrimpBrain"`
+	Channels    []dashboardChannel        `json:"channels"`
+	Instances   []dashboardInstance       `json:"instances"`
+	Sessions    []dashboardSession        `json:"sessions"`
+	CronJobs    []dashboardCronJob        `json:"cronJobs"`
+	Skills      []dashboardSkill          `json:"skills"`
+	Nodes       []dashboardNode           `json:"nodes"`
+	Config      dashboardConfigView       `json:"config"`
+	Debug       []dashboardDebugItem      `json:"debug"`
+	Logs        []dashboardLogItem        `json:"logs"`
+	Docs        []dashboardDocItem        `json:"docs"`
 }
 
 type dashboardChat struct {
@@ -242,19 +243,30 @@ func (s *Server) buildDashboardSnapshot() (*dashboardSnapshot, error) {
 				},
 			},
 		},
-		Channels:  channels,
-		Instances: s.buildInstanceRows(),
-		Sessions:  sessionRows,
-		CronJobs:  cronJobs,
-		Skills:    s.buildSkillRows(),
-		Nodes:     s.buildNodeRows(),
-		Config:    s.buildConfigView(),
-		Debug:     s.buildDebugRows(),
-		Logs:      s.buildLogRows(20),
-		Docs:      s.buildDocRows(),
+		ShrimpBrain: s.buildShrimpBrainSnapshot(),
+		Channels:    channels,
+		Instances:   s.buildInstanceRows(),
+		Sessions:    sessionRows,
+		CronJobs:    cronJobs,
+		Skills:      s.buildSkillRows(),
+		Nodes:       s.buildNodeRows(),
+		Config:      s.buildConfigView(),
+		Debug:       s.buildDebugRows(),
+		Logs:        s.buildLogRows(20),
+		Docs:        s.buildDocRows(),
 	}
 
 	return snapshot, nil
+}
+
+func (s *Server) buildShrimpBrainSnapshot() agent.ShrimpBrainSnapshot {
+	s.mu.RLock()
+	tracker := s.shrimpBrain
+	s.mu.RUnlock()
+	if tracker == nil {
+		return agent.EmptyShrimpBrainSnapshot("当前运行路径未挂载 AgentManager，虾脑观测不可用。")
+	}
+	return tracker.Snapshot()
 }
 
 func (s *Server) buildChatAlerts() []dashboardAlert {

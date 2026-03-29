@@ -72,7 +72,12 @@ func NewRotationProviderFromConfig(cfg *config.Config) (Provider, error) {
 
 	// 添加所有配置
 	for _, profileCfg := range cfg.Providers.Profiles {
-		prov, err := createProviderByType(profileCfg.Provider, profileCfg.APIKey, profileCfg.BaseURL, cfg.Agents.Defaults.Model, cfg.Agents.Defaults.MaxTokens)
+		model := profileCfg.Model
+		if model == "" {
+			model = cfg.Agents.Defaults.Model
+		}
+
+		prov, err := createProviderByType(profileCfg.Provider, profileCfg.APIKey, profileCfg.BaseURL, model, cfg.Agents.Defaults.MaxTokens)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create provider for profile %s: %w", profileCfg.Name, err)
 		}
@@ -88,7 +93,12 @@ func NewRotationProviderFromConfig(cfg *config.Config) (Provider, error) {
 	// 如果只有一个配置，返回第一个提供商
 	if len(cfg.Providers.Profiles) == 1 {
 		p := cfg.Providers.Profiles[0]
-		prov, err := createProviderByType(p.Provider, p.APIKey, p.BaseURL, cfg.Agents.Defaults.Model, cfg.Agents.Defaults.MaxTokens)
+		model := p.Model
+		if model == "" {
+			model = cfg.Agents.Defaults.Model
+		}
+
+		prov, err := createProviderByType(p.Provider, p.APIKey, p.BaseURL, model, cfg.Agents.Defaults.MaxTokens)
 		if err != nil {
 			return nil, err
 		}

@@ -57,6 +57,7 @@ type SubagentRegistry struct {
 	sweeperStop chan struct{}
 	// 事件回调
 	onRunComplete func(runID string, record *SubagentRunRecord)
+	onDeleteChild func(sessionKey string) error
 }
 
 // NewSubagentRegistry 创建分身注册表
@@ -207,8 +208,10 @@ func (r *SubagentRegistry) ReleaseRun(runID string) {
 
 // DeleteChildSession 删除子会话
 func (r *SubagentRegistry) DeleteChildSession(sessionKey string) error {
-	// 这里可以集成会话管理器的删除逻辑
 	logger.Info("Deleting child session", zap.String("session_key", sessionKey))
+	if r.onDeleteChild != nil {
+		return r.onDeleteChild(sessionKey)
+	}
 	return nil
 }
 
@@ -217,6 +220,13 @@ func (r *SubagentRegistry) SetOnRunComplete(fn func(runID string, record *Subage
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onRunComplete = fn
+}
+
+// SetOnDeleteChildSession sets the deletion callback used by sweeper/cleanup.
+func (r *SubagentRegistry) SetOnDeleteChildSession(fn func(sessionKey string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onDeleteChild = fn
 }
 
 // LoadFromDisk 从磁盘加载
@@ -467,27 +477,24 @@ func ParseAgentSessionKey(sessionKey string) (agentID string, subagentID string,
 		return "", "", false
 	}
 
-	// 检查是否为分身会话
-	if idx := findSubagentMarkerIndex(sessionKey); idx >= 0 {
-		// 格式: agent:<agentId>:subagent:<uuid>
-		parts := splitSessionKey(sessionKey)
-		if len(parts) >= 4 && parts[0] == "agent" && parts[2] == "subagent" {
-			return parts[1], parts[3], true
-		}
-		// 格式: subagent:<uuid>
-		if len(parts) >= 2 && parts[0] == "subagent" {
-			return "", parts[1], true
-		}
-		return "", "", true
-	}
-
-	// 格式: agent:<agentId>:<sessionKey>
 	parts := splitSessionKey(sessionKey)
-	if len(parts) >= 2 && parts[0] == "agent" {
-		return parts[1], "", false
+	for i := 0; i+1 < len(parts); i++ {
+		switch parts[i] {
+		case "agent":
+			agentID = parts[i+1]
+		case "subagent":
+			subagentID = parts[i+1]
+			return agentID, subagentID, true
+		}
 	}
 
-	return "", "", false
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "agent" {
+			return parts[i+1], "", false
+		}
+	}
+
+	return "", "", containsSubagentMarker(sessionKey)
 }
 
 // findSubagentMarkerIndex 查找分身标记位置

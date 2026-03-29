@@ -151,9 +151,14 @@ type AgentState struct {
 
 	// Session key
 	SessionKey string
+	// WorkspaceRoot is the effective isolated workspace for the current run.
+	WorkspaceRoot string
+	// ContextSummary carries compressed history summary injected into the prompt.
+	ContextSummary string
 
 	// Skills support
-	LoadedSkills []string
+	LoadedSkills     []string
+	CompressionCount int
 }
 
 // AddPendingSubagent 记录一个新派发的子 agent（线程安全）
@@ -215,6 +220,7 @@ type Event struct {
 // LoopConfig contains configuration for the agent loop
 type LoopConfig struct {
 	Model         string
+	Temperature   float64
 	Provider      providers.Provider
 	SessionMgr    *session.Manager
 	MaxIterations int
@@ -240,7 +246,10 @@ type LoopConfig struct {
 	// Skills support
 	Skills         []*Skill
 	LoadedSkills   []string
+	MaxTokens      int
+	ContextWindow  int
 	ContextBuilder *ContextBuilder
+	ShrimpBrain    *ShrimpBrainTracker
 }
 
 // NewAgentState creates a new agent state
@@ -403,7 +412,10 @@ func (s *AgentState) Clone() *AgentState {
 		FollowUpQueue:         followUp,
 		FollowUpMode:          s.FollowUpMode,
 		SessionKey:            s.SessionKey,
+		WorkspaceRoot:         s.WorkspaceRoot,
+		ContextSummary:        s.ContextSummary,
 		LoadedSkills:          loadedSkills,
+		CompressionCount:      s.CompressionCount,
 	}
 }
 

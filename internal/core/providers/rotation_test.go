@@ -213,6 +213,36 @@ func TestRotationProviderCooldown(t *testing.T) {
 	}
 }
 
+func TestRotationProviderFallsThroughOnTimeout(t *testing.T) {
+	classifier := errors.NewSimpleErrorClassifier()
+	rp := NewRotationProvider(RotationStrategyRoundRobin, time.Minute, classifier)
+
+	provider1 := &mockProvider{
+		shouldFail: true,
+		failError:  stderrors.New("failed to generate content: HTTP 504 (Gateway Timeout): error code: 504"),
+	}
+	provider2 := &mockProvider{response: &Response{Content: "profile2"}}
+
+	rp.AddProfile("profile1", provider1, "key1", 1)
+	rp.AddProfile("profile2", provider2, "key2", 2)
+
+	resp, err := rp.Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if resp.Content != "profile2" {
+		t.Fatalf("Expected fallback profile response, got %q", resp.Content)
+	}
+
+	status, err := rp.GetProfileStatus("profile1")
+	if err != nil {
+		t.Fatalf("Expected profile status, got %v", err)
+	}
+	if status["in_cooldown"] != true {
+		t.Fatalf("Expected timed out profile to enter cooldown")
+	}
+}
+
 func TestRotationProviderNoProfiles(t *testing.T) {
 	classifier := errors.NewSimpleErrorClassifier()
 	rp := NewRotationProvider(RotationStrategyRoundRobin, time.Minute, classifier)
@@ -236,7 +266,7 @@ func TestRotationProviderShouldSetCooldown(t *testing.T) {
 		{"auth error", errors.FailoverReasonAuth, true},
 		{"rate limit", errors.FailoverReasonRateLimit, true},
 		{"billing", errors.FailoverReasonBilling, true},
-		{"timeout", errors.FailoverReasonTimeout, false},
+		{"timeout", errors.FailoverReasonTimeout, true},
 		{"unknown", errors.FailoverReasonUnknown, false},
 	}
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/smallnest/goclaw/internal/core/bus"
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -37,6 +38,7 @@ type Agent struct {
 // NewAgentConfig configures the agent
 type NewAgentConfig struct {
 	AgentID            string // Agent 唯一 ID
+	Model              string
 	Bus                *bus.MessageBus
 	Provider           providers.Provider
 	SessionMgr         *session.Manager
@@ -46,7 +48,11 @@ type NewAgentConfig struct {
 	MaxIteration       int
 	MaxHistoryMessages int           // 最大历史消息数量
 	ToolTimeout        time.Duration // 单个工具执行超时（默认3分钟）
+	MaxTokens          int
+	Temperature        float64
+	ContextWindow      int
 	SkillsLoader       *SkillsLoader
+	ShrimpBrain        *ShrimpBrainTracker
 }
 
 // NewAgent creates a new agent
@@ -66,7 +72,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 
 	state := NewAgentState()
 	state.SystemPrompt = cfg.Context.buildBuiltinGenericCore(PromptModeFull)
-	state.Model = getModelName(cfg.Provider)
+	state.Model = strings.TrimSpace(cfg.Model)
 	state.Provider = "provider"
 	state.AgentID = cfg.AgentID
 	state.BootstrapOwnerID = cfg.AgentID
@@ -88,15 +94,19 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 
 	loopConfig := &LoopConfig{
 		Model:            state.Model,
+		Temperature:      cfg.Temperature,
 		Provider:         cfg.Provider,
 		SessionMgr:       cfg.SessionMgr,
 		MaxIterations:    cfg.MaxIteration,
+		MaxTokens:        cfg.MaxTokens,
+		ContextWindow:    cfg.ContextWindow,
 		ToolTimeout:      cfg.ToolTimeout,
 		ConvertToLLM:     defaultConvertToLLM,
 		TransformContext: nil,
 		Skills:           skills,
 		LoadedSkills:     state.LoadedSkills,
 		ContextBuilder:   cfg.Context,
+		ShrimpBrain:      cfg.ShrimpBrain,
 		GetSteeringMessages: func(s *AgentState) func() ([]AgentMessage, error) {
 			return func() ([]AgentMessage, error) {
 				return s.DequeueSteeringMessages(), nil
@@ -224,6 +234,12 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 
 	// Generate session key
 	sessionKey := msg.SessionKey()
+	workspaceRoot := a.workspace
+	if identity := namespaces.FromInboundMessage(msg); identity.NamespaceKey() != "" {
+		if resolved := identity.WorkspaceDir(a.workspace); strings.TrimSpace(resolved) != "" {
+			workspaceRoot = resolved
+		}
+	}
 	logger.Debug("Generated session key", zap.String("session_key", sessionKey))
 
 	// Get or create session
@@ -257,6 +273,7 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 	// Use maxHistoryMessages to limit history and avoid token limit exceeded errors
 	// Use GetHistorySafe to ensure we don't break tool call pairs
 	history := sess.GetHistorySafe(a.maxHistoryMessages)
+	summary := sess.GetSummary()
 	logger.Debug("History loaded", zap.Int("history_count", len(history)))
 	historyAgentMsgs := sessionMessagesToAgentMessages(history)
 	allMessages := append(historyAgentMsgs, agentMsg)
@@ -267,7 +284,11 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 		zap.Int("total_messages", len(allMessages)),
 	)
 	runCtx := withInboundToolContext(ctx, msg)
+	runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
+	runCtx = context.WithValue(runCtx, "tenant_id", namespaces.FromInboundMessage(msg).TenantID)
+	runCtx = context.WithValue(runCtx, SessionSummaryContextKey, summary)
 	finalMessages, err := a.orchestrator.Run(runCtx, allMessages)
+	summaryAfterRun := strings.TrimSpace(a.orchestrator.state.ContextSummary)
 	logger.Info("Agent execution completed",
 		zap.String("message_id", msg.ID),
 		zap.Int("final_messages", len(finalMessages)),
@@ -283,6 +304,10 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 
 	// Update session (only save new messages, skip history)
 	// orchestrator.Run returns all messages including input and history
+	if summaryAfterRun != "" {
+		sess.SetSummary(summaryAfterRun)
+		_ = a.sessionMgr.Save(sess)
+	}
 	historyLen := len(history)
 	if len(finalMessages) > historyLen {
 		newMessages := finalMessages[historyLen:]
@@ -298,6 +323,17 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 // updateSession updates the session with new messages
 func (a *Agent) updateSession(sess *session.Session, messages []AgentMessage) {
 	_ = a.helper.UpdateSession(sess, messages, &UpdateSessionOptions{SaveImmediately: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	contextWindow := a.orchestrator.config.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = guessContextWindow(a.orchestrator.config.Model)
+	}
+	if maybeCompactSession(ctx, a.provider, sess, a.maxHistoryMessages, contextWindow, a.orchestrator.config.MaxTokens) {
+		_ = a.sessionMgr.Save(sess)
+	}
 }
 
 // publishResponse publishes the agent response to the bus
@@ -550,6 +586,7 @@ func (a *Agent) Reset() {
 	agentID := a.state.AgentID
 	bootstrapOwnerID := a.state.BootstrapOwnerID
 	agentCorePrompt := a.state.SystemPrompt
+	model := a.state.Model
 	spawnableAgentCatalog := a.state.SpawnableAgentCatalog
 	subagentDescriptor := a.state.SubagentDescriptor
 	isSubagent := a.state.IsSubagent
@@ -562,7 +599,7 @@ func (a *Agent) Reset() {
 	if strings.TrimSpace(a.state.SystemPrompt) == "" {
 		a.state.SystemPrompt = a.context.buildBuiltinGenericCore(PromptModeFull)
 	}
-	a.state.Model = getModelName(a.provider)
+	a.state.Model = strings.TrimSpace(model)
 	a.state.Provider = "provider"
 	a.state.AgentID = agentID
 	a.state.BootstrapOwnerID = bootstrapOwnerID
@@ -616,14 +653,6 @@ func (a *Agent) ReplaceMessages(messages []AgentMessage) {
 // GetOrchestrator 获取 orchestrator（供 AgentManager 使用）
 func (a *Agent) GetOrchestrator() *Orchestrator {
 	return a.orchestrator
-}
-
-// Helper functions
-
-// getModelName extracts model name from provider
-func getModelName(p providers.Provider) string {
-	// This is a placeholder - actual implementation would depend on provider type
-	return "default"
 }
 
 // defaultConvertToLLM converts agent messages to provider messages

@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/smallnest/goclaw/internal/core/agent"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/channels"
 	"github.com/smallnest/goclaw/internal/core/config"
@@ -51,6 +52,7 @@ type Server struct {
 	acpMgr        interface{} // ACP manager - will be set if ACP is enabled
 	runtimeCtx    context.Context
 	configApplier func(context.Context, *config.Config) error
+	shrimpBrain   *agent.ShrimpBrainTracker
 }
 
 // WebSocketConfig WebSocket 配置
@@ -153,6 +155,12 @@ func (s *Server) SetConfigApplier(applier func(context.Context, *config.Config) 
 	s.configApplier = applier
 }
 
+func (s *Server) SetShrimpBrain(tracker *agent.ShrimpBrainTracker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shrimpBrain = tracker
+}
+
 func (s *Server) ConfigPath() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -233,6 +241,8 @@ func (s *Server) startHTTPServer(ctx context.Context) error {
 
 	// Dashboard API 端点
 	mux.HandleFunc("/api/dashboard", s.handleDashboardAPI)
+	mux.HandleFunc("/api/shrimp-brain", s.handleShrimpBrainAPI)
+	mux.HandleFunc("/api/shrimp-brain/stream", s.handleShrimpBrainStream)
 
 	// Control config API
 	mux.HandleFunc("/api/control-config", s.handleControlConfigAPI)
@@ -284,6 +294,8 @@ func (s *Server) startWebSocketServer(ctx context.Context) error {
 
 	// Dashboard API 端点
 	mux.HandleFunc("/api/dashboard", s.handleDashboardAPI)
+	mux.HandleFunc("/api/shrimp-brain", s.handleShrimpBrainAPI)
+	mux.HandleFunc("/api/shrimp-brain/stream", s.handleShrimpBrainStream)
 
 	// Control config API
 	mux.HandleFunc("/api/control-config", s.handleControlConfigAPI)

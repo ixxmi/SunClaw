@@ -219,6 +219,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err != nil {
 		logger.Fatal("Failed to create session manager", zap.Error(err))
 	}
+	sessionPool := session.NewManagerPool()
 
 	// 创建记忆存储
 	memoryStore := agent.NewMemoryStore(workspaceDir)
@@ -297,19 +298,15 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 
 	// 注册 memory 和 session 状态工具
-	searchMgr, err := memory.GetMemorySearchManager(cfg.Memory, workspaceDir)
-	if err != nil {
-		logger.Warn("Failed to initialize memory search manager", zap.Error(err))
-	} else {
-		defer func() { _ = searchMgr.Close() }()
-		if err := toolRegistry.RegisterExisting(tools.NewMemoryTool(searchMgr)); err != nil {
-			logger.Warn("Failed to register memory_search tool", zap.Error(err))
-		}
-		if err := toolRegistry.RegisterExisting(tools.NewMemoryAddTool(searchMgr)); err != nil {
-			logger.Warn("Failed to register memory_add tool", zap.Error(err))
-		}
+	searchMgrPool := memory.NewSearchManagerPool(cfg.Memory)
+	defer func() { _ = searchMgrPool.Close() }()
+	if err := toolRegistry.RegisterExisting(tools.NewNamespacedMemoryTool(workspaceDir, searchMgrPool)); err != nil {
+		logger.Warn("Failed to register memory_search tool", zap.Error(err))
 	}
-	if err := toolRegistry.RegisterExisting(tools.NewSessionStatusTool(sessionMgr)); err != nil {
+	if err := toolRegistry.RegisterExisting(tools.NewNamespacedMemoryAddTool(workspaceDir, searchMgrPool)); err != nil {
+		logger.Warn("Failed to register memory_add tool", zap.Error(err))
+	}
+	if err := toolRegistry.RegisterExisting(tools.NewNamespacedSessionStatusTool(workspaceDir, sessionPool)); err != nil {
 		logger.Warn("Failed to register session_status tool", zap.Error(err))
 	}
 
@@ -430,6 +427,7 @@ func runStart(cmd *cobra.Command, args []string) {
 		Bus:            messageBus,
 		Provider:       provider,
 		SessionMgr:     sessionMgr,
+		SessionPool:    sessionPool,
 		Tools:          toolRegistry,
 		DataDir:        workspaceDir, // 使用 workspace 作为数据目录
 		ContextBuilder: contextBuilder,
@@ -442,6 +440,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err := agentManager.SetupFromConfig(cfg, contextBuilder); err != nil {
 		logger.Fatal("Failed to setup agent manager", zap.Error(err))
 	}
+	gatewayServer.SetShrimpBrain(agentManager.GetShrimpBrain())
 	gatewayServer.SetConfigApplier(func(ctx context.Context, nextCfg *config.Config) error {
 		if err := channelMgr.ReloadFromConfig(ctx, nextCfg); err != nil {
 			return err

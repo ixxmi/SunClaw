@@ -96,6 +96,10 @@ func NewTUIAgent(
 		Context:      contextBuilder,
 		Workspace:    workspace,
 		MaxIteration: maxIterations,
+		MaxTokens:    4096,
+		ContextWindow: agent.GuessContextWindowForModel(
+			"",
+		),
 		SkillsLoader: skillsLoader,
 	})
 	if err != nil {
@@ -543,6 +547,7 @@ func runAgentIteration(
 
 		// Build messages
 		history := sess.GetHistory(tuiHistoryLimit)
+		sessionSummary := sess.GetSummary()
 
 		// 检查是否需要添加错误处理指导
 		var errorGuidance string
@@ -575,7 +580,7 @@ func runAgentIteration(
 		if toolRegistry != nil {
 			promptTools = agent.ToAgentTools(toolRegistry.List())
 		}
-		messages := contextBuilder.BuildMessagesWithRuntime(history, "", skills, loadedSkills, promptTools, "", agent.PromptModeFull)
+		messages := contextBuilder.BuildMessagesWithRuntime(history, sessionSummary, "", skills, loadedSkills, promptTools, "", agent.PromptModeFull)
 		providerMessages := make([]providers.Message, len(messages))
 		for i, msg := range messages {
 			var tcs []providers.ToolCall

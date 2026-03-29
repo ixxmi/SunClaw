@@ -227,6 +227,10 @@ func runAgent(cmd *cobra.Command, args []string) {
 		Context:      contextBuilder,
 		Workspace:    workspace,
 		MaxIteration: agentMaxIterations,
+		MaxTokens:    cfg.Agents.Defaults.MaxTokens,
+		ContextWindow: agent.GuessContextWindowForModel(
+			cfg.Agents.Defaults.Model,
+		),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create agent: %v\n", err)

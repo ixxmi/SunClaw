@@ -84,29 +84,32 @@ func (p *RotationProvider) GetProfile(name string) (*ProviderProfile, bool) {
 
 // Chat 聊天（带配置轮换）
 func (p *RotationProvider) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, options ...ChatOption) (*Response, error) {
-	// 获取下一个可用的配置
-	profile := p.getNextProfile()
-	if profile == nil {
+	candidates := p.getCandidateProfiles()
+	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no available provider profile")
 	}
 
-	// 调用提供商
-	response, err := profile.Provider.Chat(ctx, messages, tools, options...)
-	if err != nil {
-		// 检查错误类型
+	var lastErr error
+	for _, profile := range candidates {
+		response, err := profile.Provider.Chat(ctx, messages, tools, options...)
+		if err == nil {
+			profile.mu.Lock()
+			profile.RequestCount++
+			profile.mu.Unlock()
+			return response, nil
+		}
+
+		lastErr = err
 		reason := p.errorClassifier.ClassifyError(err)
 		if p.shouldSetCooldown(reason) {
 			p.setCooldown(profile.Name)
+			continue
 		}
+
 		return nil, err
 	}
 
-	// 增加请求计数
-	profile.mu.Lock()
-	profile.RequestCount++
-	profile.mu.Unlock()
-
-	return response, nil
+	return nil, lastErr
 }
 
 // ChatWithTools 聊天（带工具，支持配置轮换）
@@ -114,10 +117,11 @@ func (p *RotationProvider) ChatWithTools(ctx context.Context, messages []Message
 	return p.Chat(ctx, messages, tools, options...)
 }
 
-// getNextProfile 获取下一个可用的配置
-func (p *RotationProvider) getNextProfile() *ProviderProfile {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+// getCandidateProfiles 获取当前请求可尝试的 provider 列表。
+// 返回顺序由轮换策略决定；若前面的配置因为可回退错误失败，当前请求会继续尝试后续配置。
+func (p *RotationProvider) getCandidateProfiles() []*ProviderProfile {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	now := time.Now()
 	available := make([]*ProviderProfile, 0, len(p.profiles))
@@ -135,21 +139,20 @@ func (p *RotationProvider) getNextProfile() *ProviderProfile {
 		return nil
 	}
 
-	// 根据策略选择配置
 	switch p.strategy {
 	case RotationStrategyRoundRobin:
-		return p.selectRoundRobin(available)
+		return p.orderRoundRobin(available)
 	case RotationStrategyLeastUsed:
-		return p.selectLeastUsed(available)
+		return p.orderLeastUsed(available)
 	case RotationStrategyRandom:
-		return p.selectRandom(available)
+		return p.orderRandom(available)
 	default:
-		return available[0]
+		return available
 	}
 }
 
-// selectRoundRobin 轮询选择
-func (p *RotationProvider) selectRoundRobin(available []*ProviderProfile) *ProviderProfile {
+// orderRoundRobin 轮询排列。
+func (p *RotationProvider) orderRoundRobin(available []*ProviderProfile) []*ProviderProfile {
 	if len(available) == 0 {
 		return nil
 	}
@@ -159,46 +162,46 @@ func (p *RotationProvider) selectRoundRobin(available []*ProviderProfile) *Provi
 		return available[i].Name < available[j].Name
 	})
 
-	profile := available[p.currentIndex%len(available)]
+	start := p.currentIndex % len(available)
 	p.currentIndex++
-	return profile
+
+	ordered := append([]*ProviderProfile{}, available[start:]...)
+	return append(ordered, available[:start]...)
 }
 
-// selectLeastUsed 选择最少使用的
-func (p *RotationProvider) selectLeastUsed(available []*ProviderProfile) *ProviderProfile {
+// orderLeastUsed 按请求数升序排列。
+func (p *RotationProvider) orderLeastUsed(available []*ProviderProfile) []*ProviderProfile {
 	if len(available) == 0 {
 		return nil
 	}
 
-	minCount := int64(1<<63 - 1)
-	var selected *ProviderProfile
+	sort.Slice(available, func(i, j int) bool {
+		available[i].mu.Lock()
+		left := available[i].RequestCount
+		available[i].mu.Unlock()
 
-	for _, profile := range available {
-		profile.mu.Lock()
-		if profile.RequestCount < minCount {
-			minCount = profile.RequestCount
-			selected = profile
+		available[j].mu.Lock()
+		right := available[j].RequestCount
+		available[j].mu.Unlock()
+
+		if left == right {
+			return available[i].Name < available[j].Name
 		}
-		profile.mu.Unlock()
-	}
+		return left < right
+	})
 
-	if selected == nil {
-		selected = available[0]
-	}
-
-	return selected
+	return available
 }
 
-// selectRandom 随机选择
-func (p *RotationProvider) selectRandom(available []*ProviderProfile) *ProviderProfile {
+// orderRandom 使用时间种子做简单旋转。
+func (p *RotationProvider) orderRandom(available []*ProviderProfile) []*ProviderProfile {
 	if len(available) == 0 {
 		return nil
 	}
 
-	// 简单实现：使用当前时间作为伪随机
-	now := time.Now()
-	index := now.UnixNano() % int64(len(available))
-	return available[index]
+	start := int(time.Now().UnixNano() % int64(len(available)))
+	ordered := append([]*ProviderProfile{}, available[start:]...)
+	return append(ordered, available[:start]...)
 }
 
 // setCooldown 设置冷却时间
@@ -219,7 +222,7 @@ func (p *RotationProvider) setCooldown(profileName string) {
 // shouldSetCooldown 判断是否应该设置冷却
 func (p *RotationProvider) shouldSetCooldown(reason errors.FailoverReason) bool {
 	switch reason {
-	case errors.FailoverReasonAuth, errors.FailoverReasonRateLimit, errors.FailoverReasonBilling:
+	case errors.FailoverReasonAuth, errors.FailoverReasonRateLimit, errors.FailoverReasonBilling, errors.FailoverReasonTimeout:
 		return true
 	default:
 		return false

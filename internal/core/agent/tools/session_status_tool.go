@@ -4,19 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/session"
 )
 
 // SessionStatusTool exposes basic session status to the model.
 type SessionStatusTool struct {
-	sessionMgr *session.Manager
+	sessionMgr    *session.Manager
+	managerPool   *session.ManagerPool
+	baseWorkspace string
 }
 
 // NewSessionStatusTool creates a session status tool.
 func NewSessionStatusTool(sessionMgr *session.Manager) *SessionStatusTool {
 	return &SessionStatusTool{sessionMgr: sessionMgr}
+}
+
+// NewNamespacedSessionStatusTool creates a session status tool that resolves managers per workspace namespace.
+func NewNamespacedSessionStatusTool(baseWorkspace string, managerPool *session.ManagerPool) *SessionStatusTool {
+	return &SessionStatusTool{
+		managerPool:   managerPool,
+		baseWorkspace: strings.TrimSpace(baseWorkspace),
+	}
 }
 
 func (t *SessionStatusTool) Name() string {
@@ -40,7 +52,7 @@ func (t *SessionStatusTool) Parameters() map[string]interface{} {
 }
 
 func (t *SessionStatusTool) Execute(ctx context.Context, params map[string]interface{}) (string, error) {
-	if t.sessionMgr == nil {
+	if t.sessionMgr == nil && t.managerPool == nil {
 		return "", fmt.Errorf("session manager is unavailable")
 	}
 
@@ -57,7 +69,28 @@ func (t *SessionStatusTool) Execute(ctx context.Context, params map[string]inter
 		sessionKey = "main"
 	}
 
-	sess, err := t.sessionMgr.GetOrCreate(sessionKey)
+	sessionMgr := t.sessionMgr
+	if sessionMgr == nil && t.managerPool != nil {
+		workspaceRoot := ""
+		if raw, ok := ctx.Value("workspace_root").(string); ok {
+			workspaceRoot = strings.TrimSpace(raw)
+		}
+		if workspaceRoot == "" {
+			if identity, ok := namespaces.FromSessionKey(sessionKey); ok {
+				workspaceRoot = identity.WorkspaceDir(t.baseWorkspace)
+			}
+		}
+		if workspaceRoot == "" {
+			workspaceRoot = t.baseWorkspace
+		}
+		var err error
+		sessionMgr, err = t.managerPool.Get(filepath.Join(workspaceRoot, "sessions"))
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve session manager: %w", err)
+		}
+	}
+
+	sess, err := sessionMgr.GetOrCreate(sessionKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session %q: %w", sessionKey, err)
 	}

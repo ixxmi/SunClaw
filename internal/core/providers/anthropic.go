@@ -151,10 +151,9 @@ func buildAnthropicParams(messages []Message, tools []ToolDefinition, opts *Chat
 		params.Tools = buildAnthropicTools(tools)
 	}
 
-	// Extended Thinking（从 ChatOptions.Model 字段借用 thinking_level）
-	// 约定：opts.Model 以 "thinking:" 开头时携带 thinking level，如 "thinking:medium"
-	if strings.HasPrefix(opts.Model, "thinking:") {
-		level := strings.TrimPrefix(opts.Model, "thinking:")
+	// Extended Thinking
+	if strings.TrimSpace(opts.Thinking) != "" {
+		level := strings.TrimSpace(opts.Thinking)
 		if level != "" && level != "off" {
 			applyAnthropicThinking(&params, level)
 		}
@@ -291,7 +290,12 @@ func (p *AnthropicProvider) Chat(ctx context.Context, messages []Message, tools 
 		o(opts)
 	}
 
-	params := buildAnthropicParams(messages, tools, opts, p.model)
+	model := p.model
+	if strings.TrimSpace(opts.Model) != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+
+	params := buildAnthropicParams(messages, tools, opts, model)
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
@@ -320,7 +324,12 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 		o(opts)
 	}
 
-	params := buildAnthropicParams(messages, tools, opts, p.model)
+	model := p.model
+	if strings.TrimSpace(opts.Model) != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+
+	params := buildAnthropicParams(messages, tools, opts, model)
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	defer stream.Close()

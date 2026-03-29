@@ -32,11 +32,13 @@ type PromptAssemblyParams struct {
 	PromptMode            PromptMode
 	AgentCorePrompt       string
 	BootstrapOwnerID      string
+	WorkspaceRoot         string
 	SpawnableAgentCatalog string
 	SubagentDescriptor    string
 	Skills                []*Skill
 	LoadedSkills          []string
 	SkillsOverride        string
+	SessionSummary        string
 	Tools                 []Tool
 	ToolSummary           string
 }
@@ -81,8 +83,9 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 			assemblyMode = PromptAssemblyModeMain
 		}
 	}
+	isSubagent := assemblyMode == PromptAssemblyModeSubagent
 
-	bundle := b.loadBootstrapBundleForOwner(params.BootstrapOwnerID)
+	bundle := b.loadBootstrapBundleForOwner(params.BootstrapOwnerID, params.WorkspaceRoot)
 	layers := make([]PromptLayerSnapshot, 0, 10)
 
 	appendLayer := func(name string, priority int, source string, content string) {
@@ -101,13 +104,15 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", bundle.Identity))
 	appendLayer("agent_core", 40, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 
-	if !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+	includeBootstrapGuide := !isSubagent && !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != ""
+	if includeBootstrapGuide {
 		appendLayer("bootstrap_mode_notice", 45, "BOOTSTRAP.md", b.buildBootstrapModeNotice())
 	}
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
 		appendLayer("subagent_descriptor", 50, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
+		appendLayer("subagent_spawnable_catalog", 55, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
 	default:
 		collaboration := joinNonEmpty([]string{
 			wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", bundle.Agents),
@@ -116,9 +121,12 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		appendLayer("collaboration", 50, "AGENTS.md+dynamic_catalog", collaboration)
 	}
 
-	skillsLayer := strings.TrimSpace(params.SkillsOverride)
-	if skillsLayer == "" {
-		skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
+	skillsLayer := ""
+	if !isSubagent {
+		skillsLayer = strings.TrimSpace(params.SkillsOverride)
+		if skillsLayer == "" {
+			skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
+		}
 	}
 	appendLayer("skills", 60, "runtime_skills", skillsLayer)
 	toolSummary := strings.TrimSpace(params.ToolSummary)
@@ -126,12 +134,13 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		toolSummary = b.BuildToolsSummary(params.Tools)
 	}
 	appendLayer("tools", 70, "runtime_tools", toolSummary)
+	appendLayer("context_summary", 75, "session_summary", b.buildContextSummary(params.SessionSummary))
 
 	contextParts := []string{
 		wrapPromptFileLayer("## User Context", "USER.md", bundle.User),
-		b.buildRuntimeContext(mode),
+		b.buildRuntimeContext(mode, params.WorkspaceRoot),
 	}
-	if !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+	if includeBootstrapGuide {
 		contextParts = append(contextParts, wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
 	}
 	appendLayer("context", 80, "runtime_context", joinNonEmpty(contextParts, "\n\n---\n\n"))
@@ -211,14 +220,10 @@ func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 		return "You are a personal assistant running inside GoClaw."
 	}
 
-	parts := []string{
+	return joinNonEmpty([]string{
 		b.buildOperationalBoundary(),
 		b.buildSafety(),
-	}
-	if mode != PromptModeMinimal {
-		parts = append(parts, b.buildSilentReplies(), b.buildHeartbeats())
-	}
-	return joinNonEmpty(parts, "\n\n---\n\n")
+	}, "\n\n---\n\n")
 }
 
 func (b *ContextBuilder) buildOperationalBoundary() string {
@@ -268,14 +273,14 @@ You are not a passive chat bot. Your default posture is to understand the reques
 - Before non-trivial work: briefly acknowledge the request and state the next concrete step`
 }
 
-func (b *ContextBuilder) buildRuntimeContext(mode PromptMode) string {
+func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot string) string {
 	if mode == PromptModeNone {
 		return ""
 	}
 
 	parts := []string{
 		fmt.Sprintf("## Runtime Context\n\n**Current Time**: %s", time.Now().Format("2006-01-02 15:04:05 MST")),
-		b.buildWorkspace(),
+		b.buildWorkspace(workspaceRoot),
 	}
 	if mode != PromptModeMinimal {
 		parts = append(parts, b.buildRuntime())
@@ -305,8 +310,8 @@ func wrapPromptFileLayer(title, filename, content string) string {
 	return fmt.Sprintf("%s\n\n### %s\n\n%s", title, filename, content)
 }
 
-func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID string) bootstrapBundle {
-	store := b.resolveBootstrapStore(ownerID)
+func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot string) bootstrapBundle {
+	store := b.resolveBootstrapStore(ownerID, workspaceRoot)
 	bundle := bootstrapBundle{}
 
 	readFromStore := func(target *string, filename string, s *MemoryStore) {
@@ -327,12 +332,9 @@ func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID string) bootstrapBu
 		readFromStore(&bundle.BootstrapGuide, "BOOTSTRAP.md", store)
 	}
 
-	if !bundle.HasCognitiveFiles() && strings.TrimSpace(ownerID) != "" && strings.TrimSpace(bundle.BootstrapGuide) == "" {
-		rootStore := b.defaultBootstrapStore()
-		if rootStore != nil && (store == nil || rootStore.workspace != store.workspace) {
-			readFromStore(&bundle.BootstrapGuide, "BOOTSTRAP.md", rootStore)
-		}
-	}
+	// Isolation rule: do not fall back to root workspace BOOTSTRAP.md when within an owner workspace.
+	// The previous behavior read BOOTSTRAP.md from root when owner has no cognitive files and no bootstrap guide.
+	// This fallback has been removed to enforce workspace isolation.
 
 	return bundle
 }

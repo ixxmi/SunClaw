@@ -365,11 +365,12 @@ type AnthropicProviderConfig struct {
 
 // GatewayConfig 网关配置
 type GatewayConfig struct {
-	Host         string          `mapstructure:"host" json:"host"`
-	Port         int             `mapstructure:"port" json:"port"`
-	ReadTimeout  time.Duration   `mapstructure:"read_timeout" json:"read_timeout"`
-	WriteTimeout time.Duration   `mapstructure:"write_timeout" json:"write_timeout"`
-	WebSocket    WebSocketConfig `mapstructure:"websocket" json:"websocket"`
+	Host           string          `mapstructure:"host" json:"host"`
+	Port           int             `mapstructure:"port" json:"port"`
+	ReadTimeout    time.Duration   `mapstructure:"read_timeout" json:"read_timeout"`
+	WriteTimeout   time.Duration   `mapstructure:"write_timeout" json:"write_timeout"`
+	InboundWorkers int             `mapstructure:"inbound_workers" json:"inbound_workers"`
+	WebSocket      WebSocketConfig `mapstructure:"websocket" json:"websocket"`
 }
 
 // WebSocketConfig WebSocket 配置

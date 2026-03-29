@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,7 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-const defaultOpenAITimeout = 600 * time.Second
+const (
+	defaultOpenAITimeout         = 600 * time.Second
+	defaultOpenAIMaxAttempts     = 2
+	defaultOpenAIRetryDelay      = 750 * time.Millisecond
+	defaultOpenAIRetryMaxElapsed = 15 * time.Second
+)
 
 // OpenAIProvider 使用原生 HTTP 调用 OpenAI 兼容接口，支持 Gemini / codex 等中转站
 type OpenAIProvider struct {
@@ -293,6 +300,100 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body map[string]interfac
 		return nil, fmt.Errorf("openai: marshal request: %w", err)
 	}
 
+	var lastErr error
+	for attempt := 1; attempt <= defaultOpenAIMaxAttempts; attempt++ {
+		attemptStarted := time.Now()
+		resp, err := p.doRequestOnce(ctx, jsonData, body, attempt)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+		if attempt == defaultOpenAIMaxAttempts || !shouldRetryOpenAIRequest(err, time.Since(attemptStarted)) {
+			return nil, err
+		}
+
+		delay := time.Duration(attempt) * defaultOpenAIRetryDelay
+		logger.Warn("Retrying OpenAI request after transient failure",
+			zap.String("url", p.completionsURL()),
+			zap.String("base_url", p.baseURL),
+			zap.Any("model", body["model"]),
+			zap.Int("attempt", attempt),
+			zap.Int("max_attempts", defaultOpenAIMaxAttempts),
+			zap.Duration("retry_delay", delay),
+			zap.Error(err))
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return nil, lastErr
+}
+
+type openAIHTTPStatusError struct {
+	statusCode  int
+	statusText  string
+	bodyPreview string
+	retryable   bool
+}
+
+func (e *openAIHTTPStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.statusText != "" {
+		return fmt.Sprintf("failed to generate content: HTTP %d (%s): %s", e.statusCode, e.statusText, e.bodyPreview)
+	}
+	return fmt.Sprintf("failed to generate content: HTTP %d: %s", e.statusCode, e.bodyPreview)
+}
+
+func shouldRetryOpenAIRequest(err error, elapsed time.Duration) bool {
+	if err == nil || elapsed > defaultOpenAIRetryMaxElapsed {
+		return false
+	}
+
+	var httpErr *openAIHTTPStatusError
+	if errors.As(err, &httpErr) {
+		return httpErr.retryable
+	}
+
+	return isRetryableOpenAITransportError(err)
+}
+
+func isRetryableOpenAITransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func isRetryableOpenAIStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout,
+		http.StatusConflict,
+		http.StatusTooEarly,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *OpenAIProvider) doRequestOnce(ctx context.Context, jsonData []byte, body map[string]interface{}, attempt int) (*Response, error) {
+	startedAt := time.Now()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.completionsURL(), bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("openai: new request: %w", err)
@@ -302,7 +403,10 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body map[string]interfac
 
 	logger.Debug("OpenAI request",
 		zap.String("url", p.completionsURL()),
-		zap.Any("model", body["model"]))
+		zap.Any("model", body["model"]),
+		zap.Int("attempt", attempt),
+		zap.Int("request_bytes", len(jsonData)),
+		zap.String("request_preview", openaiResponsePreview(jsonData, 1024)))
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -311,16 +415,33 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body map[string]interfac
 	defer resp.Body.Close()
 
 	contentType := resp.Header.Get("Content-Type")
+	elapsed := time.Since(startedAt)
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		logger.Error("OpenAI HTTP request failed",
+			zap.String("url", p.completionsURL()),
+			zap.String("base_url", p.baseURL),
+			zap.Any("model", body["model"]),
+			zap.Int("attempt", attempt),
+			zap.Duration("elapsed", elapsed),
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("content_type", contentType),
+			zap.Any("response_headers", openAIHeaderMap(resp.Header)),
+			zap.Int("request_bytes", len(jsonData)),
+			zap.String("request_preview", openaiResponsePreview(jsonData, 1024)),
+			zap.String("response_preview", openaiResponsePreview(bodyBytes, 512)))
 		if openaiLooksLikeHTML(bodyBytes, contentType) {
 			return nil, fmt.Errorf(
 				"openai: %s returned HTML instead of JSON (check base_url). status=%d body=%s",
 				p.baseURL, resp.StatusCode, openaiResponsePreview(bodyBytes, 128))
 		}
-		return nil, fmt.Errorf("failed to generate content: HTTP %d: %s",
-			resp.StatusCode, openaiResponsePreview(bodyBytes, 256))
+		return nil, &openAIHTTPStatusError{
+			statusCode:  resp.StatusCode,
+			statusText:  http.StatusText(resp.StatusCode),
+			bodyPreview: openaiResponsePreview(bodyBytes, 256),
+			retryable:   isRetryableOpenAIStatus(resp.StatusCode),
+		}
 	}
 
 	// 服务端返回 SSE（忽略了 stream:false）→ 走 SSE 累积解析
@@ -334,6 +455,16 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body map[string]interfac
 		return nil, fmt.Errorf("openai: peek response: %w", peekErr)
 	}
 	if openaiLooksLikeHTML(prefix, contentType) {
+		logger.Error("OpenAI HTTP response returned HTML on success status",
+			zap.String("url", p.completionsURL()),
+			zap.String("base_url", p.baseURL),
+			zap.Any("model", body["model"]),
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("content_type", contentType),
+			zap.Any("response_headers", openAIHeaderMap(resp.Header)),
+			zap.Int("request_bytes", len(jsonData)),
+			zap.String("request_preview", openaiResponsePreview(jsonData, 1024)),
+			zap.String("response_preview", openaiResponsePreview(prefix, 512)))
 		return nil, fmt.Errorf(
 			"openai: %s returned HTML instead of JSON (check base_url). body=%s",
 			p.baseURL, openaiResponsePreview(prefix, 128))
@@ -554,6 +685,18 @@ func openaiResponsePreview(body []byte, maxLen int) string {
 	return string(trimmed[:maxLen]) + "..."
 }
 
+func openAIHeaderMap(header http.Header) map[string]string {
+	if len(header) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(header))
+	for k, values := range header {
+		out[k] = strings.Join(values, ", ")
+	}
+	return out
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -568,7 +711,11 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 	for _, o := range options {
 		o(opts)
 	}
-	return p.doRequest(ctx, p.buildRequest(p.model, messages, tools, opts))
+	model := p.model
+	if strings.TrimSpace(opts.Model) != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+	return p.doRequest(ctx, p.buildRequest(model, messages, tools, opts))
 }
 
 func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []Message, tools []ToolDefinition, options ...ChatOption) (*Response, error) {

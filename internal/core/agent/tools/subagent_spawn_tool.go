@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -48,6 +49,8 @@ type SubagentSystemPromptParams struct {
 	ChildSessionKey     string
 	Label               string
 	Task                string
+	TargetAgentID       string
+	AllowSubagentSpawn  bool
 }
 
 // BuildSubagentSystemPrompt 构建分身系统提示词
@@ -60,37 +63,55 @@ func BuildSubagentSystemPrompt(params *SubagentSystemPromptParams) string {
 	lines := []string{
 		"# Subagent Context",
 		"",
-		"You are a **subagent** spawned by the main agent for a specific task.",
+		"你是当前被派发来处理单一步骤的子 Agent。",
 		"",
-		"## Your Role",
-		fmt.Sprintf("- You were created to handle: %s", taskText),
-		"- Complete this task. That's your entire purpose.",
-		"- You are NOT the main agent. Don't try to be.",
+		"## 当前职责",
+		fmt.Sprintf("- 当前委派步骤：%s", taskText),
+		"- 只完成当前步骤，或在任务仍然过大时完成其中最小、最清晰、可独立交付的一段。",
+		"- 不要接管主 Agent 的用户沟通、全局规划或最终收束。",
 		"",
-		"## Rules",
-		"1. **Stay focused** - Do your assigned task, nothing else",
-		"2. **Complete the task** - Your final message will be automatically reported to the main agent",
-		"3. **Don't initiate** - No heartbeats, no proactive actions, no side quests",
-		"4. **Be ephemeral** - You may be terminated after task completion. That's fine.",
-		"5. **Keep scope minimal** - If the task bundles multiple phases, modules, or goals, complete only the smallest clear slice you can finish well and report the remainder as follow-up work",
+		"## 执行规则",
+		"1. 只读取完成当前步骤所需的最小上下文，不要无边界扩张。",
+		"2. 优先产出真实执行结果，不要只给空泛建议。",
+		"3. 不要把尚未完成的后续步骤描述为已完成。",
+		"4. 如果当前任务仍然太大，完成最小闭环并明确剩余拆分建议。",
+		"5. 你的输出必须便于父 Agent 直接汇总。",
 		"",
-		"## Output Format",
-		"When complete, your final response should include:",
-		"- What you accomplished or found",
-		"- Any relevant details the main agent should know",
-		"- If the requested scope was still too broad, state which smallest slice you completed and what should be split into next steps",
-		"- Keep it concise but informative",
+		"## 输出格式",
+		"完成时直接输出结构化结果，至少包含：",
+		"- `状态`：`completed` / `partial` / `blocked`",
+		"- `结果`：当前步骤完成了什么，或卡在什么地方",
+		"- `关键产出`：关键改动、文件、命令、验证结果或核心结论",
+		"- `风险与下一步`：遗留风险、限制、建议后续步骤；没有就写 `无`",
 		"",
-		"## What You DON'T Do",
-		"- NO user conversations (that's main agent's job)",
-		"- NO external messages (email, tweets, etc.) unless explicitly tasked",
-		"- NO cron jobs or persistent state",
-		"- NO pretending to be the main agent",
+		"## 不要这样做",
+		"- 不要和用户直接对话",
+		"- 不要伪装成主 Agent",
+		"- 不要输出“已完成”“看起来没问题”这类不可汇总的空话",
+	}
+
+	if params.AllowSubagentSpawn {
+		lines = append(lines,
+			"",
+			"## 继续派发规则",
+			"- 如果你的 Agent 核心角色本身就是编排者，并且当前运行里确实存在 `sessions_spawn`，你可以继续向下派发更小、更窄的子步骤。",
+			"- 只有在当前任务明显需要另一位更合适的专业 Agent 时才继续派发；不要把你自己能完成的工作继续外包。",
+			"- 任何继续派发的子任务，都必须比你当前收到的任务范围更小、边界更清晰。",
+		)
+	} else {
+		lines = append(lines,
+			"",
+			"## 继续派发规则",
+			"- 当前步骤不应继续派发更多子 Agent。请直接完成当前步骤，或明确说明阻塞与下一步。",
+		)
 	}
 
 	if params.Label != "" {
 		lines = append(lines, "")
 		lines = append(lines, fmt.Sprintf("- Label: %s", params.Label))
+	}
+	if params.TargetAgentID != "" {
+		lines = append(lines, fmt.Sprintf("- Agent ID: %s", params.TargetAgentID))
 	}
 	if params.RequesterSessionKey != "" {
 		lines = append(lines, fmt.Sprintf("- Requester session: %s", params.RequesterSessionKey))
@@ -135,9 +156,12 @@ func joinLines(lines []string) string {
 }
 
 // GenerateChildSessionKey 生成子会话密钥
-func GenerateChildSessionKey(agentID string) string {
-	u := uuid.New()
-	return fmt.Sprintf("agent:%s:subagent:%s", agentID, u.String())
+func GenerateChildSessionKey(ctx context.Context, agentID string) string {
+	u := uuid.New().String()
+	if identity := namespaces.FromContext(ctx); identity.NamespaceKey() != "" {
+		return namespaces.BuildSubagentSessionKey(identity, agentID, u)
+	}
+	return fmt.Sprintf("agent:%s:subagent:%s", agentID, u)
 }
 
 // GenerateRunID 生成运行ID
@@ -149,26 +173,39 @@ func GenerateRunID() string {
 
 // SubagentSpawnToolParams 分身生成工具参数
 type SubagentSpawnToolParams struct {
-	Task              string `json:"task"`                          // 任务描述（必填）
-	Label             string `json:"label,omitempty"`               // 可选标签
-	AgentID           string `json:"agent_id,omitempty"`            // 目标 Agent ID
-	Model             string `json:"model,omitempty"`               // 模型覆盖
-	Thinking          string `json:"thinking,omitempty"`            // 思考级别
-	RunTimeoutSeconds int    `json:"run_timeout_seconds,omitempty"` // 超时时间
-	Cleanup           string `json:"cleanup,omitempty"`             // 清理策略
+	Task              string   `json:"task"`                          // 任务描述（必填）
+	Label             string   `json:"label,omitempty"`               // 可选标签
+	AgentID           string   `json:"agent_id,omitempty"`            // 目标 Agent ID
+	Model             string   `json:"model,omitempty"`               // 模型覆盖
+	Thinking          string   `json:"thinking,omitempty"`            // 思考级别
+	MaxTokens         int      `json:"max_tokens,omitempty"`          // 最大输出 token
+	Temperature       float64  `json:"temperature,omitempty"`         // 温度
+	RunTimeoutSeconds int      `json:"run_timeout_seconds,omitempty"` // 超时时间
+	Cleanup           string   `json:"cleanup,omitempty"`             // 清理策略
+	Context           string   `json:"context,omitempty"`             // 最小必要上下文
+	RelevantFiles     []string `json:"relevant_files,omitempty"`      // 相关文件或目录
+	Constraints       []string `json:"constraints,omitempty"`         // 约束条件
+	Deliverables      []string `json:"deliverables,omitempty"`        // 期望交付物
+	DoneWhen          []string `json:"done_when,omitempty"`           // 完成标准
 }
 
 // SubagentSpawnResult 分身生成结果
 type SubagentSpawnResult struct {
-	Status            string `json:"status"` // accepted, forbidden, error
-	ChildSessionKey   string `json:"child_session_key,omitempty"`
-	RunID             string `json:"run_id,omitempty"`
-	Error             string `json:"error,omitempty"`
-	RunTimeoutSeconds int    `json:"run_timeout_seconds,omitempty"`
-	Warning           string `json:"warning,omitempty"`
-	ChildSystemPrompt string `json:"child_system_prompt,omitempty"` // 子 Agent 专属 System Prompt
-	Task              string `json:"task,omitempty"`                // 子 Agent 要执行的任务描述
-	BootstrapOwnerID  string `json:"bootstrap_owner_id,omitempty"`  // 子 Agent 继承的主 agent 认知 owner
+	Status              string  `json:"status"` // accepted, forbidden, error
+	ChildSessionKey     string  `json:"child_session_key,omitempty"`
+	RunID               string  `json:"run_id,omitempty"`
+	Error               string  `json:"error,omitempty"`
+	RunTimeoutSeconds   int     `json:"run_timeout_seconds,omitempty"`
+	Model               string  `json:"model,omitempty"`
+	Thinking            string  `json:"thinking,omitempty"`
+	MaxTokens           int     `json:"max_tokens,omitempty"`
+	Temperature         float64 `json:"temperature,omitempty"`
+	TargetAgentID       string  `json:"target_agent_id,omitempty"`
+	Warning             string  `json:"warning,omitempty"`
+	ChildSystemPrompt   string  `json:"child_system_prompt,omitempty"` // 子 Agent 专属 System Prompt
+	Task                string  `json:"task,omitempty"`                // 子 Agent 要执行的任务描述
+	BootstrapOwnerID    string  `json:"bootstrap_owner_id,omitempty"`  // 子 Agent 继承的主 agent 认知 owner
+	ParentLoopIteration int     `json:"parent_loop_iteration,omitempty"`
 }
 
 // SubagentRegistryInterface 分身注册表接口
@@ -229,23 +266,31 @@ func (t *SubagentSpawnTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"task": map[string]interface{}{
 				"type":        "string",
-				"description": "The task description for the sub-agent to complete.",
+				"description": "One-sentence current step goal for the sub-agent. Keep it to the current delegated step only.",
 			},
 			"label": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional label for the sub-agent run.",
+				"description": "Optional short step label, such as read-code, implement-api, run-tests, fix-regression.",
 			},
 			"agent_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional target agent ID to spawn the sub-agent under.",
+				"description": "Optional target agent ID. When this agent has a spawnable catalog, set this explicitly.",
 			},
 			"model": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional model override for the sub-agent.",
+				"description": "Optional per-run model override for the sub-agent.",
 			},
 			"thinking": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional thinking level override (low, medium, high).",
+				"description": "Optional thinking level override (off, minimal, low, medium, high, xhigh).",
+			},
+			"max_tokens": map[string]interface{}{
+				"type":        "integer",
+				"description": "Optional max output tokens override for the sub-agent run.",
+			},
+			"temperature": map[string]interface{}{
+				"type":        "number",
+				"description": "Optional temperature override for the sub-agent run.",
 			},
 			"run_timeout_seconds": map[string]interface{}{
 				"type":        "integer",
@@ -255,6 +300,38 @@ func (t *SubagentSpawnTool) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "Cleanup strategy: 'delete' to remove immediately, 'keep' to archive after timeout.",
 				"enum":        []string{"delete", "keep"},
+			},
+			"context": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional minimal context the child needs for this step only. Do not dump the whole project history here.",
+			},
+			"relevant_files": map[string]interface{}{
+				"type":        "array",
+				"description": "Optional shortlist of relevant files or directories for this step.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"constraints": map[string]interface{}{
+				"type":        "array",
+				"description": "Optional non-negotiable boundaries or constraints for this step.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"deliverables": map[string]interface{}{
+				"type":        "array",
+				"description": "Optional required outputs for this step, such as files changed, commands run, or facts to return.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"done_when": map[string]interface{}{
+				"type":        "array",
+				"description": "Optional concrete completion criteria for this step.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
 			},
 		},
 		"required": []string{"task"},
@@ -286,6 +363,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	if spawnParams.Cleanup != "delete" && spawnParams.Cleanup != "keep" {
 		spawnParams.Cleanup = "keep"
 	}
+	delegatedTask := buildDelegatedTask(spawnParams)
 
 	// Get requester session info from context
 	requesterSessionKey := "main" // default
@@ -321,7 +399,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		zap.String("bootstrap_owner_id", bootstrapOwnerID),
 		zap.String("requester_session_key", requesterSessionKey),
 		zap.String("target_agent_id_param", spawnParams.AgentID),
-		zap.String("task_preview", normalizeText(spawnParams.Task)))
+		zap.String("task_preview", normalizeText(delegatedTask)))
 
 	// 确定目标 Agent ID
 	targetAgentID := requesterAgentID
@@ -368,7 +446,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	}
 
 	// 生成子会话密钥
-	childSessionKey := GenerateChildSessionKey(targetAgentID)
+	childSessionKey := GenerateChildSessionKey(ctx, targetAgentID)
 
 	// 生成运行 ID
 	runID := GenerateRunID()
@@ -379,7 +457,9 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		RequesterOrigin:     requesterOrigin,
 		ChildSessionKey:     childSessionKey,
 		Label:               spawnParams.Label,
-		Task:                spawnParams.Task,
+		Task:                delegatedTask,
+		TargetAgentID:       targetAgentID,
+		AllowSubagentSpawn:  t.canTargetAgentSpawn(targetAgentID),
 	})
 
 	// 获取归档时间
@@ -399,7 +479,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		RequesterSessionKey: requesterSessionKey,
 		RequesterOrigin:     requesterOrigin,
 		RequesterDisplayKey: requesterSessionKey,
-		Task:                spawnParams.Task,
+		Task:                delegatedTask,
 		Cleanup:             spawnParams.Cleanup,
 		Label:               spawnParams.Label,
 		ArchiveAfterMinutes: archiveAfterMinutes,
@@ -412,15 +492,32 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	}
 
 	// 调用生成回调，传递完整的子 Agent 启动参数（含 System Prompt 和 Task）
+	parentLoopIteration := 0
+	if raw := ctx.Value("loop_iteration"); raw != nil {
+		switch value := raw.(type) {
+		case int:
+			parentLoopIteration = value
+		case int64:
+			parentLoopIteration = int(value)
+		case float64:
+			parentLoopIteration = int(value)
+		}
+	}
 	if t.onSpawn != nil {
 		spawnResult := &SubagentSpawnResult{
-			Status:            "accepted",
-			ChildSessionKey:   childSessionKey,
-			RunID:             runID,
-			RunTimeoutSeconds: spawnParams.RunTimeoutSeconds,
-			ChildSystemPrompt: childSystemPrompt,
-			Task:              spawnParams.Task,
-			BootstrapOwnerID:  bootstrapOwnerID,
+			Status:              "accepted",
+			ChildSessionKey:     childSessionKey,
+			RunID:               runID,
+			RunTimeoutSeconds:   spawnParams.RunTimeoutSeconds,
+			Model:               spawnParams.Model,
+			Thinking:            spawnParams.Thinking,
+			MaxTokens:           spawnParams.MaxTokens,
+			Temperature:         spawnParams.Temperature,
+			TargetAgentID:       targetAgentID,
+			ChildSystemPrompt:   childSystemPrompt,
+			Task:                delegatedTask,
+			BootstrapOwnerID:    bootstrapOwnerID,
+			ParentLoopIteration: parentLoopIteration,
 		}
 		if err := t.onSpawn(spawnResult); err != nil {
 			logger.Error("Failed to handle subagent spawn",
@@ -432,17 +529,24 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 
 	// 构建结果
 	result := &SubagentSpawnResult{
-		Status:            "accepted",
-		ChildSessionKey:   childSessionKey,
-		RunID:             runID,
-		RunTimeoutSeconds: spawnParams.RunTimeoutSeconds,
-		ChildSystemPrompt: childSystemPrompt,
-		BootstrapOwnerID:  bootstrapOwnerID,
+		Status:              "accepted",
+		ChildSessionKey:     childSessionKey,
+		RunID:               runID,
+		RunTimeoutSeconds:   spawnParams.RunTimeoutSeconds,
+		Model:               spawnParams.Model,
+		Thinking:            spawnParams.Thinking,
+		MaxTokens:           spawnParams.MaxTokens,
+		Temperature:         spawnParams.Temperature,
+		TargetAgentID:       targetAgentID,
+		ChildSystemPrompt:   childSystemPrompt,
+		Task:                delegatedTask,
+		BootstrapOwnerID:    bootstrapOwnerID,
+		ParentLoopIteration: parentLoopIteration,
 	}
 
 	logger.Debug("Subagent spawned",
 		zap.String("run_id", runID),
-		zap.String("task", spawnParams.Task),
+		zap.String("task", delegatedTask),
 		zap.String("child_session_key", childSessionKey),
 		zap.String("target_agent_id", targetAgentID))
 
@@ -490,6 +594,26 @@ func (t *SubagentSpawnTool) parseParams(params map[string]interface{}) (*Subagen
 		}
 	}
 
+	// 解析 max_tokens
+	if val, ok := params["max_tokens"]; ok {
+		switch v := val.(type) {
+		case float64:
+			result.MaxTokens = int(v)
+		case int:
+			result.MaxTokens = v
+		}
+	}
+
+	// 解析 temperature
+	if val, ok := params["temperature"]; ok {
+		switch v := val.(type) {
+		case float64:
+			result.Temperature = v
+		case int:
+			result.Temperature = float64(v)
+		}
+	}
+
 	// 解析 run_timeout_seconds
 	if val, ok := params["run_timeout_seconds"]; ok {
 		switch v := val.(type) {
@@ -507,6 +631,18 @@ func (t *SubagentSpawnTool) parseParams(params map[string]interface{}) (*Subagen
 		}
 	}
 
+	// 解析 context
+	if val, ok := params["context"]; ok {
+		if str, ok := val.(string); ok {
+			result.Context = str
+		}
+	}
+
+	result.RelevantFiles = parseStringSlice(params["relevant_files"])
+	result.Constraints = parseStringSlice(params["constraints"])
+	result.Deliverables = parseStringSlice(params["deliverables"])
+	result.DoneWhen = parseStringSlice(params["done_when"])
+
 	return result, nil
 }
 
@@ -515,8 +651,12 @@ func (t *SubagentSpawnTool) marshalResult(result *SubagentSpawnResult) string {
 	// 简化输出
 	switch result.Status {
 	case "accepted":
-		return fmt.Sprintf("Subagent spawned successfully. Run ID: %s, Session: %s",
-			result.RunID, result.ChildSessionKey)
+		target := result.TargetAgentID
+		if strings.TrimSpace(target) == "" {
+			target = "(current agent)"
+		}
+		return fmt.Sprintf("Subagent spawned successfully. Agent: %s. Run ID: %s, Session: %s",
+			target, result.RunID, result.ChildSessionKey)
 	case "forbidden":
 		return fmt.Sprintf("Forbidden: %s", result.Error)
 	case "error":
@@ -570,4 +710,123 @@ func (t *SubagentSpawnTool) requiresExplicitAgentID(requesterID string) bool {
 	}
 
 	return len(agentCfg.Subagents.AllowAgents) > 0
+}
+
+func (t *SubagentSpawnTool) canTargetAgentSpawn(agentID string) bool {
+	if t.getAgentConfig == nil {
+		return false
+	}
+
+	agentCfg := t.getAgentConfig(agentID)
+	if agentCfg == nil {
+		return false
+	}
+
+	if agentCfg.Subagents == nil {
+		return true
+	}
+
+	if len(agentCfg.Subagents.AllowTools) > 0 {
+		for _, tool := range agentCfg.Subagents.AllowTools {
+			if strings.EqualFold(strings.TrimSpace(tool), "sessions_spawn") {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tool := range agentCfg.Subagents.DenyTools {
+		if strings.EqualFold(strings.TrimSpace(tool), "sessions_spawn") {
+			return false
+		}
+	}
+
+	return true
+}
+
+func buildDelegatedTask(params *SubagentSpawnToolParams) string {
+	if params == nil {
+		return ""
+	}
+
+	baseTask := strings.TrimSpace(params.Task)
+	if !hasStructuredDelegationFields(params) {
+		return baseTask
+	}
+
+	sections := make([]string, 0, 6)
+	if baseTask != "" {
+		sections = append(sections, "## 当前步骤目标\n"+baseTask)
+	}
+	if ctx := strings.TrimSpace(params.Context); ctx != "" {
+		sections = append(sections, "## 必要上下文\n"+ctx)
+	}
+	if files := formatBulletList(params.RelevantFiles); files != "" {
+		sections = append(sections, "## 相关文件\n"+files)
+	}
+	if constraints := formatBulletList(params.Constraints); constraints != "" {
+		sections = append(sections, "## 约束条件\n"+constraints)
+	}
+	if deliverables := formatBulletList(params.Deliverables); deliverables != "" {
+		sections = append(sections, "## 期望产出\n"+deliverables)
+	}
+	if doneWhen := formatBulletList(params.DoneWhen); doneWhen != "" {
+		sections = append(sections, "## 完成标准\n"+doneWhen)
+	}
+
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
+func hasStructuredDelegationFields(params *SubagentSpawnToolParams) bool {
+	if params == nil {
+		return false
+	}
+	return strings.TrimSpace(params.Context) != "" ||
+		len(params.RelevantFiles) > 0 ||
+		len(params.Constraints) > 0 ||
+		len(params.Deliverables) > 0 ||
+		len(params.DoneWhen) > 0
+}
+
+func parseStringSlice(raw interface{}) []string {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case []string:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if str, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(str); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return out
+	case string:
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return nil
+}
+
+func formatBulletList(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			lines = append(lines, "- "+trimmed)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
