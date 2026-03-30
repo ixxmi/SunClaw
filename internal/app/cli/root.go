@@ -311,6 +311,12 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 
 	// 注册浏览器工具（如果启用）
+
+	// 注册 Sandbox 工具
+	if err := toolRegistry.RegisterExisting(tools.NewSandboxToolWithConfig(cfg.Tools.Shell.Sandbox, cfg.Approvals)); err != nil {
+		logger.Warn("Failed to register tool", zap.String("tool", "sandbox_execute"), zap.Error(err))
+	}
+
 	if cfg.Tools.Browser.Enabled {
 		browserTool := tools.NewBrowserTool(
 			cfg.Tools.Browser.Headless,

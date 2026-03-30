@@ -173,6 +173,12 @@ func runAgent(cmd *cobra.Command, args []string) {
 	}
 
 	// Register browser tool if enabled
+
+	// Register sandbox tool
+	if err := toolRegistry.RegisterExisting(tools.NewSandboxToolWithConfig(cfg.Tools.Shell.Sandbox, cfg.Approvals)); err != nil && agentVerbose {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to register tool sandbox_execute: %v\n", err)
+	}
+
 	if cfg.Tools.Browser.Enabled {
 		browserTool := tools.NewBrowserTool(
 			cfg.Tools.Browser.Headless,

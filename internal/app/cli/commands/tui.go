@@ -45,6 +45,8 @@ func NewTUIAgent(
 	workspace string,
 	maxIterations int,
 	skillsLoader *agent.SkillsLoader,
+	sandboxConfig config.SandboxConfig,
+	approvals config.ApprovalsConfig,
 ) (*TUIAgent, error) {
 	toolRegistry := agent.NewToolRegistry()
 
@@ -69,6 +71,9 @@ func NewTUIAgent(
 	for _, tool := range shellTool.GetTools() {
 		_ = toolRegistry.RegisterExisting(tool)
 	}
+
+	// Register sandbox tool
+	_ = toolRegistry.RegisterExisting(tools.NewSandboxToolWithConfig(sandboxConfig, approvals))
 
 	// Register web tool
 	webTool := tools.NewWebTool("", "", 30)
@@ -269,7 +274,7 @@ func runTUI(cmd *cobra.Command, args []string) {
 		maxIterations = 15
 	}
 
-	tuiAgent, err := NewTUIAgent(messageBus, sessionMgr, provider, contextBuilder, workspace, maxIterations, skillsLoader)
+	tuiAgent, err := NewTUIAgent(messageBus, sessionMgr, provider, contextBuilder, workspace, maxIterations, skillsLoader, cfg.Tools.Shell.Sandbox, cfg.Approvals)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create TUI agent: %v\n", err)
 		os.Exit(1)

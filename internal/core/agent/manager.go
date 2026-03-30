@@ -848,39 +848,37 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 
 	// 创建 Agent
 	agent, err := NewAgent(&NewAgentConfig{
-		AgentID:            cfg.ID,
-		Model:              model,
-		Bus:                m.bus,
-		Provider:           agentProvider,
-		SessionMgr:         m.sessionMgr,
-		Tools:              m.tools,
-		Context:            agentContextBuilder,
-		Workspace:          agentWorkspace,
-		MaxIteration:       maxIterations,
-		MaxHistoryMessages: maxHistoryMessages,
-		MaxTokens:          globalCfg.Agents.Defaults.MaxTokens,
-		Temperature:        globalCfg.Agents.Defaults.Temperature,
-		ContextWindow:      guessContextWindow(model),
-		SkillsLoader:       m.skillsLoader,
-		ShrimpBrain:        m.shrimpBrain,
-		SkillsEnabled:      cfg.SkillsEnabled,
+		AgentID:             cfg.ID,
+		Model:               model,
+		Bus:                 m.bus,
+		Provider:            agentProvider,
+		SessionMgr:          m.sessionMgr,
+		Tools:               m.tools,
+		Context:             agentContextBuilder,
+		Workspace:           agentWorkspace,
+		MaxIteration:        maxIterations,
+		MaxHistoryMessages:  maxHistoryMessages,
+		MaxTokens:           globalCfg.Agents.Defaults.MaxTokens,
+		Temperature:         globalCfg.Agents.Defaults.Temperature,
+		ContextWindow:       guessContextWindow(model),
+		SkillsLoader:        m.skillsLoader,
+		ShrimpBrain:         m.shrimpBrain,
+		DisableSkillsPrompt: cfg.DisableSkillsPrompt,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create agent %s: %w", cfg.ID, err)
 	}
 
-	// 设置第 4 层 agent core 优先级：
-	// 1. 配置文件中配置了 system_prompt → 直接使用
-	// 2. 未配置 → 保留 NewAgent 已构建的系统通用认知
+	// 设置第 4 层 agent core：
+	// 仅在配置文件中显式配置了 system_prompt 时才注入。
 	if cfg.SystemPrompt != "" {
 		agent.SetSystemPrompt(cfg.SystemPrompt)
 		logger.Info("Agent using config system_prompt as agent core",
 			zap.String("agent_id", cfg.ID),
 			zap.Int("prompt_len", len(cfg.SystemPrompt)))
 	} else {
-		logger.Info("Agent using built-in generic core as agent core",
-			zap.String("agent_id", cfg.ID),
-			zap.Int("prompt_len", len(agent.GetSystemPrompt())))
+		logger.Info("Agent has no custom system_prompt configured",
+			zap.String("agent_id", cfg.ID))
 	}
 
 	// 存储到管理器
@@ -2220,11 +2218,7 @@ func (m *AgentManager) applyAgentRuntimeConfig(cfg *config.Config) {
 			continue
 		}
 
-		if strings.TrimSpace(agentCfg.SystemPrompt) != "" {
-			agent.SetSystemPrompt(agentCfg.SystemPrompt)
-		} else {
-			agent.SetSystemPrompt(agent.context.buildBuiltinGenericCore(PromptModeFull))
-		}
+		agent.SetSystemPrompt(strings.TrimSpace(agentCfg.SystemPrompt))
 
 		var filtered []Tool
 		if agentCfg.Subagents != nil && len(agentCfg.Subagents.AllowTools) > 0 {

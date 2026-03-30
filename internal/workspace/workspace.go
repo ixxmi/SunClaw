@@ -21,8 +21,6 @@ var BootstrapFiles = []string{
 	"IDENTITY.md",
 	"USER.md",
 	"TOOLS.md",
-	"HEARTBEAT.md",
-	"BOOT.md",
 	"BOOTSTRAP.md",
 }
 
@@ -93,44 +91,12 @@ func (m *Manager) Ensure() error {
 // InstallTemplates 显式安装缺失的 workspace 模板文件。
 // 仅在用户明确要求安装模板时调用。
 func (m *Manager) InstallTemplates() error {
-	if err := os.MkdirAll(m.workspaceDir, 0755); err != nil {
-		return fmt.Errorf("failed to create workspace directory: %w", err)
-	}
-
-	for _, filename := range BootstrapFiles {
-		if err := m.ensureFile(filename); err != nil {
-			return fmt.Errorf("failed to ensure %s: %w", filename, err)
-		}
-	}
-
-	return nil
+	return installMissingTemplates(m.workspaceDir, BootstrapFiles)
 }
 
 // ensureFile 确保单个文件存在，不存在则从模板复制
 func (m *Manager) ensureFile(filename string) error {
-	targetPath := filepath.Join(m.workspaceDir, filename)
-
-	// 检查文件是否已存在
-	if _, err := os.Stat(targetPath); err == nil {
-		// 文件存在，不需要处理
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	// 从模板读取
-	templatePath := filepath.Join("templates", filename)
-	content, err := templatesFS.ReadFile(templatePath)
-	if err != nil {
-		return fmt.Errorf("failed to read template %s: %w", filename, err)
-	}
-
-	// 写入目标文件
-	if err := os.WriteFile(targetPath, content, 0644); err != nil {
-		return fmt.Errorf("failed to write %s: %w", filename, err)
-	}
-
-	return nil
+	return ensureTemplateFile(m.workspaceDir, filename)
 }
 
 // createTodayLog 创建今日日志文件
@@ -258,6 +224,9 @@ func EnsureAgentBootstrapDir(baseWorkspaceDir, agentID string) (string, error) {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create agent bootstrap dir: %w", err)
 	}
+	if err := installMissingTemplates(targetDir, CognitiveFiles); err != nil {
+		return "", fmt.Errorf("failed to install agent bootstrap templates: %w", err)
+	}
 
 	return targetDir, nil
 }
@@ -302,6 +271,14 @@ func CopyFromFS(targetDir string) error {
 			return err
 		}
 
+		// 已存在的文件不覆盖，避免覆盖用户已初始化/已修改的内容。
+		targetPath := filepath.Join(targetDir, relPath)
+		if _, err := os.Stat(targetPath); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+
 		// 读取模板内容
 		content, err := templatesFS.ReadFile(path)
 		if err != nil {
@@ -309,13 +286,53 @@ func CopyFromFS(targetDir string) error {
 		}
 
 		// 写入目标文件
-		targetPath := filepath.Join(targetDir, relPath)
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return fmt.Errorf("failed to create parent dir for %s: %w", relPath, err)
+		}
 		if err := os.WriteFile(targetPath, content, 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", relPath, err)
 		}
 
 		return nil
 	})
+}
+
+func installMissingTemplates(targetDir string, filenames []string) error {
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	for _, filename := range filenames {
+		if err := ensureTemplateFile(targetDir, filename); err != nil {
+			return fmt.Errorf("failed to ensure %s: %w", filename, err)
+		}
+	}
+
+	return nil
+}
+
+func ensureTemplateFile(targetDir, filename string) error {
+	targetPath := filepath.Join(targetDir, filename)
+
+	if _, err := os.Stat(targetPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	content, err := templatesFS.ReadFile(filepath.Join("templates", filename))
+	if err != nil {
+		return fmt.Errorf("failed to read template %s: %w", filename, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent dir for %s: %w", filename, err)
+	}
+	if err := os.WriteFile(targetPath, content, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", filename, err)
+	}
+
+	return nil
 }
 
 // ReadEmbeddedTemplate 读取内置模板文件内容。

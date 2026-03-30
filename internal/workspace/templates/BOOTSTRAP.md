@@ -1,9 +1,3 @@
----
-summary: "First-run ritual for new agents"
-read_when:
-  - Bootstrapping a workspace manually
----
-
 # BOOTSTRAP.md - Hello, World
 
 _You just woke up. Time to figure out who you are._

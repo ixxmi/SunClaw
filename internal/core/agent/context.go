@@ -78,6 +78,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		"write_file":             "创建或覆盖文件（按需创建目录）",
 		"list_files":             "列出目录内容（-r 递归）",
 		"run_shell":              "执行 shell 命令。禁止使用 crontab，定时任务必须用 cron 工具",
+		"sandbox_execute":        "执行短小的内联代码片段或命令，并先判断是否需要沙箱；不要把它当作通用 shell，常规工作区命令优先用 run_shell",
 		"process":                "管理后台 shell 会话（poll/kill/list）",
 		"web_search":             "通过 API 搜索网页",
 		"web_fetch":              "抓取 URL 并提取可读内容",
@@ -153,6 +154,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"write_file":             "Create or overwrite files (creates directories as needed)",
 		"list_files":             "List directory contents (recursive with -r)",
 		"run_shell":              "Run shell commands. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead (this is the ONLY way to manage scheduled tasks in goclaw)",
+		"sandbox_execute":        "Run short inline code snippets or commands with sandbox-aware execution. Do not use this as a general shell replacement; ordinary workspace commands should use run_shell",
 		"process":                "Manage background shell sessions (poll, kill, list)",
 		"web_search":             "Search the web using API (Brave/Search APIs)",
 		"web_fetch":              "Fetch and extract readable content from a URL",
@@ -170,7 +172,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 
 	toolOrder := []string{
 		"read_file", "write_file", "list_files",
-		"run_shell", "process",
+		"run_shell", "sandbox_execute", "process",
 		"browser_navigate", "browser_screenshot", "browser_get_text",
 		"browser_click", "browser_fill_input", "browser_execute_script",
 		"web_search", "web_fetch",
@@ -722,7 +724,15 @@ func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, ses
 func (b *ContextBuilder) resolveBootstrapStore(ownerID, workspaceRoot string) *MemoryStore {
 	if strings.TrimSpace(workspaceRoot) != "" {
 		if strings.TrimSpace(ownerID) != "" {
-			return NewMemoryStore(workspace.AgentBootstrapDir(workspaceRoot, ownerID))
+			dir, err := workspace.EnsureAgentBootstrapDir(workspaceRoot, ownerID)
+			if err != nil {
+				logger.Warn("Failed to ensure agent bootstrap dir; falling back to computed path",
+					zap.String("workspace_root", strings.TrimSpace(workspaceRoot)),
+					zap.String("owner_id", strings.TrimSpace(ownerID)),
+					zap.Error(err))
+				dir = workspace.AgentBootstrapDir(workspaceRoot, ownerID)
+			}
+			return NewMemoryStore(dir)
 		}
 		return NewMemoryStore(workspaceRoot)
 	}
@@ -747,14 +757,16 @@ func (b *ContextBuilder) defaultBootstrapStore(workspaceRoot string) *MemoryStor
 func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 	bundle := b.loadBootstrapBundleForOwner(ownerID, "")
 	parts := []string{
-		wrapPromptFileLayer("", "IDENTITY.md", effectiveCognitionContent(bundle.Identity, bundle.IdentityEffective)),
-		wrapPromptFileLayer("", "AGENTS.md", effectiveCognitionContent(bundle.Agents, bundle.AgentsEffective)),
-		wrapPromptFileLayer("", "SOUL.md", effectiveCognitionContent(bundle.Soul, bundle.SoulEffective)),
-		wrapPromptFileLayer("", "USER.md", effectiveCognitionContent(bundle.User, bundle.UserEffective)),
+		wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
 	}
 	if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
 		parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
 	}
+	parts = append(parts,
+		wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
+		wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+		wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
+	)
 	bootstrap := joinNonEmpty(parts, "\n\n")
 	if bootstrap != "" {
 		return "## Workspace Files (injected)\n\n" + bootstrap

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/smallnest/goclaw/internal/core/providers"
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
 type promptCaptureProvider struct {
@@ -140,6 +141,13 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	})
 	provider := &promptCaptureProvider{}
 
+	agentsTemplate, err := workspacepkg.ReadEmbeddedTemplate("AGENTS.md")
+	if err != nil {
+		t.Fatalf("read AGENTS template: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bootstrapDir, "AGENTS.md"), []byte(agentsTemplate), 0644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(bootstrapDir, "SOUL.md"), []byte("# Soul\n\nvibecoding bootstrap soul"), 0644); err != nil {
 		t.Fatalf("write SOUL.md: %v", err)
 	}
@@ -170,15 +178,21 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	if !strings.Contains(systemPrompt, "## Soul") {
 		t.Fatalf("expected soul layer in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "### BOOTSTRAP.md") {
+		t.Fatalf("expected BOOTSTRAP.md marker in system prompt, got %q", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "### SOUL.md") {
 		t.Fatalf("expected SOUL.md marker in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "vibecoding bootstrap soul") {
 		t.Fatalf("expected bootstrap content in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "### AGENTS.md") {
+		t.Fatalf("expected AGENTS.md marker in system prompt, got %q", systemPrompt)
+	}
 }
 
-func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *testing.T) {
+func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.T) {
 	workspaceDir := t.TempDir()
 	ownerBootstrapDir := filepath.Join(t.TempDir(), "agents", "vibecoding", "bootstrap")
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
@@ -189,6 +203,19 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 		return workspaceDir
 	})
 	provider := &promptCaptureProvider{}
+
+	for _, name := range []string{"AGENTS.md", "IDENTITY.md", "SOUL.md", "USER.md"} {
+		content, err := workspacepkg.ReadEmbeddedTemplate(name)
+		if err != nil {
+			t.Fatalf("read %s template: %v", name, err)
+		}
+		if err := os.MkdirAll(ownerBootstrapDir, 0755); err != nil {
+			t.Fatalf("mkdir ownerBootstrapDir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ownerBootstrapDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
 
 	state := NewAgentState()
 	state.SystemPrompt = "你是 SunClaw 的 vibecoding 主编排 Agent。"
@@ -214,14 +241,25 @@ func TestStreamAssistantResponse_AddsBootstrapModeNoticeForGuideOnlyOwner(t *tes
 
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
-		"## Bootstrap Mode",
-		"do not answer with a fixed identity unless that identity has already been explicitly written into `IDENTITY.md`",
+		"### AGENTS.md",
+		"### BOOTSTRAP.md",
+		"### IDENTITY.md",
 		"BOOTSTRAP.md - Hello, World",
 	}
 	for _, want := range checks {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("system prompt missing %q, got %q", want, systemPrompt)
 		}
+	}
+	if strings.Contains(systemPrompt, "## Bootstrap Mode") {
+		t.Fatalf("did not expect legacy bootstrap mode notice, got %q", systemPrompt)
+	}
+
+	agentsIdx := strings.Index(systemPrompt, "### AGENTS.md")
+	bootstrapIdx := strings.Index(systemPrompt, "### BOOTSTRAP.md")
+	identityIdx := strings.Index(systemPrompt, "### IDENTITY.md")
+	if !(agentsIdx < bootstrapIdx && bootstrapIdx < identityIdx) {
+		t.Fatalf("expected AGENTS.md before BOOTSTRAP.md before IDENTITY.md, got %q", systemPrompt)
 	}
 }
 
@@ -277,7 +315,6 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		"## Skills (mandatory)",
 		"## Selected Skills (active)",
 		"## Bootstrap Mode",
-		"## Bootstrap Guide",
 		"BOOTSTRAP.md - Hello, World",
 	} {
 		if strings.Contains(systemPrompt, marker) {

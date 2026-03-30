@@ -9,28 +9,18 @@ import (
 	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
-func TestBuildSystemPromptIncludesHumanCommunicationGuidance(t *testing.T) {
+func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
-	checks := []string{
-		"## Communication Style",
-		"收到，我先帮你看下这个问题。",
-		"我在帮你处理，您稍等一下。",
-		`Do not fake a process with "我先看下" when no real waiting or tool work is needed.`,
-		"Do not fragment a normal answer into many small messages just because you can.",
-		"emotional support, comforting, or soft check-in moments where two short beats feel more human than one polished paragraph",
-		"when the user is sharing feelings or feeling low, default to two short messages instead of one overly complete block",
-		"哎，心情不好的时候真的很难受。",
-		"发生什么事了？想说就说，我听着。",
-		"Prefer 'send_message' when you want deliberate acknowledgement, progress reporting, or exact control over whether the user sees one message or several",
+	if !strings.Contains(prompt, "## Builtin Boundary") {
+		t.Fatalf("expected builtin boundary in prompt, got %q", prompt)
 	}
-
-	for _, want := range checks {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing guidance %q", want)
+	for _, marker := range []string{"## Builtin Generic Core", "## Communication Style", "## Error Handling"} {
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("did not expect builtin generic core marker %q in prompt, got %q", marker, prompt)
 		}
 	}
 }
@@ -47,6 +37,7 @@ func TestBuildSystemPromptListsProgressMessagingTools(t *testing.T) {
 		"- sessions_spawn:",
 		"- memory_search:",
 		"- memory_add:",
+		"- sandbox_execute:",
 	}
 
 	for _, want := range checks {

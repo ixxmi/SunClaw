@@ -106,10 +106,10 @@ type AgentConfig struct {
 	SystemPrompt string                 `mapstructure:"system_prompt" json:"system_prompt"` // 系统提示词
 	Metadata     map[string]interface{} `mapstructure:"metadata" json:"metadata"`           // 额外元数据
 	Subagents    *AgentSubagentConfig   `mapstructure:"subagents" json:"subagents"`         // 分身配置
-	// SkillsEnabled 控制主 agent 提示词拼接时是否加载技能。
-	// 默认（未配置或 nil）为 true，即拼接技能；显式设置为 false 时关闭技能拼接。
+	// DisableSkillsPrompt 控制主 agent 是否跳过技能拼接。
+	// 仅当显式配置为 true 时跳过技能拼接；未配置或配置为 false 时仍会加载技能。
 	// 子 agent 任何情况下都不拼接技能。
-	SkillsEnabled *bool `mapstructure:"skills_enabled" json:"skills_enabled"`
+	DisableSkillsPrompt *bool `mapstructure:"disable_skills_prompt" json:"disable_skills_prompt"`
 }
 
 // AgentIdentity Agent 身份配置

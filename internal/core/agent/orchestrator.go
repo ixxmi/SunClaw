@@ -566,7 +566,7 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 			SubagentDescriptor:    state.SubagentDescriptor,
 			Skills:                o.config.Skills,
 			LoadedSkills:          state.LoadedSkills,
-			SkillsEnabled:         state.SkillsEnabled,
+			DisableSkillsPrompt:   state.DisableSkillsPrompt,
 			SessionSummary:        state.ContextSummary,
 			Tools:                 state.Tools,
 		})

@@ -1,29 +1,34 @@
----
-summary: "Workspace template for TOOLS.md"
-read_when:
-  - Bootstrapping a workspace manually
----
+# TOOLS.md - Local Notes
 
-# TOOLS.md - Local Tool Notes
+Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
 
-Keep local configuration notes here — camera names, SSH details, API keys (never secrets), voice preferences, etc.
+## What Goes Here
 
-This file is for **reference only**. Never store actual secrets or API keys here.
+Things like:
 
-## Example Sections
+- Camera names and locations
+- SSH hosts and aliases
+- Preferred voices for TTS
+- Speaker/room names
+- Device nicknames
+- Anything environment-specific
 
+## Examples
+
+```markdown
 ### Cameras
-- Living room: `camera-living-room.local`
-- Office: `192.168.1.50`
+
+- living-room → Main area, 180° wide angle
+- front-door → Entrance, motion-triggered
 
 ### SSH
-- Server: `user@example.com`
-- Port: `2222`
 
-### Voice
-- Default voice: `eleven_monolingual_v1`
-- Speed: `1.0`
+- home-server → 192.168.1.100, user: admin
 
----
+### TTS
 
-Add your own sections as needed.
+- Preferred voice: "Nova" (warm, slightly British)
+- Default speaker: Kitchen HomePod
+```
+
+Add whatever helps you do your job. This is your cheat sheet.

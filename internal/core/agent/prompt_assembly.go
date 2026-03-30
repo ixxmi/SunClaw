@@ -38,7 +38,7 @@ type PromptAssemblyParams struct {
 	Skills                []*Skill
 	LoadedSkills          []string
 	SkillsOverride        string
-	SkillsEnabled         *bool // nil 表示默认开启（true），false 表示关闭
+	DisableSkillsPrompt   *bool // 仅显式 true 时跳过技能拼接；nil/false 均拼接
 	SessionSummary        string
 	Tools                 []Tool
 	ToolSummary           string
@@ -66,19 +66,14 @@ func (b bootstrapBundle) HasAnyEffectiveCognition() bool {
 	return b.SoulEffective || b.IdentityEffective || b.AgentsEffective || b.UserEffective
 }
 
-func (b bootstrapBundle) HasCompleteEffectiveCognition() bool {
-	return b.SoulEffective && b.IdentityEffective && b.AgentsEffective && b.UserEffective
-}
-
 func (b bootstrapBundle) NeedsBootstrapGuide() bool {
-	return !b.HasCompleteEffectiveCognition()
-}
-
-func effectiveCognitionContent(content string, effective bool) string {
-	if !effective {
-		return ""
+	if strings.TrimSpace(b.Identity) == "" || !b.IdentityEffective {
+		return true
 	}
-	return content
+	if strings.TrimSpace(b.User) == "" || !b.UserEffective {
+		return true
+	}
+	return false
 }
 
 // AssemblePrompt 按分层顺序和回退规则构建最终 system prompt。
@@ -119,54 +114,48 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	includeBootstrapGuide := !isSubagent && bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != ""
 
 	appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
-	appendLayer("soul", 20, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", effectiveCognitionContent(bundle.Soul, bundle.SoulEffective)))
-	appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", effectiveCognitionContent(bundle.Identity, bundle.IdentityEffective)))
-	if includeBootstrapGuide {
-		appendLayer("bootstrap_mode_notice", 35, "BOOTSTRAP.md", b.buildBootstrapModeNotice())
-		appendLayer("bootstrap_guide", 38, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
-	}
-	appendLayer("agent_core", 40, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("subagent_descriptor", 50, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
-		appendLayer("subagent_spawnable_catalog", 55, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
+		appendLayer("identity", 20, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
+		appendLayer("soul", 30, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", strings.TrimSpace(bundle.Soul)))
+		appendLayer("user", 40, "USER.md", wrapPromptFileLayer("## User Context", "USER.md", strings.TrimSpace(bundle.User)))
+		appendLayer("agent_core", 50, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("subagent_descriptor", 60, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
+		appendLayer("subagent_spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
 	default:
-		collaboration := joinNonEmpty([]string{
-			wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", effectiveCognitionContent(bundle.Agents, bundle.AgentsEffective)),
-			strings.TrimSpace(params.SpawnableAgentCatalog),
-		}, "\n\n---\n\n")
-		appendLayer("collaboration", 50, "AGENTS.md+dynamic_catalog", collaboration)
+		appendLayer("agents", 20, "AGENTS.md", wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", strings.TrimSpace(bundle.Agents)))
+		if includeBootstrapGuide {
+			appendLayer("bootstrap_guide", 25, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
+		}
+		appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
+		appendLayer("soul", 40, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", strings.TrimSpace(bundle.Soul)))
+		appendLayer("user", 50, "USER.md", wrapPromptFileLayer("## User Context", "USER.md", strings.TrimSpace(bundle.User)))
+		appendLayer("agent_core", 60, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
 	}
 
 	skillsLayer := ""
-	// 子 agent 任何情况下都不拼接技能
-	// 主 agent 根据 SkillsEnabled 配置决定是否拼接（nil 或 true 时拼接，false 时不拼接）
+	// 子 agent 任何情况下都不拼接技能。
+	// 主 agent 只有在 DisableSkillsPrompt 被显式设置为 true 时才跳过技能拼接；
+	// nil 或 false 都保持默认行为，继续拼接技能上下文。
 	if !isSubagent {
-		shouldLoadSkills := true // 默认开启
-		if params.SkillsEnabled != nil && !*params.SkillsEnabled {
-			shouldLoadSkills = false
-		}
-		if shouldLoadSkills {
+		skipSkills := params.DisableSkillsPrompt != nil && *params.DisableSkillsPrompt
+		if !skipSkills {
 			skillsLayer = strings.TrimSpace(params.SkillsOverride)
 			if skillsLayer == "" {
 				skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
 			}
 		}
 	}
-	appendLayer("skills", 60, "runtime_skills", skillsLayer)
+	appendLayer("skills", 70, "runtime_skills", skillsLayer)
 	toolSummary := strings.TrimSpace(params.ToolSummary)
 	if toolSummary == "" {
 		toolSummary = b.BuildToolsSummary(params.Tools)
 	}
-	appendLayer("tools", 70, "runtime_tools", toolSummary)
-	appendLayer("context_summary", 75, "session_summary", b.buildContextSummary(params.SessionSummary))
-
-	contextParts := []string{
-		wrapPromptFileLayer("## User Context", "USER.md", effectiveCognitionContent(bundle.User, bundle.UserEffective)),
-		b.buildRuntimeContext(mode, params.WorkspaceRoot),
-	}
-	appendLayer("context", 80, "runtime_context", joinNonEmpty(contextParts, "\n\n---\n\n"))
+	appendLayer("tools", 80, "runtime_tools", toolSummary)
+	appendLayer("context_summary", 85, "session_summary", b.buildContextSummary(params.SessionSummary))
+	appendLayer("runtime_context", 90, "runtime_context", b.buildRuntimeContext(mode, params.WorkspaceRoot))
 
 	result := &PromptAssemblyResult{
 		SystemPrompt: renderPromptLayers(layers),
@@ -228,19 +217,16 @@ func resolveAgentCoreSource(agentCorePrompt string) string {
 	if strings.TrimSpace(agentCorePrompt) != "" {
 		return "agent_custom_prompt"
 	}
-	return "builtin_generic_core"
+	return "agent_core_empty"
 }
 
 func (b *ContextBuilder) resolveAgentCorePrompt(agentCorePrompt string, mode PromptMode) string {
-	if strings.TrimSpace(agentCorePrompt) != "" {
-		return strings.TrimSpace(agentCorePrompt)
-	}
-	return b.buildBuiltinGenericCore(mode)
+	return strings.TrimSpace(agentCorePrompt)
 }
 
 func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 	if mode == PromptModeNone {
-		return "You are a personal assistant running inside GoClaw."
+		return "You are a personal assistant running inside SunClaw."
 	}
 
 	return joinNonEmpty([]string{
@@ -314,7 +300,8 @@ func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot stri
 func (b *ContextBuilder) buildBootstrapModeNotice() string {
 	return `## Bootstrap Mode
 
-One or more agent-specific cognitive files are still missing, empty, or left as template content (` + "`IDENTITY.md`" + `, ` + "`AGENTS.md`" + `, ` + "`SOUL.md`" + `, ` + "`USER.md`" + `).
+One or more required agent-specific cognitive files are still missing, empty, or left as template content (` + "`IDENTITY.md`" + `, ` + "`USER.md`" + `).
+` + "`SOUL.md`" + ` and ` + "`AGENTS.md`" + ` may still use template content without blocking bootstrap completion.
 
 Treat ` + "`BOOTSTRAP.md`" + ` below as the temporary guide for establishing identity and cognition.
 Any fixed identity or role wording elsewhere in this system prompt is only temporary operational behavior, not the final self-identity.

@@ -37,23 +37,23 @@ type Agent struct {
 
 // NewAgentConfig configures the agent
 type NewAgentConfig struct {
-	AgentID            string // Agent 唯一 ID
-	Model              string
-	Bus                *bus.MessageBus
-	Provider           providers.Provider
-	SessionMgr         *session.Manager
-	Tools              *ToolRegistry
-	Context            *ContextBuilder
-	Workspace          string
-	MaxIteration       int
-	MaxHistoryMessages int           // 最大历史消息数量
-	ToolTimeout        time.Duration // 单个工具执行超时（默认3分钟）
-	MaxTokens          int
-	Temperature        float64
-	ContextWindow      int
-	SkillsLoader       *SkillsLoader
-	ShrimpBrain        *ShrimpBrainTracker
-	SkillsEnabled      *bool // nil 表示默认开启（true），false 表示关闭技能拼接
+	AgentID             string // Agent 唯一 ID
+	Model               string
+	Bus                 *bus.MessageBus
+	Provider            providers.Provider
+	SessionMgr          *session.Manager
+	Tools               *ToolRegistry
+	Context             *ContextBuilder
+	Workspace           string
+	MaxIteration        int
+	MaxHistoryMessages  int           // 最大历史消息数量
+	ToolTimeout         time.Duration // 单个工具执行超时（默认3分钟）
+	MaxTokens           int
+	Temperature         float64
+	ContextWindow       int
+	SkillsLoader        *SkillsLoader
+	ShrimpBrain         *ShrimpBrainTracker
+	DisableSkillsPrompt *bool // 仅显式 true 时跳过技能拼接；nil/false 均拼接
 }
 
 // NewAgent creates a new agent
@@ -72,7 +72,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 	}
 
 	state := NewAgentState()
-	state.SystemPrompt = cfg.Context.buildBuiltinGenericCore(PromptModeFull)
+	state.SystemPrompt = ""
 	state.Model = strings.TrimSpace(cfg.Model)
 	state.Provider = "provider"
 	state.AgentID = cfg.AgentID
@@ -80,7 +80,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 	state.SessionKey = "main"
 	state.Tools = ToAgentTools(cfg.Tools.ListExisting())
 	state.LoadedSkills = []string{} // Initialize with empty loaded skills
-	state.SkillsEnabled = cfg.SkillsEnabled
+	state.DisableSkillsPrompt = cfg.DisableSkillsPrompt
 
 	// Load skills list
 	var skills []*Skill
@@ -598,9 +598,6 @@ func (a *Agent) Reset() {
 	}
 	a.state = NewAgentState()
 	a.state.SystemPrompt = agentCorePrompt
-	if strings.TrimSpace(a.state.SystemPrompt) == "" {
-		a.state.SystemPrompt = a.context.buildBuiltinGenericCore(PromptModeFull)
-	}
 	a.state.Model = strings.TrimSpace(model)
 	a.state.Provider = "provider"
 	a.state.AgentID = agentID
