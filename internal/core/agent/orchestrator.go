@@ -21,6 +21,7 @@ const (
 	SessionKeyContextKey     contextKey = "session_key"
 	AgentIDContextKey        contextKey = "agent_id"
 	BootstrapOwnerContextKey contextKey = "bootstrap_owner_id"
+	SessionSummaryContextKey contextKey = "session_summary"
 )
 
 // toolResultPair is used to pass tool execution results from goroutines
@@ -28,6 +29,12 @@ type toolResultPair struct {
 	result *ToolResult
 	err    error
 }
+
+const (
+	defaultToolResultChars  = 20000
+	readFileToolResultChars = 12000
+	runShellToolResultChars = 12000
+)
 
 // Orchestrator manages the agent execution loop
 // Based on pi-mono's agent-loop.ts design
@@ -66,6 +73,12 @@ func (o *Orchestrator) Run(ctx context.Context, prompts []AgentMessage) ([]Agent
 	newMessages := make([]AgentMessage, len(prompts))
 	copy(newMessages, prompts)
 	currentState := o.state.Clone()
+	if workspaceRoot, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(workspaceRoot) != "" {
+		currentState.WorkspaceRoot = strings.TrimSpace(workspaceRoot)
+	}
+	if summary, ok := ctx.Value(SessionSummaryContextKey).(string); ok && strings.TrimSpace(summary) != "" {
+		currentState.ContextSummary = strings.TrimSpace(summary)
+	}
 	currentState.AddMessages(newMessages)
 
 	// Emit start event
@@ -73,6 +86,8 @@ func (o *Orchestrator) Run(ctx context.Context, prompts []AgentMessage) ([]Agent
 
 	// Main loop
 	finalMessages, err := o.runLoop(ctx, currentState)
+	o.state.ContextSummary = currentState.ContextSummary
+	o.state.CompressionCount = currentState.CompressionCount
 
 	logger.Debug("=== Orchestrator Run End ===",
 		zap.Int("final_messages_count", len(finalMessages)),
@@ -237,6 +252,22 @@ func (o *Orchestrator) runLoop(ctx context.Context, state *AgentState) ([]AgentM
 
 			assistantMsg, err := o.streamAssistantResponse(ctx, state)
 			if err != nil {
+				if errors.Is(err, errContextOverflow) {
+					if compression, ok := o.forceCompression(ctx, state); ok {
+						logger.Warn("Context overflow handled by compression",
+							zap.Int("dropped_messages", compression.DroppedMessages),
+							zap.Int("remaining_messages", compression.RemainingMessages),
+							zap.Int("compression_count", state.CompressionCount))
+						o.emit(NewEvent(EventTurnEnd))
+						continue
+					}
+					assistantMsg = AgentMessage{
+						Role:      RoleAssistant,
+						Content:   []ContentBlock{TextContent{Text: "当前上下文过长，系统已尝试压缩但仍无法继续。请开启新会话，或缩小问题范围后重试。"}},
+						Timestamp: time.Now().UnixMilli(),
+						Metadata:  map[string]any{"stop_reason": "context_overflow"},
+					}
+				}
 				// streamAssistantResponse 在失败时已返回 fallbackMsg（降级提示），
 				// 将其加入消息列表并发布给用户，然后正常退出而非抛出错误。
 				if assistantMsg.Role == RoleAssistant && len(assistantMsg.Content) > 0 {
@@ -263,6 +294,18 @@ func (o *Orchestrator) runLoop(ctx context.Context, state *AgentState) ([]AgentM
 				zap.String("stop_reason", stopReason),
 				zap.Int("tool_calls", len(toolCalls)),
 				zap.Int("content_len", extractContentLength(assistantMsg)))
+
+			if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" {
+				o.config.ShrimpBrain.RecordLoopNode(
+					state.SessionKey,
+					state.AgentID,
+					state.IsSubagent,
+					state.LLMCallCount,
+					stopReason,
+					extractTextContent(assistantMsg),
+					len(toolCalls),
+				)
+			}
 
 			// 9. 处理 stop_reason
 			switch stopReason {
@@ -452,10 +495,10 @@ func isBootstrapGuideModeContent(content string) bool {
 		return false
 	}
 	cognitiveHeaders := []string{
-		"### IDENTITY.md",
-		"### AGENTS.md",
-		"### SOUL.md",
-		"### USER.md",
+		"# Identity",
+		"# Collaboration",
+		"# Soul",
+		"# User Context",
 	}
 	for _, header := range cognitiveHeaders {
 		if strings.Contains(content, header) {
@@ -508,21 +551,29 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	systemPrompt := ""
 	if o.config.ContextBuilder != nil {
 		assemblyMode := PromptAssemblyModeMain
+		promptMode := PromptModeFull
 		if state.IsSubagent {
 			assemblyMode = PromptAssemblyModeSubagent
+			promptMode = PromptModeMinimal
 		}
 		assembled := o.config.ContextBuilder.AssemblePrompt(&PromptAssemblyParams{
 			Mode:                  assemblyMode,
-			PromptMode:            PromptModeFull,
+			PromptMode:            promptMode,
 			AgentCorePrompt:       state.SystemPrompt,
 			BootstrapOwnerID:      state.BootstrapOwnerID,
+			WorkspaceRoot:         state.WorkspaceRoot,
 			SpawnableAgentCatalog: state.SpawnableAgentCatalog,
 			SubagentDescriptor:    state.SubagentDescriptor,
 			Skills:                o.config.Skills,
 			LoadedSkills:          state.LoadedSkills,
+			DisableSkillsPrompt:   state.DisableSkillsPrompt,
+			SessionSummary:        state.ContextSummary,
 			Tools:                 state.Tools,
 		})
 		systemPrompt = assembled.SystemPrompt
+		if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" && strings.TrimSpace(systemPrompt) != "" {
+			o.config.ShrimpBrain.RecordPrompt(state.SessionKey, state.AgentID, state.IsSubagent, systemPrompt, assembled.Layers)
+		}
 		logger.Info("System prompt assembled",
 			zap.Int("prompt_length", len(systemPrompt)),
 			zap.Int("layer_count", len(assembled.Layers)),
@@ -548,9 +599,19 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 		zap.Int("tools_count", len(toolDefs)),
 		zap.Bool("has_loaded_skills", len(state.LoadedSkills) > 0))
 
+	if isOverContextBudget(o.config.ContextWindow, fullMessages, toolDefs, o.config.MaxTokens) {
+		logger.Warn("Context budget exceeded before LLM call",
+			zap.Int("messages_count", len(fullMessages)),
+			zap.Int("tools_count", len(toolDefs)),
+			zap.Int("context_window", o.config.ContextWindow),
+			zap.Int("max_tokens", o.config.MaxTokens))
+		return AgentMessage{}, errContextOverflow
+	}
+
 	// Try streaming if provider supports it
+	chatOptions := o.buildChatOptions(state)
 	if sp, ok := o.config.Provider.(providers.StreamingProvider); ok {
-		msg, err := o.callWithStreaming(ctx, sp, fullMessages, toolDefs)
+		msg, err := o.callWithStreaming(ctx, sp, fullMessages, toolDefs, chatOptions...)
 		if err == nil {
 			return msg, nil
 		}
@@ -565,9 +626,19 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	}
 
 	// Non-streaming（首选或 streaming 降级）
-	response, err := o.config.Provider.Chat(ctx, fullMessages, toolDefs)
+	response, err := o.config.Provider.Chat(ctx, fullMessages, toolDefs, chatOptions...)
 	if err != nil {
-		logger.Error("LLM call failed", zap.Error(err))
+		if isContextOverflowError(err) {
+			return AgentMessage{}, fmt.Errorf("%w: %v", errContextOverflow, err)
+		}
+		logger.Error("LLM call failed",
+			zap.String("agent_id", state.AgentID),
+			zap.Bool("is_subagent", state.IsSubagent),
+			zap.String("bootstrap_owner_id", state.BootstrapOwnerID),
+			zap.Int("messages_count", len(fullMessages)),
+			zap.Int("tools_count", len(toolDefs)),
+			zap.Int("loaded_skills", len(state.LoadedSkills)),
+			zap.Error(err))
 		// 返回一条降级提示而不是空响应，确保用户一定收到回复
 		fallbackMsg := AgentMessage{
 			Role:      RoleAssistant,
@@ -599,7 +670,7 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 var errStreamingFailed = fmt.Errorf("streaming failed with no partial content")
 
 // callWithStreaming calls the LLM with streaming support
-func (o *Orchestrator) callWithStreaming(ctx context.Context, sp providers.StreamingProvider, messages []providers.Message, tools []providers.ToolDefinition) (AgentMessage, error) {
+func (o *Orchestrator) callWithStreaming(ctx context.Context, sp providers.StreamingProvider, messages []providers.Message, tools []providers.ToolDefinition, options ...providers.ChatOption) (AgentMessage, error) {
 	var contentBuilder, thinkingBuilder, finalBuilder strings.Builder
 	var toolCalls []providers.ToolCall
 	var streamErr error
@@ -642,7 +713,7 @@ func (o *Orchestrator) callWithStreaming(ctx context.Context, sp providers.Strea
 				Timestamp: time.Now().UnixMilli(),
 			})
 		}
-	})
+	}, options...)
 
 	// 合并所有错误来源
 	firstErr := err
@@ -707,6 +778,25 @@ func (o *Orchestrator) callWithStreaming(ctx context.Context, sp providers.Strea
 	return assistantMsg, nil
 }
 
+func (o *Orchestrator) buildChatOptions(state *AgentState) []providers.ChatOption {
+	options := make([]providers.ChatOption, 0, 4)
+
+	if strings.TrimSpace(o.config.Model) != "" {
+		options = append(options, providers.WithModel(strings.TrimSpace(o.config.Model)))
+	}
+	if o.config.MaxTokens > 0 {
+		options = append(options, providers.WithMaxTokens(o.config.MaxTokens))
+	}
+	if o.config.Temperature > 0 {
+		options = append(options, providers.WithTemperature(o.config.Temperature))
+	}
+	if state != nil && strings.TrimSpace(state.ThinkingLevel) != "" {
+		options = append(options, providers.WithThinking(strings.TrimSpace(state.ThinkingLevel)))
+	}
+
+	return options
+}
+
 // executeToolCalls executes tool calls with interruption support
 func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCallContent, state *AgentState) ([]AgentMessage, []AgentMessage) {
 	results := make([]AgentMessage, 0, len(toolCalls))
@@ -753,6 +843,8 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 			toolCtx = context.WithValue(toolCtx, "session_key", state.SessionKey)
 			toolCtx = context.WithValue(toolCtx, "agent_id", state.AgentID)
 			toolCtx = context.WithValue(toolCtx, "bootstrap_owner_id", state.BootstrapOwnerID)
+			toolCtx = context.WithValue(toolCtx, "workspace_root", state.WorkspaceRoot)
+			toolCtx = context.WithValue(toolCtx, "loop_iteration", state.LLMCallCount)
 
 			// Add timeout for tool execution (safety net in case tool doesn't handle its own timeout)
 			toolTimeout := o.config.ToolTimeout
@@ -803,6 +895,7 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 		}
 
 		// Log tool execution result
+		result.Content = truncateToolResultBlocks(result.Content, toolResultCharBudget(tc.Name))
 		if err != nil {
 			logger.Error("[❌Tool execution failed]",
 				zap.String("tool_id", tc.ID),
@@ -830,8 +923,30 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 
 		if err != nil {
 			resultMsg.Metadata["error"] = err.Error()
-			// 保留原始 content（可能已有部分结果），追加错误信息
-			resultMsg.Content = []ContentBlock{TextContent{Text: fmt.Sprintf("[Tool Error] %s", err.Error())}}
+			resultMsg.Content = truncateToolResultBlocks([]ContentBlock{
+				TextContent{Text: fmt.Sprintf("[Tool Error] %s", err.Error())},
+			}, toolResultCharBudget(tc.Name))
+		}
+
+		if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" {
+			if tc.Name != "sessions_spawn" || err != nil {
+				o.config.ShrimpBrain.RecordToolCall(
+					state.SessionKey,
+					state.AgentID,
+					state.IsSubagent,
+					state.LLMCallCount,
+					tc.ID,
+					tc.Name,
+					tc.Arguments,
+					extractToolResultContent(resultMsg.Content),
+					func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}(),
+				)
+			}
 		}
 
 		results = append(results, resultMsg)
@@ -857,9 +972,10 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 			}
 		}
 
-		// sessions_spawn 成功：计入待完成子 agent
-		// runLoop 将在 outerCheck 持续等待，直到所有子 agent 结果通过 follow-up 队列返回
-		if tc.Name == "sessions_spawn" && err == nil {
+		// sessions_spawn 只有在真正派发成功时才计入待完成子 agent。
+		// 某些失败路径会返回文本错误但 err=nil；这里必须避免把 pending 计数加错，
+		// 否则 runLoop 会一直等待一个根本不存在的子 agent 结果。
+		if shouldTrackPendingSubagent(tc.Name, result, err) {
 			state.AddPendingSubagent()
 			logger.Info("Subagent spawned, pending count +1",
 				zap.Int64("pending_subagents", atomic.LoadInt64(&state.PendingSubagents)))
@@ -881,6 +997,15 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 	logger.Debug("=== Execute Tool Calls End ===",
 		zap.Int("count", len(results)))
 	return results, nil
+}
+
+func shouldTrackPendingSubagent(toolName string, result ToolResult, err error) bool {
+	if toolName != "sessions_spawn" || err != nil {
+		return false
+	}
+
+	text := strings.TrimSpace(extractToolResultContent(result.Content))
+	return strings.HasPrefix(text, "Subagent spawned successfully.")
 }
 
 // emit sends an event to the event channel (non-blocking)
@@ -1128,4 +1253,59 @@ func truncateString(s string, maxLen int) string {
 		return s[:maxLen-3] + "..."
 	}
 	return s[:maxLen]
+}
+
+func truncateToolResultBlocks(content []ContentBlock, maxChars int) []ContentBlock {
+	if maxChars <= 0 || len(content) == 0 {
+		return content
+	}
+
+	remaining := maxChars
+	truncated := false
+	result := make([]ContentBlock, 0, len(content))
+
+	for _, block := range content {
+		switch b := block.(type) {
+		case TextContent:
+			if remaining <= 0 {
+				truncated = true
+				continue
+			}
+			runes := []rune(b.Text)
+			if len(runes) > remaining {
+				runes = runes[:remaining]
+				truncated = true
+			}
+			text := string(runes)
+			result = append(result, TextContent{Text: text})
+			remaining -= len(runes)
+		default:
+			result = append(result, block)
+		}
+	}
+
+	if truncated {
+		note := fmt.Sprintf("\n\n... (tool output truncated to %d characters to protect context window)", maxChars)
+		if len(result) > 0 {
+			if text, ok := result[len(result)-1].(TextContent); ok {
+				text.Text += note
+				result[len(result)-1] = text
+				return result
+			}
+		}
+		result = append(result, TextContent{Text: strings.TrimSpace(note)})
+	}
+
+	return result
+}
+
+func toolResultCharBudget(toolName string) int {
+	switch toolName {
+	case "read_file", "read_config":
+		return readFileToolResultChars
+	case "run_shell":
+		return runShellToolResultChars
+	default:
+		return defaultToolResultChars
+	}
 }

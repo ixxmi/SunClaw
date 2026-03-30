@@ -106,6 +106,10 @@ type AgentConfig struct {
 	SystemPrompt string                 `mapstructure:"system_prompt" json:"system_prompt"` // 系统提示词
 	Metadata     map[string]interface{} `mapstructure:"metadata" json:"metadata"`           // 额外元数据
 	Subagents    *AgentSubagentConfig   `mapstructure:"subagents" json:"subagents"`         // 分身配置
+	// DisableSkillsPrompt 控制主 agent 是否跳过技能拼接。
+	// 仅当显式配置为 true 时跳过技能拼接；未配置或配置为 false 时仍会加载技能。
+	// 子 agent 任何情况下都不拼接技能。
+	DisableSkillsPrompt *bool `mapstructure:"disable_skills_prompt" json:"disable_skills_prompt"`
 }
 
 // AgentIdentity Agent 身份配置
@@ -365,11 +369,12 @@ type AnthropicProviderConfig struct {
 
 // GatewayConfig 网关配置
 type GatewayConfig struct {
-	Host         string          `mapstructure:"host" json:"host"`
-	Port         int             `mapstructure:"port" json:"port"`
-	ReadTimeout  time.Duration   `mapstructure:"read_timeout" json:"read_timeout"`
-	WriteTimeout time.Duration   `mapstructure:"write_timeout" json:"write_timeout"`
-	WebSocket    WebSocketConfig `mapstructure:"websocket" json:"websocket"`
+	Host           string          `mapstructure:"host" json:"host"`
+	Port           int             `mapstructure:"port" json:"port"`
+	ReadTimeout    time.Duration   `mapstructure:"read_timeout" json:"read_timeout"`
+	WriteTimeout   time.Duration   `mapstructure:"write_timeout" json:"write_timeout"`
+	InboundWorkers int             `mapstructure:"inbound_workers" json:"inbound_workers"`
+	WebSocket      WebSocketConfig `mapstructure:"websocket" json:"websocket"`
 }
 
 // WebSocketConfig WebSocket 配置

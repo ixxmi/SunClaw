@@ -2,6 +2,7 @@ export type Tone = "amber" | "emerald" | "rose" | "sky" | "slate";
 
 export type PageId =
   | "chat"
+  | "shrimpBrain"
   | "overview"
   | "channels"
   | "instances"
@@ -173,6 +174,7 @@ export interface DashboardSnapshot {
     cards: DashboardCard[];
     panels: DashboardOverviewPanel[];
   };
+  shrimpBrain: ShrimpBrainSnapshot;
   channels: DashboardChannel[];
   instances: DashboardInstance[];
   sessions: DashboardSession[];
@@ -183,6 +185,99 @@ export interface DashboardSnapshot {
   debug: DashboardDebugItem[];
   logs: DashboardLogItem[];
   docs: DashboardDocItem[];
+}
+
+export interface ShrimpBrainEvent {
+  id: string;
+  timestamp: number;
+  kind: string;
+  agentId?: string;
+  sessionKey?: string;
+  title: string;
+  summary?: string;
+  label?: string;
+  status?: string;
+  task?: string;
+  prompt?: string;
+  reply?: string;
+  error?: string;
+  layers?: string[];
+  sources?: string[];
+}
+
+export interface ShrimpBrainMember {
+  agentId: string;
+  role: string;
+  sessionKey: string;
+  status: string;
+  updatedAt: number;
+}
+
+export interface ShrimpBrainRun {
+  id: string;
+  blockKey: string;
+  userKey: string;
+  sessionKey: string;
+  channel: string;
+  chatId: string;
+  mainAgentId: string;
+  userRequest: string;
+  status: string;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  mainPrompt?: string;
+  mainPromptAt?: number;
+  mainReply?: string;
+  mainReplyAt?: number;
+  mainLayers?: string[];
+  mainSources?: string[];
+  mainLoops?: ShrimpBrainLoopNode[];
+  members: ShrimpBrainMember[];
+  events: ShrimpBrainEvent[];
+}
+
+export interface ShrimpBrainLoopNode {
+  id: string;
+  iteration: number;
+  agentId: string;
+  sessionKey: string;
+  status: string;
+  stopReason?: string;
+  summary?: string;
+  reply?: string;
+  updatedAt: number;
+  toolCalls?: ShrimpBrainToolCall[];
+}
+
+export interface ShrimpBrainToolCall {
+  id: string;
+  toolName: string;
+  status: string;
+  updatedAt: number;
+  summary?: string;
+  arguments?: string;
+  result?: string;
+  error?: string;
+  label?: string;
+  task?: string;
+  childAgentId?: string;
+  childSessionKey?: string;
+  childPrompt?: string;
+  childPromptLayers?: string[];
+  childPromptSources?: string[];
+  childReply?: string;
+  childStatus?: string;
+  childLoops?: ShrimpBrainLoopNode[];
+}
+
+export interface ShrimpBrainSnapshot {
+  available: boolean;
+  generatedAt: string;
+  teamName: string;
+  activeRuns: number;
+  note?: string;
+  runs: ShrimpBrainRun[];
 }
 
 export interface ControlGatewayConfig {
@@ -255,7 +350,10 @@ export interface ControlConfigSaveResult {
 export const navStructure: NavGroup[] = [
   {
     category: "Chat",
-    items: [{ id: "chat", label: "Chat", icon: "message-square" }],
+    items: [
+      { id: "chat", label: "Chat", icon: "message-square" },
+      { id: "shrimpBrain", label: "虾脑", icon: "bot" },
+    ],
   },
   {
     category: "Control",
@@ -293,6 +391,11 @@ export const pageMeta: Record<PageId, PageMeta> = {
     title: "Chat",
     subtitle: "Direct gateway chat session for quick interventions.",
     actions: ["Refresh", "Health Check"],
+  },
+  shrimpBrain: {
+    title: "虾脑",
+    subtitle: "实时查看主 Agent 与子 Agent 团队协作、提示词、派发任务和回复。",
+    actions: ["Refresh"],
   },
   overview: {
     title: "Overview",

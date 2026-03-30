@@ -247,6 +247,8 @@ func NewSimpleErrorClassifier() *SimpleErrorClassifier {
 		},
 		timeoutPatterns: []string{
 			"timeout", "timed out", "deadline exceeded", "context deadline exceeded",
+			"gateway timeout", "bad gateway", "service unavailable", "upstream timeout",
+			"upstream timed out", "temporarily unavailable", "502", "503", "504",
 		},
 		billingPatterns: []string{
 			"402", "payment required", "insufficient credits", "billing",

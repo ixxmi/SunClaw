@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,8 +13,21 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/smallnest/goclaw/internal/core/config"
 	"go.uber.org/zap"
+)
+
+const (
+	shellFullOutputBytes     = 16 * 1024
+	shellPreviewHeadBytes    = 4 * 1024
+	shellPreviewTailBytes    = 4 * 1024
+	shellPreviewDefaultName  = "stdout"
+	shellRawOutputBytes      = 2 * 1024
+	shellSummaryHeadLines    = 24
+	shellSummaryTailLines    = 8
+	shellSummaryMaxLineRunes = 180
+	shellErrorPreviewRunes   = 3000
 )
 
 // ShellTool Shell 工具
@@ -120,7 +134,7 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 
 	// 使用 channel 和 goroutine 实现超时控制
 	type result struct {
-		output []byte
+		output string
 		err    error
 	}
 
@@ -128,8 +142,8 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 	go func() {
 		defer close(resultCh)
 
-		// 读取输出 - 分别读取以避免死锁
-		var stdoutBuf, stderrBuf []byte
+		stdoutCollector := newShellOutputCollector()
+		stderrCollector := newShellOutputCollector()
 		var stdoutErr, stderrErr error
 
 		// 使用 goroutine 并行读取 stdout 和 stderr
@@ -138,13 +152,13 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 
 		go func() {
 			defer wg.Done()
-			stdoutBuf, stdoutErr = io.ReadAll(stdout)
+			_, stdoutErr = io.Copy(stdoutCollector, stdout)
 			stdout.Close()
 		}()
 
 		go func() {
 			defer wg.Done()
-			stderrBuf, stderrErr = io.ReadAll(stderr)
+			_, stderrErr = io.Copy(stderrCollector, stderr)
 			stderr.Close()
 		}()
 
@@ -153,10 +167,7 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 		// 等待命令完成
 		waitErr := cmd.Wait()
 
-		// 组合输出
-		var outputBuf []byte
-		outputBuf = append(outputBuf, stdoutBuf...)
-		outputBuf = append(outputBuf, stderrBuf...)
+		output := formatShellCommandOutput(stdoutCollector, stderrCollector)
 
 		// 确定返回的错误
 		resultErr := waitErr
@@ -166,16 +177,16 @@ func (t *ShellTool) execDirect(ctx context.Context, command string) (string, err
 			resultErr = stderrErr
 		}
 
-		resultCh <- result{output: outputBuf, err: resultErr}
+		resultCh <- result{output: output, err: resultErr}
 	}()
 
 	// 等待结果或超时
 	select {
 	case res := <-resultCh:
 		if res.err != nil {
-			return "", fmt.Errorf("command failed: %w, output: %s", res.err, string(res.output))
+			return "", formatShellExecError(res.err, res.output)
 		}
-		return string(res.output), nil
+		return res.output, nil
 	case <-time.After(t.timeout):
 		// 超时：强制杀死进程组
 		if cmd.Process != nil {
@@ -242,14 +253,13 @@ func (t *ShellTool) execInSandbox(ctx context.Context, command string) (string, 
 	}
 
 	// 等待容器完成
+	var statusCode int64
 	statusCh, errCh := t.dockerClient.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
 	select {
 	case err := <-errCh:
 		return "", fmt.Errorf("container wait error: %w", err)
 	case status := <-statusCh:
-		if status.StatusCode != 0 {
-			return "", fmt.Errorf("container exited with code %d", status.StatusCode)
-		}
+		statusCode = status.StatusCode
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -264,13 +274,18 @@ func (t *ShellTool) execInSandbox(ctx context.Context, command string) (string, 
 	}
 	defer out.Close()
 
-	// 读取输出
-	logs, err := io.ReadAll(out)
-	if err != nil {
-		return "", fmt.Errorf("failed to read logs: %w", err)
+	stdoutCollector := newShellOutputCollector()
+	stderrCollector := newShellOutputCollector()
+	if _, err := stdcopy.StdCopy(stdoutCollector, stderrCollector, out); err != nil {
+		return "", fmt.Errorf("failed to decode container logs: %w", err)
 	}
 
-	return string(logs), nil
+	output := formatShellCommandOutput(stdoutCollector, stderrCollector)
+	if statusCode != 0 {
+		return "", formatShellExecError(fmt.Errorf("container exited with code %d", statusCode), output)
+	}
+
+	return output, nil
 }
 
 // isDenied 检查命令是否被拒绝
@@ -343,4 +358,304 @@ func (t *ShellTool) Close() error {
 		return t.dockerClient.Close()
 	}
 	return nil
+}
+
+type shellOutputCollector struct {
+	fullLimit int
+	headLimit int
+	tailLimit int
+
+	totalBytes int
+	totalLines int
+	overflowed bool
+
+	full bytes.Buffer
+	head bytes.Buffer
+	tail tailByteBuffer
+}
+
+func newShellOutputCollector() *shellOutputCollector {
+	return &shellOutputCollector{
+		fullLimit: shellFullOutputBytes,
+		headLimit: shellPreviewHeadBytes,
+		tailLimit: shellPreviewTailBytes,
+		tail: tailByteBuffer{
+			limit: shellPreviewTailBytes,
+		},
+	}
+}
+
+func (c *shellOutputCollector) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	c.totalBytes += len(p)
+	c.totalLines += bytes.Count(p, []byte{'\n'})
+
+	if !c.overflowed && c.full.Len()+len(p) <= c.fullLimit {
+		return c.full.Write(p)
+	}
+
+	if !c.overflowed {
+		c.overflowed = true
+		existing := append([]byte(nil), c.full.Bytes()...)
+		c.full.Reset()
+		c.appendHead(existing)
+		c.tail.Write(existing)
+	}
+
+	c.appendHead(p)
+	c.tail.Write(p)
+	return len(p), nil
+}
+
+func (c *shellOutputCollector) appendHead(p []byte) {
+	if len(p) == 0 || c.head.Len() >= c.headLimit {
+		return
+	}
+	remaining := c.headLimit - c.head.Len()
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, _ = c.head.Write(p)
+}
+
+func (c *shellOutputCollector) render(name string, forceLabel bool) string {
+	if c.totalBytes == 0 {
+		return ""
+	}
+	if !c.overflowed {
+		raw := c.full.String()
+		if !forceLabel && name == shellPreviewDefaultName && shouldKeepRawShellOutput(raw) {
+			return raw
+		}
+		summary := summarizeShellText(raw)
+		if forceLabel || name != shellPreviewDefaultName {
+			return formatShellSection(name, summary)
+		}
+		return summary
+	}
+
+	headText := summarizeShellExcerpt(c.head.String(), true)
+	tailText := summarizeShellExcerpt(string(c.tail.Bytes()), false)
+	omittedBytes := c.totalBytes - c.head.Len() - len(c.tail.Bytes())
+	if omittedBytes < 0 {
+		omittedBytes = 0
+	}
+
+	var body strings.Builder
+	body.WriteString(headText)
+	if body.Len() > 0 && !strings.HasSuffix(body.String(), "\n") {
+		body.WriteString("\n")
+	}
+	body.WriteString(fmt.Sprintf("\n... omitted %s from %s", formatByteSize(int64(omittedBytes)), name))
+	body.WriteString(fmt.Sprintf(" (total %s", formatByteSize(int64(c.totalBytes))))
+	if c.totalLines > 0 {
+		body.WriteString(fmt.Sprintf(", %d lines", c.totalLines))
+	}
+	body.WriteString(") ...\n\n")
+	body.WriteString(tailText)
+
+	if forceLabel || name != shellPreviewDefaultName {
+		return formatShellSection(name, body.String())
+	}
+	return body.String()
+}
+
+type tailByteBuffer struct {
+	limit int
+	data  []byte
+}
+
+func (b *tailByteBuffer) Write(p []byte) {
+	if b.limit <= 0 || len(p) == 0 {
+		return
+	}
+
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
+		return
+	}
+
+	if len(b.data)+len(p) <= b.limit {
+		b.data = append(b.data, p...)
+		return
+	}
+
+	overflow := len(b.data) + len(p) - b.limit
+	copy(b.data, b.data[overflow:])
+	b.data = b.data[:len(b.data)-overflow]
+	b.data = append(b.data, p...)
+}
+
+func (b *tailByteBuffer) Bytes() []byte {
+	return append([]byte(nil), b.data...)
+}
+
+func formatShellCommandOutput(stdout, stderr *shellOutputCollector) string {
+	hasStdout := stdout != nil && stdout.totalBytes > 0
+	hasStderr := stderr != nil && stderr.totalBytes > 0
+	if !hasStdout && !hasStderr {
+		return ""
+	}
+
+	forceLabel := hasStderr ||
+		(hasStdout && stdout.overflowed) ||
+		(hasStderr && stderr.overflowed)
+
+	sections := make([]string, 0, 2)
+	if hasStdout {
+		sections = append(sections, stdout.render("stdout", forceLabel))
+	}
+	if hasStderr {
+		sections = append(sections, stderr.render("stderr", true))
+	}
+
+	return strings.Join(sections, "\n\n")
+}
+
+func formatShellSection(name, body string) string {
+	body = strings.TrimLeft(body, "\n")
+	if body == "" {
+		return fmt.Sprintf("[%s]", name)
+	}
+	return fmt.Sprintf("[%s]\n%s", name, body)
+}
+
+func formatShellExecError(execErr error, output string) error {
+	if strings.TrimSpace(output) == "" {
+		return fmt.Errorf("command failed: %w", execErr)
+	}
+
+	preview := truncateRunes(output, shellErrorPreviewRunes)
+	if preview != output {
+		preview += "\n\n... (error output truncated)"
+	}
+	return fmt.Errorf("command failed: %w\n%s", execErr, preview)
+}
+
+func shouldKeepRawShellOutput(raw string) bool {
+	if len(raw) > shellRawOutputBytes {
+		return false
+	}
+
+	lines := splitShellLines(raw)
+	if len(lines) > shellSummaryHeadLines {
+		return false
+	}
+
+	for _, line := range lines {
+		if runeCountWithoutTrailingNewline(line) > shellSummaryMaxLineRunes {
+			return false
+		}
+	}
+
+	return true
+}
+
+func summarizeShellText(raw string) string {
+	lines := splitShellLines(raw)
+	if len(lines) == 0 {
+		return raw
+	}
+
+	if len(lines) <= shellSummaryHeadLines+shellSummaryTailLines {
+		return joinAndAnnotateShellLines(lines)
+	}
+
+	head := lines[:shellSummaryHeadLines]
+	tail := lines[len(lines)-shellSummaryTailLines:]
+
+	var body strings.Builder
+	body.WriteString(joinAndAnnotateShellLines(head))
+	if body.Len() > 0 && !strings.HasSuffix(body.String(), "\n") {
+		body.WriteString("\n")
+	}
+	body.WriteString(fmt.Sprintf("\n... omitted %d lines ...\n\n", len(lines)-len(head)-len(tail)))
+	body.WriteString(joinAndAnnotateShellLines(tail))
+	return body.String()
+}
+
+func summarizeShellExcerpt(raw string, keepHead bool) string {
+	lines := splitShellLines(raw)
+	if len(lines) == 0 {
+		return raw
+	}
+
+	limit := shellSummaryHeadLines
+	if !keepHead {
+		limit = shellSummaryTailLines
+	}
+	if len(lines) > limit {
+		if keepHead {
+			lines = lines[:limit]
+		} else {
+			lines = lines[len(lines)-limit:]
+		}
+	}
+
+	return joinAndAnnotateShellLines(lines)
+}
+
+func splitShellLines(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	lines := strings.SplitAfter(raw, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func joinAndAnnotateShellLines(lines []string) string {
+	var body strings.Builder
+	truncatedLines := 0
+	for _, line := range lines {
+		shortened, changed := compactShellLine(line)
+		if changed {
+			truncatedLines++
+		}
+		body.WriteString(shortened)
+	}
+
+	if truncatedLines > 0 {
+		if body.Len() > 0 && !strings.HasSuffix(body.String(), "\n") {
+			body.WriteString("\n")
+		}
+		body.WriteString(fmt.Sprintf("\n... %d long line(s) truncated to %d chars ...\n", truncatedLines, shellSummaryMaxLineRunes))
+	}
+
+	return body.String()
+}
+
+func compactShellLine(line string) (string, bool) {
+	hasNewline := strings.HasSuffix(line, "\n")
+	core := strings.TrimSuffix(line, "\n")
+	runes := []rune(core)
+	if len(runes) <= shellSummaryMaxLineRunes {
+		return line, false
+	}
+
+	shortened := string(runes[:shellSummaryMaxLineRunes]) + "...(truncated)"
+	if hasNewline {
+		shortened += "\n"
+	}
+	return shortened, true
+}
+
+func runeCountWithoutTrailingNewline(line string) int {
+	return len([]rune(strings.TrimSuffix(line, "\n")))
+}
+
+func truncateRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
 }

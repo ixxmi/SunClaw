@@ -3,13 +3,17 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/smallnest/goclaw/internal/core/memory"
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 )
 
 // MemoryTool memory 搜索工具
 type MemoryTool struct {
 	searchManager memory.MemorySearchManager
+	managerPool   *memory.SearchManagerPool
+	baseWorkspace string
 	name          string
 }
 
@@ -17,6 +21,15 @@ type MemoryTool struct {
 func NewMemoryTool(searchManager memory.MemorySearchManager) *MemoryTool {
 	return &MemoryTool{
 		searchManager: searchManager,
+		name:          "memory_search",
+	}
+}
+
+// NewNamespacedMemoryTool creates a memory search tool that resolves per-user managers on demand.
+func NewNamespacedMemoryTool(baseWorkspace string, managerPool *memory.SearchManagerPool) *MemoryTool {
+	return &MemoryTool{
+		managerPool:   managerPool,
+		baseWorkspace: strings.TrimSpace(baseWorkspace),
 		name:          "memory_search",
 	}
 }
@@ -65,7 +78,12 @@ func (t *MemoryTool) Execute(ctx context.Context, params map[string]interface{})
 	opts := memory.DefaultSearchOptions()
 	opts.Limit = limit
 
-	results, err := t.searchManager.Search(ctx, query, opts)
+	searchMgr, err := t.resolveSearchManager(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	results, err := searchMgr.Search(ctx, query, opts)
 	if err != nil {
 		return "", fmt.Errorf("memory search failed: %w", err)
 	}
@@ -113,6 +131,8 @@ func formatSearchResults(query string, results []*memory.SearchResult) string {
 // MemoryAddTool memory 添加工具
 type MemoryAddTool struct {
 	searchManager memory.MemorySearchManager
+	managerPool   *memory.SearchManagerPool
+	baseWorkspace string
 	name          string
 }
 
@@ -120,6 +140,15 @@ type MemoryAddTool struct {
 func NewMemoryAddTool(searchManager memory.MemorySearchManager) *MemoryAddTool {
 	return &MemoryAddTool{
 		searchManager: searchManager,
+		name:          "memory_add",
+	}
+}
+
+// NewNamespacedMemoryAddTool creates a memory add tool with per-user manager resolution.
+func NewNamespacedMemoryAddTool(baseWorkspace string, managerPool *memory.SearchManagerPool) *MemoryAddTool {
+	return &MemoryAddTool{
+		managerPool:   managerPool,
+		baseWorkspace: strings.TrimSpace(baseWorkspace),
 		name:          "memory_add",
 	}
 }
@@ -180,9 +209,50 @@ func (t *MemoryAddTool) Execute(ctx context.Context, params map[string]interface
 
 	metadata := memory.MemoryMetadata{}
 
-	if err := t.searchManager.Add(ctx, text, source, memType, metadata); err != nil {
+	searchMgr, err := t.resolveSearchManager(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	if err := searchMgr.Add(ctx, text, source, memType, metadata); err != nil {
 		return "", fmt.Errorf("failed to add memory: %w", err)
 	}
 
 	return "Memory added successfully", nil
+}
+
+func (t *MemoryTool) resolveSearchManager(ctx context.Context) (memory.MemorySearchManager, error) {
+	if t.searchManager != nil {
+		return t.searchManager, nil
+	}
+	if t.managerPool == nil {
+		return nil, fmt.Errorf("memory search manager is unavailable")
+	}
+	return t.managerPool.Get(resolveMemoryWorkspace(ctx, t.baseWorkspace))
+}
+
+func (t *MemoryAddTool) resolveSearchManager(ctx context.Context) (memory.MemorySearchManager, error) {
+	if t.searchManager != nil {
+		return t.searchManager, nil
+	}
+	if t.managerPool == nil {
+		return nil, fmt.Errorf("memory search manager is unavailable")
+	}
+	return t.managerPool.Get(resolveMemoryWorkspace(ctx, t.baseWorkspace))
+}
+
+func resolveMemoryWorkspace(ctx context.Context, baseWorkspace string) string {
+	if ctx != nil {
+		if raw, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(raw) != "" {
+			return strings.TrimSpace(raw)
+		}
+		if raw, ok := ctx.Value("session_key").(string); ok {
+			if identity, found := namespaces.FromSessionKey(strings.TrimSpace(raw)); found {
+				if workspaceRoot := identity.WorkspaceDir(baseWorkspace); strings.TrimSpace(workspaceRoot) != "" {
+					return workspaceRoot
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(baseWorkspace)
 }

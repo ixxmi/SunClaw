@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -106,7 +107,7 @@ func (bm *BroadcastManager) Broadcast(event string, payload interface{}, opts *B
 // BroadcastToConnIDs 广播事件到指定连接
 func (bm *BroadcastManager) BroadcastToConnIDs(connIDs []string, event string, payload interface{}) error {
 	bm.mu.RLock()
-	defer bm.mu.Unlock()
+	defer bm.mu.RUnlock()
 
 	seq := bm.nextSeq()
 	eventFrame, err := NewEvent(event, payload, seq, nil)
@@ -146,8 +147,12 @@ func (bm *BroadcastManager) BroadcastToSession(sessionKey string, event string, 
 
 	// 查找会话相关的连接
 	for _, conn := range bm.connections {
-		// 这里应该检查连接是否与该会话相关
-		// 简化实现：广播到所有连接
+		if !conn.WatchesSession(sessionKey) {
+			continue
+		}
+		if !conn.IsSubscribed(event) {
+			continue
+		}
 		_ = conn.SendMessage(data)
 	}
 
@@ -188,7 +193,7 @@ func (bm *BroadcastManager) BroadcastAgentEvent(agentID string, event string, pa
 
 // BroadcastChatEvent 广播聊天事件
 func (bm *BroadcastManager) BroadcastChatEvent(sessionKey string, chatEvent *ChatEvent) error {
-	return bm.Broadcast("chat", chatEvent, nil)
+	return bm.BroadcastToSession(sessionKey, "chat", chatEvent)
 }
 
 // BroadcastCronEvent 广播 Cron 事件
@@ -371,8 +376,7 @@ func (bm *BroadcastManager) GetNodeSubscriptions(nodeID string) []string {
 
 // nextSeq 获取下一个序列号
 func (bm *BroadcastManager) nextSeq() int64 {
-	bm.eventSeq++
-	return bm.eventSeq
+	return atomic.AddInt64(&bm.eventSeq, 1)
 }
 
 // isConnectionSlow 检查连接是否慢
@@ -386,7 +390,7 @@ func (bm *BroadcastManager) isConnectionSlow(connID string) bool {
 func isDefaultBroadcastEvent(event string) bool {
 	defaultEvents := []string{
 		"presence", "health", "tick", "shutdown",
-		"agent", "chat", "heartbeat",
+		"agent", "heartbeat",
 	}
 	for _, e := range defaultEvents {
 		if e == event {

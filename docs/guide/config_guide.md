@@ -857,7 +857,13 @@ tools:
 - `working_dir`
   默认工作目录。
 - `sandbox`
-  Docker 沙箱配置。
+  `run_shell` 的 Docker 沙箱配置，不是独立工具定义。
+
+说明：
+
+- `tools.shell.sandbox.*` 只影响 `run_shell` 的执行环境；启用后，`run_shell` 会改为在 Docker 容器里执行。
+- 独立的 `sandbox_execute` 是另一套 Agent 工具，只有在模型显式调用它时才会触发；它不会因为开启了 `tools.shell.sandbox.enabled` 就自动接管所有 shell 命令。
+- 当 `sandbox_execute` 无法使用 Docker 时，只会在本地执行已被授权的情况下降级到本地；未授权时会直接返回授权错误，而不是静默改成普通 shell 执行。
 
 当前校验器要求：
 

@@ -3,22 +3,28 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	internalroot "github.com/smallnest/goclaw/internal"
 	"github.com/smallnest/goclaw/internal/core/acp"
 	acpruntime "github.com/smallnest/goclaw/internal/core/acp/runtime"
 	"github.com/smallnest/goclaw/internal/core/agent/tools"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/channels"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	platformerrors "github.com/smallnest/goclaw/internal/platform/errors"
+	"github.com/smallnest/goclaw/internal/workspace"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +39,7 @@ type AgentManager struct {
 	defaultAgentID string                   // 默认 Agent ID
 	bus            *bus.MessageBus
 	sessionMgr     *session.Manager
+	sessionPool    *session.ManagerPool
 	provider       providers.Provider
 	tools          *ToolRegistry
 	mu             sync.RWMutex
@@ -42,8 +49,10 @@ type AgentManager struct {
 	helper         *AgentHelper
 	channelMgr     *channels.Manager
 	acpManager     *acp.Manager
+	baseWorkspace  string
 	manualCronMu   sync.Mutex
 	manualCronLast map[string]time.Time
+	shrimpBrain    *ShrimpBrainTracker
 	// 分身支持
 	subagentRegistry  *SubagentRegistry
 	subagentAnnouncer *SubagentAnnouncer
@@ -61,6 +70,9 @@ type AgentManager struct {
 	// per-session ACP thread 控制状态：用于 channel 里的中断/继续
 	acpThreadRuns   map[string]*acpThreadSessionControl
 	acpThreadRunsMu sync.Mutex
+
+	workspacePrepMu sync.Mutex
+	preparedRoots   map[string]error
 }
 
 // BindingEntry Agent 绑定条目
@@ -76,6 +88,7 @@ type NewAgentManagerConfig struct {
 	Bus            *bus.MessageBus
 	Provider       providers.Provider
 	SessionMgr     *session.Manager
+	SessionPool    *session.ManagerPool
 	Tools          *ToolRegistry
 	DataDir        string          // 数据目录，用于存储分身注册表
 	ContextBuilder *ContextBuilder // 上下文构建器
@@ -86,6 +99,11 @@ type NewAgentManagerConfig struct {
 
 // NewAgentManager 创建 Agent 管理器
 func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
+	sessionPool := cfg.SessionPool
+	if sessionPool == nil {
+		sessionPool = session.NewManagerPool()
+	}
+
 	// 创建分身注册表
 	subagentRegistry := NewSubagentRegistry(cfg.DataDir)
 
@@ -102,6 +120,7 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 		bindings:             make(map[string]*BindingEntry),
 		bus:                  cfg.Bus,
 		sessionMgr:           cfg.SessionMgr,
+		sessionPool:          sessionPool,
 		provider:             cfg.Provider,
 		tools:                cfg.Tools,
 		subagentRegistry:     subagentRegistry,
@@ -112,11 +131,14 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 		helper:               NewAgentHelper(cfg.SessionMgr),
 		channelMgr:           cfg.ChannelMgr,
 		acpManager:           cfg.AcpManager,
+		baseWorkspace:        cfg.DataDir,
 		manualCronLast:       make(map[string]time.Time),
+		shrimpBrain:          NewShrimpBrainTracker(cfg.DataDir),
 		sessionRouter:        sessionRouter,
 		sessionContextRouter: sessionContextRouter,
 		followUpQueues:       make(map[string][]AgentMessage),
 		acpThreadRuns:        make(map[string]*acpThreadSessionControl),
+		preparedRoots:        make(map[string]error),
 	}
 }
 
@@ -257,6 +279,16 @@ func (m *AgentManager) setupSubagentSupport(cfg *config.Config, _ *ContextBuilde
 	m.subagentRegistry.SetOnRunComplete(func(runID string, record *SubagentRunRecord) {
 		m.handleSubagentCompletion(runID, record)
 	})
+	m.subagentRegistry.SetOnDeleteChildSession(func(sessionKey string) error {
+		sessionMgr, _, err := m.sessionManagerForSessionKey(sessionKey)
+		if err != nil {
+			return err
+		}
+		if sessionMgr == nil {
+			return fmt.Errorf("session manager is not available")
+		}
+		return sessionMgr.Delete(sessionKey)
+	})
 
 	// 更新宣告器回调
 	m.subagentAnnouncer = NewSubagentAnnouncer(func(sessionKey, message string) error {
@@ -276,6 +308,11 @@ func (m *AgentManager) setupSubagentSupport(cfg *config.Config, _ *ContextBuilde
 			}
 		}
 		return nil
+	})
+	spawnTool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		out := make([]config.AgentConfig, 0, len(cfg.Agents.List))
+		out = append(out, cfg.Agents.List...)
+		return out
 	})
 	spawnTool.SetDefaultConfigGetter(func() *config.AgentDefaults {
 		return &cfg.Agents.Defaults
@@ -385,19 +422,31 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	if targetAgent == nil {
 		return fmt.Errorf("no agent available for subagent: %s", result.ChildSessionKey)
 	}
+	resolvedTargetAgentID := agentID
+	if strings.TrimSpace(resolvedTargetAgentID) == "" {
+		resolvedTargetAgentID = targetAgent.GetState().AgentID
+	}
 
 	logger.Info("━━ Subagent spawn ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		zap.String("target_agent_id", agentID),
+		zap.String("target_agent_id", resolvedTargetAgentID),
 		zap.String("subagent_id", subagentID),
-		zap.String("model", targetAgent.orchestrator.config.Model),
+		zap.String("model", firstNonEmpty(strings.TrimSpace(result.Model), targetAgent.orchestrator.config.Model)),
 		zap.String("task_preview", truncateSubagentTask(result.Task, 80)))
 
-	// 确定超时时间
-	timeoutSeconds := 300 // 默认 5 分钟
-	if m.cfg != nil && m.cfg.Agents.Defaults.Subagents != nil {
-		if t := m.cfg.Agents.Defaults.Subagents.TimeoutSeconds; t > 0 {
-			timeoutSeconds = t
+	timeoutSeconds := m.resolveSubagentTimeoutSeconds(resolvedTargetAgentID, result.RunTimeoutSeconds)
+	effectiveModel := firstNonEmpty(strings.TrimSpace(result.Model), targetAgent.orchestrator.config.Model)
+	effectiveMaxTokens := targetAgent.orchestrator.config.MaxTokens
+	if result.MaxTokens > 0 {
+		effectiveMaxTokens = result.MaxTokens
+	} else {
+		// 子 agent 默认收紧 completion token，避免长思考或长输出把请求处理时间拖到网关超时。
+		if effectiveMaxTokens <= 0 || effectiveMaxTokens > 2048 {
+			effectiveMaxTokens = 2048
 		}
+	}
+	effectiveTemperature := targetAgent.orchestrator.config.Temperature
+	if result.Temperature > 0 {
+		effectiveTemperature = result.Temperature
 	}
 
 	// 直接使用目标 Agent 在初始化阶段已按 allow_tools/deny_tools 过滤好的工具集，
@@ -409,15 +458,38 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 		zap.String("subagent_id", subagentID),
 		zap.Int("allowed_tools", len(subagentTools)))
 
+	if m.shrimpBrain != nil {
+		if record, ok := m.subagentRegistry.GetRun(result.RunID); ok {
+			m.shrimpBrain.RecordSubagentDispatchAt(record.RequesterSessionKey, result.ChildSessionKey, resolvedTargetAgentID, record.Label, record.Task, result.ParentLoopIteration)
+		}
+	}
+
+	workspaceRoot := m.resolveWorkspaceRootForSessionKey(result.ChildSessionKey)
+	if err := m.prepareWorkspaceRoot(workspaceRoot); err != nil {
+		return fmt.Errorf("failed to prepare subagent workspace: %w", err)
+	}
+	sessionMgr, err := m.sessionManagerForWorkspace(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve subagent session manager: %w", err)
+	}
+	namespaceSkills := m.loadSkillsForWorkspace(workspaceRoot)
+
 	// 构建子 Agent 独立状态
 	subagentState := NewAgentState()
 	subagentState.AgentID = agentID
+	if strings.TrimSpace(subagentState.AgentID) == "" {
+		subagentState.AgentID = resolvedTargetAgentID
+	}
 	subagentState.BootstrapOwnerID = result.BootstrapOwnerID
 	if subagentState.BootstrapOwnerID == "" {
-		subagentState.BootstrapOwnerID = agentID
+		subagentState.BootstrapOwnerID = subagentState.AgentID
 	}
 	subagentState.SessionKey = result.ChildSessionKey
+	subagentState.WorkspaceRoot = workspaceRoot
 	subagentState.Tools = subagentTools
+	subagentState.Model = effectiveModel
+	subagentState.ThinkingLevel = strings.TrimSpace(result.Thinking)
+	subagentState.SpawnableAgentCatalog = targetAgent.GetSpawnableAgentCatalog()
 
 	// 子 agent 继承目标 Agent 的第 4 层 core prompt，
 	// 本次运行的分身职责和任务约束放入单独的 SubagentDescriptor，
@@ -426,19 +498,24 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	subagentState.SubagentDescriptor = result.ChildSystemPrompt
 	subagentState.IsSubagent = true
 	logger.Info("Subagent using layered prompt assembly",
-		zap.String("agent_id", agentID),
+		zap.String("agent_id", subagentState.AgentID),
 		zap.Int("core_prompt_len", len(subagentState.SystemPrompt)),
-		zap.Int("descriptor_len", len(subagentState.SubagentDescriptor)))
+		zap.Int("descriptor_len", len(subagentState.SubagentDescriptor)),
+		zap.Bool("has_spawnable_catalog", strings.TrimSpace(subagentState.SpawnableAgentCatalog) != ""))
 
 	// 构建子 Agent 独立 LoopConfig（使用目标 Agent 的专属 provider 和 model）
 	subagentLoopConfig := &LoopConfig{
-		Model:          targetAgent.orchestrator.config.Model,
+		Model:          effectiveModel,
+		Temperature:    effectiveTemperature,
 		Provider:       targetAgent.orchestrator.config.Provider,
-		SessionMgr:     targetAgent.orchestrator.config.SessionMgr,
+		SessionMgr:     sessionMgr,
 		MaxIterations:  targetAgent.orchestrator.config.MaxIterations,
+		MaxTokens:      effectiveMaxTokens,
+		ContextWindow:  targetAgent.orchestrator.config.ContextWindow,
 		ConvertToLLM:   defaultConvertToLLM,
 		ContextBuilder: targetAgent.orchestrator.config.ContextBuilder,
-		Skills:         targetAgent.orchestrator.config.Skills,
+		Skills:         namespaceSkills,
+		ShrimpBrain:    m.shrimpBrain,
 	}
 
 	// 创建独立 Orchestrator 实例（与父 Agent 完全隔离，互不干扰）
@@ -461,10 +538,18 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 
 		logger.Info("━━ Subagent execution started ━━━━━━━━━━━━━━━━━━━━",
 			zap.String("run_id", result.RunID),
-			zap.String("target_agent_id", agentID),
+			zap.String("target_agent_id", subagentState.AgentID),
 			zap.String("model", subagentLoopConfig.Model),
 			zap.String("child_session_key", result.ChildSessionKey),
 			zap.String("task_preview", truncateSubagentTask(result.Task, 100)))
+
+		runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
+		if identity, ok := namespaces.FromSessionKey(result.ChildSessionKey); ok {
+			runCtx = context.WithValue(runCtx, "tenant_id", identity.TenantID)
+			runCtx = context.WithValue(runCtx, "channel", identity.Channel)
+			runCtx = context.WithValue(runCtx, "account_id", identity.AccountID)
+			runCtx = context.WithValue(runCtx, "sender_id", identity.SenderID)
+		}
 
 		finalMessages, err := subagentOrchestrator.Run(runCtx, []AgentMessage{taskMsg})
 		endedAt := time.Now().UnixMilli()
@@ -473,12 +558,18 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 			if runCtx.Err() == context.DeadlineExceeded {
 				outcome.Status = "timeout"
 				outcome.Error = fmt.Sprintf("subagent timed out after %ds", timeoutSeconds)
+				if m.shrimpBrain != nil {
+					m.shrimpBrain.RecordRunError(result.ChildSessionKey, resolvedTargetAgentID, true, outcome.Error)
+				}
 				logger.Warn("Subagent timed out",
 					zap.String("run_id", result.RunID),
 					zap.Int("timeout_seconds", timeoutSeconds))
 			} else {
 				outcome.Status = "error"
 				outcome.Error = err.Error()
+				if m.shrimpBrain != nil {
+					m.shrimpBrain.RecordRunError(result.ChildSessionKey, resolvedTargetAgentID, true, err.Error())
+				}
 				logger.Error("Subagent execution failed",
 					zap.String("run_id", result.RunID),
 					zap.Error(err))
@@ -509,12 +600,13 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 		}
 
 		// 保存子 Agent 会话记录（便于后续查看历史）
-		if sess, sessErr := m.sessionMgr.GetOrCreate(result.ChildSessionKey); sessErr == nil {
+		if sess, sessErr := sessionMgr.GetOrCreate(result.ChildSessionKey); sessErr == nil {
 			newMsgs := finalMessages
 			if len(finalMessages) > 1 {
 				newMsgs = finalMessages[1:] // 跳过第一条 taskMsg（已在 Registry 中记录）
 			}
-			_ = m.helper.UpdateSession(sess, newMsgs, &UpdateSessionOptions{SaveImmediately: true})
+			helper := NewAgentHelper(sessionMgr)
+			_ = helper.UpdateSession(sess, newMsgs, &UpdateSessionOptions{SaveImmediately: true})
 		}
 
 		_ = now // 已通过 &endedAt 传递
@@ -536,6 +628,39 @@ func truncateSubagentTask(task string, maxLen int) string {
 		return task
 	}
 	return task[:maxLen] + "..."
+}
+
+func (m *AgentManager) resolveSubagentTimeoutSeconds(agentID string, requested int) int {
+	if requested > 0 {
+		return requested
+	}
+
+	timeoutSeconds := 300
+	if m == nil || m.cfg == nil {
+		return timeoutSeconds
+	}
+
+	if agentCfg := m.lookupAgentConfig(agentID); agentCfg != nil && agentCfg.Subagents != nil && agentCfg.Subagents.TimeoutSeconds > 0 {
+		return agentCfg.Subagents.TimeoutSeconds
+	}
+
+	if m.cfg.Agents.Defaults.Subagents != nil && m.cfg.Agents.Defaults.Subagents.TimeoutSeconds > 0 {
+		return m.cfg.Agents.Defaults.Subagents.TimeoutSeconds
+	}
+
+	return timeoutSeconds
+}
+
+func (m *AgentManager) lookupAgentConfig(agentID string) *config.AgentConfig {
+	if m == nil || m.cfg == nil {
+		return nil
+	}
+	for i := range m.cfg.Agents.List {
+		if m.cfg.Agents.List[i].ID == agentID {
+			return &m.cfg.Agents.List[i]
+		}
+	}
+	return nil
 }
 
 // handleSubagentCompletion 由 SubagentRegistry.onRunComplete 回调触发。
@@ -562,7 +687,7 @@ func (m *AgentManager) handleSubagentCompletion(runID string, record *SubagentRu
 		return
 	}
 
-	if err := m.subagentAnnouncer.RunAnnounceFlow(&SubagentAnnounceParams{
+	announceErr := m.subagentAnnouncer.RunAnnounceFlow(&SubagentAnnounceParams{
 		ChildSessionKey:     record.ChildSessionKey,
 		ChildRunID:          runID,
 		RequesterSessionKey: record.RequesterSessionKey,
@@ -575,10 +700,25 @@ func (m *AgentManager) handleSubagentCompletion(runID string, record *SubagentRu
 		Outcome:             record.Outcome,
 		Cleanup:             record.Cleanup,
 		AnnounceType:        SubagentAnnounceTypeTask,
-	}); err != nil {
+	})
+	if announceErr != nil {
 		logger.Error("Failed to announce subagent completion",
 			zap.String("run_id", runID),
-			zap.Error(err))
+			zap.Error(announceErr))
+	}
+	m.subagentRegistry.Cleanup(runID, record.Cleanup, announceErr == nil)
+
+	if m.shrimpBrain != nil {
+		agentID, _, _ := ParseAgentSessionKey(record.ChildSessionKey)
+		status := "unknown"
+		reply := ""
+		errText := ""
+		if record.Outcome != nil {
+			status = record.Outcome.Status
+			reply = record.Outcome.Result
+			errText = record.Outcome.Error
+		}
+		m.shrimpBrain.RecordSubagentResult(record.ChildSessionKey, agentID, status, reply, errText)
 	}
 }
 
@@ -682,6 +822,24 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 					break
 				}
 			}
+
+			// 显式绑定 profile 的 agent 默认会绕过全局 rotation/failover。
+			// 当上游出现 502/503/504/timeout 时，这会让子 agent 直接失败。
+			// 这里保留指定 profile 作为首选提供商，同时用全局轮换提供商作为故障转移后备。
+			if globalCfg.Providers.Failover.Enabled && len(globalCfg.Providers.Profiles) > 1 {
+				if fallbackProvider, fbErr := providers.NewRotationProviderFromConfig(globalCfg); fbErr != nil {
+					logger.Warn("Failed to create fallback provider for agent profile; using direct provider only",
+						zap.String("agent_id", cfg.ID),
+						zap.String("profile", cfg.Provider),
+						zap.Error(fbErr))
+				} else {
+					agentProvider = providers.NewFailoverProvider(p, fallbackProvider, platformerrors.NewSimpleErrorClassifier())
+					agentProviderType = cfg.Provider + "+failover"
+					logger.Info("Agent profile provider wrapped with global failover",
+						zap.String("agent_id", cfg.ID),
+						zap.String("primary_profile", cfg.Provider))
+				}
+			}
 		}
 	}
 
@@ -695,33 +853,37 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 
 	// 创建 Agent
 	agent, err := NewAgent(&NewAgentConfig{
-		AgentID:            cfg.ID,
-		Bus:                m.bus,
-		Provider:           agentProvider,
-		SessionMgr:         m.sessionMgr,
-		Tools:              m.tools,
-		Context:            agentContextBuilder,
-		Workspace:          agentWorkspace,
-		MaxIteration:       maxIterations,
-		MaxHistoryMessages: maxHistoryMessages,
-		SkillsLoader:       m.skillsLoader,
+		AgentID:             cfg.ID,
+		Model:               model,
+		Bus:                 m.bus,
+		Provider:            agentProvider,
+		SessionMgr:          m.sessionMgr,
+		Tools:               m.tools,
+		Context:             agentContextBuilder,
+		Workspace:           agentWorkspace,
+		MaxIteration:        maxIterations,
+		MaxHistoryMessages:  maxHistoryMessages,
+		MaxTokens:           globalCfg.Agents.Defaults.MaxTokens,
+		Temperature:         globalCfg.Agents.Defaults.Temperature,
+		ContextWindow:       guessContextWindow(model),
+		SkillsLoader:        m.skillsLoader,
+		ShrimpBrain:         m.shrimpBrain,
+		DisableSkillsPrompt: cfg.DisableSkillsPrompt,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create agent %s: %w", cfg.ID, err)
 	}
 
-	// 设置第 4 层 agent core 优先级：
-	// 1. 配置文件中配置了 system_prompt → 直接使用
-	// 2. 未配置 → 保留 NewAgent 已构建的系统通用认知
+	// 设置第 4 层 agent core：
+	// 仅在配置文件中显式配置了 system_prompt 时才注入。
 	if cfg.SystemPrompt != "" {
 		agent.SetSystemPrompt(cfg.SystemPrompt)
 		logger.Info("Agent using config system_prompt as agent core",
 			zap.String("agent_id", cfg.ID),
 			zap.Int("prompt_len", len(cfg.SystemPrompt)))
 	} else {
-		logger.Info("Agent using built-in generic core as agent core",
-			zap.String("agent_id", cfg.ID),
-			zap.Int("prompt_len", len(agent.GetSystemPrompt())))
+		logger.Info("Agent has no custom system_prompt configured",
+			zap.String("agent_id", cfg.ID))
 	}
 
 	// 存储到管理器
@@ -981,6 +1143,121 @@ func buildBindingKey(channel, accountID string) string {
 	return fmt.Sprintf("%s:%s", channel, normalizeAccountID(accountID))
 }
 
+func (m *AgentManager) effectiveInboundWorkers() int {
+	workers := 4
+	if m != nil && m.cfg != nil && m.cfg.Gateway.InboundWorkers > 0 {
+		workers = m.cfg.Gateway.InboundWorkers
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	maxWorkers := runtime.GOMAXPROCS(0) * 4
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+	if workers > maxWorkers {
+		workers = maxWorkers
+	}
+	return workers
+}
+
+func (m *AgentManager) resolveWorkspaceRootForMsg(msg *bus.InboundMessage) string {
+	if m == nil || strings.TrimSpace(m.baseWorkspace) == "" {
+		return ""
+	}
+	identity := namespaces.FromInboundMessage(msg)
+	root := identity.WorkspaceDir(m.baseWorkspace)
+	if strings.TrimSpace(root) == "" {
+		return m.baseWorkspace
+	}
+	return root
+}
+
+func (m *AgentManager) resolveWorkspaceRootForSessionKey(sessionKey string) string {
+	if m == nil || strings.TrimSpace(m.baseWorkspace) == "" {
+		return ""
+	}
+	if identity, ok := namespaces.FromSessionKey(sessionKey); ok {
+		if root := identity.WorkspaceDir(m.baseWorkspace); strings.TrimSpace(root) != "" {
+			return root
+		}
+	}
+	return m.baseWorkspace
+}
+
+func (m *AgentManager) prepareWorkspaceRoot(workspaceRoot string) error {
+	workspaceRoot = strings.TrimSpace(workspaceRoot)
+	if workspaceRoot == "" {
+		return nil
+	}
+
+	m.workspacePrepMu.Lock()
+	if err, ok := m.preparedRoots[workspaceRoot]; ok {
+		m.workspacePrepMu.Unlock()
+		return err
+	}
+	m.workspacePrepMu.Unlock()
+
+	workspaceMgr := workspace.NewManager(workspaceRoot)
+	err := workspaceMgr.Ensure()
+	if err == nil {
+		err = internalroot.EnsureBuiltinSkills(workspaceRoot)
+	}
+
+	m.workspacePrepMu.Lock()
+	m.preparedRoots[workspaceRoot] = err
+	m.workspacePrepMu.Unlock()
+	return err
+}
+
+func (m *AgentManager) sessionManagerForWorkspace(workspaceRoot string) (*session.Manager, error) {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return m.sessionMgr, nil
+	}
+	if m.sessionPool == nil {
+		if m.sessionMgr != nil {
+			return m.sessionMgr, nil
+		}
+		return session.NewManager(filepath.Join(workspaceRoot, "sessions"))
+	}
+	return m.sessionPool.Get(filepath.Join(workspaceRoot, "sessions"))
+}
+
+func (m *AgentManager) sessionManagerForMsg(msg *bus.InboundMessage) (*session.Manager, string, error) {
+	workspaceRoot := m.resolveWorkspaceRootForMsg(msg)
+	if err := m.prepareWorkspaceRoot(workspaceRoot); err != nil {
+		return nil, workspaceRoot, err
+	}
+	manager, err := m.sessionManagerForWorkspace(workspaceRoot)
+	return manager, workspaceRoot, err
+}
+
+func (m *AgentManager) sessionManagerForSessionKey(sessionKey string) (*session.Manager, string, error) {
+	workspaceRoot := m.resolveWorkspaceRootForSessionKey(sessionKey)
+	if err := m.prepareWorkspaceRoot(workspaceRoot); err != nil {
+		return nil, workspaceRoot, err
+	}
+	manager, err := m.sessionManagerForWorkspace(workspaceRoot)
+	return manager, workspaceRoot, err
+}
+
+func (m *AgentManager) loadSkillsForWorkspace(workspaceRoot string) []*Skill {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		if m.skillsLoader != nil {
+			return m.skillsLoader.List()
+		}
+		return nil
+	}
+	loader := NewWorkspaceSkillsLoader(workspaceRoot)
+	if err := loader.Discover(); err != nil {
+		logger.Warn("Failed to discover namespace skills",
+			zap.String("workspace_root", workspaceRoot),
+			zap.Error(err))
+		return nil
+	}
+	return loader.List()
+}
+
 func extractThreadSessionID(msg *bus.InboundMessage) string {
 	if msg == nil || msg.Metadata == nil {
 		return ""
@@ -1006,15 +1283,29 @@ func (m *AgentManager) buildSessionKey(msg *bus.InboundMessage) string {
 }
 
 func (m *AgentManager) buildBaseSessionKey(msg *bus.InboundMessage) string {
-	accountID := normalizeAccountID(msg.AccountID)
-	sessionKey := fmt.Sprintf("%s:%s:%s", msg.Channel, accountID, msg.ChatID)
-	if msg.ChatID == "default" || msg.ChatID == "" {
-		sessionKey = fmt.Sprintf("%s:%s", msg.Channel, accountID)
+	identity := namespaces.FromInboundMessage(msg)
+	return namespaces.BuildConversationSessionKey(identity, msg.ChatID, extractThreadSessionID(msg))
+}
+
+func (m *AgentManager) buildShrimpBrainUserKey(msg *bus.InboundMessage) string {
+	return m.buildBaseSessionKey(msg)
+}
+
+func (m *AgentManager) buildShrimpBrainBlockKey(msg *bus.InboundMessage, sessionKey string, sess *session.Session) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		sessionKey = m.buildSessionKey(msg)
 	}
-	if threadID := extractThreadSessionID(msg); threadID != "" {
-		sessionKey = sessionKey + ":thread:" + threadID
+	sessionInstanceID := ""
+	if sess != nil && sess.Metadata != nil {
+		if raw, ok := sess.Metadata["session_id"].(string); ok {
+			sessionInstanceID = strings.TrimSpace(raw)
+		}
 	}
-	return sessionKey
+	if sessionInstanceID == "" {
+		return sessionKey
+	}
+	return sessionKey + ":instance:" + sessionInstanceID
 }
 
 func (m *AgentManager) buildSessionKeyCandidates(msg *bus.InboundMessage) []string {
@@ -1028,14 +1319,16 @@ func (m *AgentManager) buildSessionKeyCandidates(msg *bus.InboundMessage) []stri
 	if canonical != "" && canonical != baseKey {
 		keys = append(keys, canonical)
 	}
-	if rawAccountID := strings.TrimSpace(msg.AccountID); rawAccountID == "" {
-		legacyBase := strings.Replace(baseKey, ":default", ":", 1)
-		if legacyBase != baseKey {
-			keys = append(keys, legacyBase)
+	if strings.TrimSpace(msg.SenderID) == "" {
+		legacyBase := fmt.Sprintf("%s:%s:%s", msg.Channel, strings.TrimSpace(msg.AccountID), msg.ChatID)
+		if msg.ChatID == "default" || msg.ChatID == "" {
+			legacyBase = fmt.Sprintf("%s:%s", msg.Channel, strings.TrimSpace(msg.AccountID))
 		}
-		legacyCanonical := strings.Replace(canonical, ":default", ":", 1)
-		if legacyCanonical != "" && legacyCanonical != canonical && legacyCanonical != legacyBase {
-			keys = append(keys, legacyCanonical)
+		if threadID := extractThreadSessionID(msg); threadID != "" {
+			legacyBase += ":thread:" + threadID
+		}
+		if legacyBase != "" {
+			keys = append(keys, legacyBase)
 		}
 	}
 	return keys
@@ -1118,17 +1411,21 @@ func (m *AgentManager) resetSessionContextIfNeeded(ctx context.Context, msg *bus
 	if msg == nil || !isNewSessionCommand(msg.Content) {
 		return false, nil
 	}
-	if m.sessionMgr == nil {
+	sessionMgr, _, err := m.sessionManagerForMsg(msg)
+	if err != nil {
+		return true, fmt.Errorf("failed to resolve session manager: %w", err)
+	}
+	if sessionMgr == nil {
 		return true, fmt.Errorf("session manager is not available")
 	}
 
 	sessionKey := m.buildSessionKey(msg)
-	if err := m.sessionMgr.Delete(sessionKey); err != nil {
+	if err := sessionMgr.Delete(sessionKey); err != nil {
 		return true, fmt.Errorf("failed to reset session context: %w", err)
 	}
 
 	newSessionID := uuid.NewString()
-	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
+	sess, err := sessionMgr.GetOrCreate(sessionKey)
 	if err != nil {
 		return true, fmt.Errorf("failed to create new session: %w", err)
 	}
@@ -1137,7 +1434,7 @@ func (m *AgentManager) resetSessionContextIfNeeded(ctx context.Context, msg *bus
 	}
 	sess.Metadata["session_id"] = newSessionID
 	sess.Metadata["reset_at"] = time.Now().Format(time.RFC3339Nano)
-	if err := m.sessionMgr.Save(sess); err != nil {
+	if err := sessionMgr.Save(sess); err != nil {
 		return true, fmt.Errorf("failed to persist new session metadata: %w", err)
 	}
 
@@ -1186,6 +1483,14 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 
 	// 生成会话键（包含 account_id 以区分不同账号的消息）
 	sessionKey := m.buildSessionKey(msg)
+	sessionMgr, workspaceRoot, err := m.sessionManagerForMsg(msg)
+	if err != nil {
+		logger.Error("Failed to resolve namespaced session manager", zap.Error(err))
+		return err
+	}
+	if sessionMgr == nil {
+		return fmt.Errorf("session manager is not available")
+	}
 	if msg.ChatID == "default" || msg.ChatID == "" {
 		logger.Debug("[Manager] Creating fresh session", zap.String("session_key", sessionKey))
 	}
@@ -1193,7 +1498,7 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 	replyTo := outboundReplyTarget(msg)
 
 	// 获取或创建会话
-	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
+	sess, err := sessionMgr.GetOrCreate(sessionKey)
 	if err != nil {
 		logger.Error("Failed to get session", zap.Error(err))
 		return err
@@ -1219,11 +1524,27 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 
 	// 获取 Agent 的 orchestrator
 	orchestrator := agent.GetOrchestrator()
+	mainAgentID := agent.GetState().AgentID
+
+	if m.shrimpBrain != nil {
+		m.shrimpBrain.StartMainTask(
+			msg.ID,
+			m.buildShrimpBrainBlockKey(msg, sessionKey, sess),
+			m.buildShrimpBrainUserKey(msg),
+			sessionKey,
+			mainAgentID,
+			msg.Channel,
+			msg.ChatID,
+			msg.Content,
+		)
+	}
 
 	// 为本次请求创建独立的 AgentState，避免并发请求共享状态导致竞争
 	// 使用 Clone() 深拷贝，确保每个请求有独立的 Messages、SteeringQueue、FollowUpQueue 等
 	runState := orchestrator.state.Clone()
 	runState.SessionKey = sessionKey // 设置本次请求的 sessionKey
+	runState.WorkspaceRoot = workspaceRoot
+	runState.ContextSummary = sess.GetSummary()
 
 	// 为本次 Run 克隆一份独立的 LoopConfig，避免并发请求互相覆盖回调。
 	// 子 agent 完成后把结果 push 到 m.followUpQueues[sessionKey]，
@@ -1231,6 +1552,9 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 	// 自动递减 state.PendingSubagents，实现"等所有子 agent 完成再汇总"。
 	capturedSessionKey := sessionKey
 	runConfig := *orchestrator.config // shallow copy
+	runConfig.SessionMgr = sessionMgr
+	runConfig.Skills = m.loadSkillsForWorkspace(workspaceRoot)
+	runConfig.ShrimpBrain = m.shrimpBrain
 	runConfig.GetFollowUpMessages = func() ([]AgentMessage, error) {
 		msgs := m.popFollowUps(capturedSessionKey)
 		if len(msgs) > 0 {
@@ -1260,7 +1584,11 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 		zap.Int("total_messages", len(allMessages)),
 	)
 	runCtx := withInboundToolContext(ctx, msg)
+	runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
+	runCtx = context.WithValue(runCtx, "tenant_id", namespaces.FromInboundMessage(msg).TenantID)
+	runCtx = context.WithValue(runCtx, SessionSummaryContextKey, runState.ContextSummary)
 	finalMessages, err := runOrchestrator.Run(runCtx, allMessages)
+	summaryAfterRun := strings.TrimSpace(runOrchestrator.state.ContextSummary)
 	logger.Info("[Manager] Agent execution completed",
 		zap.String("message_id", msg.ID),
 		zap.Int("final_messages", len(finalMessages)),
@@ -1273,21 +1601,35 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 			logger.Warn("Detected old session format, clearing session",
 				zap.String("session_key", sessionKey),
 				zap.Error(err))
-			if delErr := m.sessionMgr.Delete(sessionKey); delErr != nil {
+			if delErr := sessionMgr.Delete(sessionKey); delErr != nil {
 				logger.Error("Failed to clear old session", zap.Error(delErr))
 			} else {
-				sess, getErr := m.sessionMgr.GetOrCreate(sessionKey)
+				sess, getErr := sessionMgr.GetOrCreate(sessionKey)
 				if getErr != nil {
 					logger.Error("Failed to create fresh session", zap.Error(getErr))
 					return getErr
 				}
 				finalMessages, retryErr := runOrchestrator.Run(runCtx, []AgentMessage{agentMsg})
+				summaryAfterRun = strings.TrimSpace(runOrchestrator.state.ContextSummary)
 				if retryErr != nil {
+					if m.shrimpBrain != nil {
+						m.shrimpBrain.RecordRunError(sessionKey, mainAgentID, false, retryErr.Error())
+					}
 					logger.Error("Agent execution failed on retry", zap.Error(retryErr))
 					return retryErr
 				}
-				m.updateSession(sess, finalMessages, 0)
+				if summaryAfterRun != "" {
+					sess.SetSummary(summaryAfterRun)
+					_ = sessionMgr.Save(sess)
+				}
+				m.updateSession(sessionMgr, sess, finalMessages, 0)
+				if maybeCompactSession(runCtx, runConfig.Provider, sess, maxHistory, runConfig.ContextWindow, runConfig.MaxTokens) {
+					_ = sessionMgr.Save(sess)
+				}
 				if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
+					if m.shrimpBrain != nil {
+						m.shrimpBrain.RecordMainReply(sessionKey, mainAgentID, extractTextContent(*replyMsg))
+					}
 					m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 				}
 				return nil
@@ -1299,20 +1641,44 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 		if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
 			logger.Warn("Agent error but publishing last assistant message",
 				zap.Error(err))
-			m.updateSession(sess, finalMessages, len(history))
+			if m.shrimpBrain != nil {
+				m.shrimpBrain.RecordRunError(sessionKey, mainAgentID, false, err.Error())
+				m.shrimpBrain.RecordMainReply(sessionKey, mainAgentID, extractTextContent(*replyMsg))
+			}
+			if summaryAfterRun != "" {
+				sess.SetSummary(summaryAfterRun)
+				_ = sessionMgr.Save(sess)
+			}
+			m.updateSession(sessionMgr, sess, finalMessages, len(history))
+			if maybeCompactSession(runCtx, runConfig.Provider, sess, maxHistory, runConfig.ContextWindow, runConfig.MaxTokens) {
+				_ = sessionMgr.Save(sess)
+			}
 			m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 			return nil
 		}
 
+		if m.shrimpBrain != nil {
+			m.shrimpBrain.RecordRunError(sessionKey, mainAgentID, false, err.Error())
+		}
 		logger.Error("Agent execution failed", zap.Error(err))
 		return err
 	}
 
 	// 更新会话（只保存新产生的消息）
-	m.updateSession(sess, finalMessages, len(history))
+	if summaryAfterRun != "" {
+		sess.SetSummary(summaryAfterRun)
+		_ = sessionMgr.Save(sess)
+	}
+	m.updateSession(sessionMgr, sess, finalMessages, len(history))
+	if maybeCompactSession(runCtx, runConfig.Provider, sess, maxHistory, runConfig.ContextWindow, runConfig.MaxTokens) {
+		_ = sessionMgr.Save(sess)
+	}
 
 	// 发布响应
 	if replyMsg := findLatestReplyableAssistantMessage(finalMessages); replyMsg != nil {
+		if m.shrimpBrain != nil {
+			m.shrimpBrain.RecordMainReply(sessionKey, mainAgentID, extractTextContent(*replyMsg))
+		}
 		m.publishAssistantReply(ctx, msg.Channel, msg.AccountID, msg.ChatID, buildOutboundMetadataFromInbound(msg), *replyMsg, replyTo)
 	}
 
@@ -1571,14 +1937,18 @@ func (m *AgentManager) publishAcpThreadBindingText(ctx context.Context, msg *bus
 }
 
 // updateSession 更新会话
-func (m *AgentManager) updateSession(sess *session.Session, messages []AgentMessage, historyLen int) {
+func (m *AgentManager) updateSession(sessionMgr *session.Manager, sess *session.Session, messages []AgentMessage, historyLen int) {
 	// 只保存新产生的消息（不包括历史消息）
 	newMessages := messages
 	if historyLen >= 0 && len(messages) > historyLen {
 		newMessages = messages[historyLen:]
 	}
 
-	_ = m.helper.UpdateSession(sess, newMessages, &UpdateSessionOptions{SaveImmediately: true})
+	helper := m.helper
+	if sessionMgr != nil {
+		helper = NewAgentHelper(sessionMgr)
+	}
+	_ = helper.UpdateSession(sess, newMessages, &UpdateSessionOptions{SaveImmediately: true})
 }
 
 // publishToBus 发布消息到总线
@@ -1634,11 +2004,16 @@ func (m *AgentManager) publishAssistantReply(ctx context.Context, channel, accou
 }
 
 func (m *AgentManager) GetSessionRecentPreview(sessionKey string) string {
-	if m == nil || m.sessionMgr == nil || strings.TrimSpace(sessionKey) == "" {
+	if m == nil || strings.TrimSpace(sessionKey) == "" {
 		return "暂无历史消息"
 	}
 
-	sess, err := m.sessionMgr.GetOrCreate(sessionKey)
+	sessionMgr, _, err := m.sessionManagerForSessionKey(sessionKey)
+	if err != nil || sessionMgr == nil {
+		return "暂无历史消息"
+	}
+
+	sess, err := sessionMgr.GetOrCreate(sessionKey)
 	if err != nil || sess == nil {
 		return "暂无历史消息"
 	}
@@ -1773,8 +2148,12 @@ func (m *AgentManager) Start(ctx context.Context) error {
 			zap.String("agent_id", id))
 	}
 
-	// 启动消息处理器
-	go m.processMessages(ctx)
+	workers := m.effectiveInboundWorkers()
+	logger.Info("Starting inbound worker pool",
+		zap.Int("workers", workers))
+	for i := 0; i < workers; i++ {
+		go m.processMessages(ctx, i)
+	}
 
 	return nil
 }
@@ -1844,11 +2223,7 @@ func (m *AgentManager) applyAgentRuntimeConfig(cfg *config.Config) {
 			continue
 		}
 
-		if strings.TrimSpace(agentCfg.SystemPrompt) != "" {
-			agent.SetSystemPrompt(agentCfg.SystemPrompt)
-		} else {
-			agent.SetSystemPrompt(agent.context.buildBuiltinGenericCore(PromptModeFull))
-		}
+		agent.SetSystemPrompt(strings.TrimSpace(agentCfg.SystemPrompt))
 
 		var filtered []Tool
 		if agentCfg.Subagents != nil && len(agentCfg.Subagents.AllowTools) > 0 {
@@ -1896,11 +2271,12 @@ func (m *AgentManager) applyAgentRuntimeConfig(cfg *config.Config) {
 }
 
 // processMessages 处理入站消息
-func (m *AgentManager) processMessages(ctx context.Context) {
+func (m *AgentManager) processMessages(ctx context.Context, workerID int) {
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("Agent manager message processor stopped")
+			logger.Info("Agent manager message processor stopped",
+				zap.Int("worker_id", workerID))
 			return
 		default:
 			msg, err := m.bus.ConsumeInbound(ctx)
@@ -1913,6 +2289,7 @@ func (m *AgentManager) processMessages(ctx context.Context) {
 			}
 
 			logger.Debug("[Manager] Consumed inbound message from bus",
+				zap.Int("worker_id", workerID),
 				zap.String("message_id", msg.ID),
 				zap.String("channel", msg.Channel),
 				zap.String("chat_id", msg.ChatID),
@@ -1932,6 +2309,14 @@ func (m *AgentManager) GetDefaultAgent() *Agent {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.defaultAgent
+}
+
+// GetShrimpBrain returns the structured collaboration tracker.
+func (m *AgentManager) GetShrimpBrain() *ShrimpBrainTracker {
+	if m == nil {
+		return nil
+	}
+	return m.shrimpBrain
 }
 
 // GetToolsInfo 获取工具信息
@@ -2032,12 +2417,12 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 
 		// 拼接目录段落
 		var sb strings.Builder
-		sb.WriteString("## 可派生 Agent 目录\n")
-		sb.WriteString("调用 sessions_spawn 时**必须**设置 `agent_id` 字段，指定由哪个 Agent 执行任务：\n")
+		sb.WriteString("<available_agents>\n")
+		sb.WriteString("调用 sessions_spawn 时可以传 `agent_name` 或 `agent_id`；如果省略 `agent_id`，会优先按名称解析目标 Agent。\n")
 		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("\n- **agent_id: \"%s\"** — %s — %s\n", e.id, e.name, e.description))
+			sb.WriteString(fmt.Sprintf("\n- agent_name: \"%s\" | agent_id: \"%s\" — %s\n", e.name, e.id, e.description))
 		}
-		sb.WriteString("\n> ⚠️ 不传 agent_id 则子任务将由当前 Agent 自己执行，无法利用专属模型能力。\n")
+		sb.WriteString("\n</available_agents>")
 
 		// 保存到该 Agent 的独立动态层，由运行时统一装配。
 		agent.SetSpawnableAgentCatalog(strings.TrimSpace(sb.String()))

@@ -136,10 +136,12 @@ func TestSessionContextRouterArchive_PreventsSwitchUntilUnarchive(t *testing.T) 
 func TestSessionContextRouterLoadFromDisk_BackwardCompatibleWithoutArchived(t *testing.T) {
 	tempDir := t.TempDir()
 	path := filepath.Join(tempDir, "session_context_routes.json")
+	baseSessionKey := "tenant:default:channel:telegram:account:default:sender:user-1:chat:chat-1"
+	aliasSessionKey := baseSessionKey + ":session:task-a"
 	state := map[string]any{
-		"active_alias": map[string]string{"telegram:default:chat-1": "task-a"},
+		"active_alias": map[string]string{baseSessionKey: "task-a"},
 		"aliases": map[string]map[string]string{
-			"telegram:default:chat-1": {"task-a": "telegram:default:chat-1:session:task-a"},
+			baseSessionKey: {"task-a": aliasSessionKey},
 		},
 	}
 	data, err := json.Marshal(state)
@@ -151,14 +153,48 @@ func TestSessionContextRouterLoadFromDisk_BackwardCompatibleWithoutArchived(t *t
 	}
 
 	router := NewSessionContextRouter(tempDir)
-	baseSessionKey := "telegram:default:chat-1"
 	if got := router.CurrentAlias(baseSessionKey); got != "task-a" {
 		t.Fatalf("expected current alias task-a, got %q", got)
 	}
 	if router.IsArchived(baseSessionKey, "task-a") {
 		t.Fatalf("expected task-a not archived when archived field is absent")
 	}
-	if got := router.Resolve(baseSessionKey); got != "telegram:default:chat-1:session:task-a" {
+	if got := router.Resolve(baseSessionKey); got != aliasSessionKey {
 		t.Fatalf("unexpected resolved session key: %q", got)
+	}
+}
+
+func TestSessionContextRouterLoadFromDisk_PrunesLegacyKeys(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "session_context_routes.json")
+	structuredBase := "tenant:default:channel:telegram:account:default:sender:user-1:chat:chat-1"
+	structuredAlias := structuredBase + ":session:task-a"
+	state := map[string]any{
+		"active_alias": map[string]string{
+			"telegram:default:chat-1": "legacy",
+			structuredBase:            "task-a",
+		},
+		"aliases": map[string]map[string]string{
+			"telegram:default:chat-1": {"legacy": "telegram:default:chat-1:session:legacy"},
+			structuredBase:            {"task-a": structuredAlias},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	router := NewSessionContextRouter(tempDir)
+	if got := router.CurrentAlias("telegram:default:chat-1"); got != "" {
+		t.Fatalf("expected legacy base key to be pruned, got alias %q", got)
+	}
+	if got := router.CurrentAlias(structuredBase); got != "task-a" {
+		t.Fatalf("expected structured base key to remain, got %q", got)
+	}
+	if got := router.Resolve(structuredBase); got != structuredAlias {
+		t.Fatalf("expected structured alias to remain, got %q", got)
 	}
 }

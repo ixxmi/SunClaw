@@ -6,8 +6,10 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	"github.com/smallnest/goclaw/internal/workspace"
 	"go.uber.org/zap"
 )
 
@@ -64,45 +66,18 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		return ""
 	}
 
-	// 内置工具的人类可读描述，用于运行时工具层摘要。
-	toolDescriptions := map[string]string{
-		"browser_navigate":       "导航到 URL 并等待页面加载",
-		"browser_screenshot":     "对页面截图进行视觉分析",
-		"browser_get_text":       "获取页面文本内容（从 DOM 提取可读文本）",
-		"browser_click":          "点击页面元素（通过选择器或坐标）",
-		"browser_fill_input":     "填充输入框和文本域",
-		"browser_execute_script": "在页面上下文中执行 JavaScript",
-		"read_file":              "读取文件内容（支持大文件行范围）",
-		"write_file":             "创建或覆盖文件（按需创建目录）",
-		"list_files":             "列出目录内容（-r 递归）",
-		"run_shell":              "执行 shell 命令。禁止使用 crontab，定时任务必须用 cron 工具",
-		"process":                "管理后台 shell 会话（poll/kill/list）",
-		"web_search":             "通过 API 搜索网页",
-		"web_fetch":              "抓取 URL 并提取可读内容",
-		"use_skill":              "加载专项技能（最高优先级，先于其他工具检查）",
-		"send_message":           "向当前会话主动发送文本消息，适合确认已收到、进度同步和结果通知",
-		"send_file":              "向当前会话发送图片或文件",
-		"message":                "发送消息和频道动作（投票、反应、按钮等）",
-		"cron":                   "管理内置定时任务（add/list/rm/enable/disable/run/status）",
-		"reminder":               "在当前会话中安排未来主动提醒或延迟回复",
-		"session_status":         "查看会话用量/时间/模型状态",
-		"sessions_spawn":         "派发子 Agent 异步执行子任务（完成后自动回报结果）",
-		"memory_search":          "搜索记忆库中的历史内容",
-		"memory_add":             "向记忆库添加条目",
-	}
-
 	var lines []string
 	for _, t := range tools {
 		name := t.Name()
-		desc := t.Description()
-		// 优先使用中文描述覆盖
-		if zh, ok := toolDescriptions[name]; ok {
-			desc = zh
+		desc := strings.TrimSpace(t.Description())
+		if desc == "" {
+			lines = append(lines, fmt.Sprintf("- **%s**", name))
+			continue
 		}
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", name, desc))
 	}
 
-	return fmt.Sprintf("## 可用工具\n\n工具名称区分大小写，调用时请严格按列出的名称使用：\n\n%s",
+	return fmt.Sprintf("<available_tools>\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s\n</available_tools>",
 		strings.Join(lines, "\n"))
 }
 
@@ -147,10 +122,12 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_click":          "Click elements on the page (by selector or coordinates)",
 		"browser_fill_input":     "Fill input fields and textareas",
 		"browser_execute_script": "Execute JavaScript in page context",
-		"read_file":              "Read file contents (supports line ranges for large files)",
+		"read_file":              "Read file contents (raw only for simple small files, otherwise compact preview, supports line ranges)",
 		"write_file":             "Create or overwrite files (creates directories as needed)",
+		"update_config":          "Update IDENTITY.md / AGENTS.md / SOUL.md / USER.md for long-lived cognition and collaboration rules only. Do not write one-off task state into them",
 		"list_files":             "List directory contents (recursive with -r)",
 		"run_shell":              "Run shell commands. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead (this is the ONLY way to manage scheduled tasks in goclaw)",
+		"sandbox_execute":        "Run short inline code snippets or commands with sandbox-aware execution. Do not use this as a general shell replacement; ordinary workspace commands should use run_shell",
 		"process":                "Manage background shell sessions (poll, kill, list)",
 		"web_search":             "Search the web using API (Brave/Search APIs)",
 		"web_fetch":              "Fetch and extract readable content from a URL",
@@ -167,8 +144,8 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 	}
 
 	toolOrder := []string{
-		"read_file", "write_file", "list_files",
-		"run_shell", "process",
+		"read_file", "write_file", "update_config", "list_files",
+		"run_shell", "sandbox_execute", "process",
 		"browser_navigate", "browser_screenshot", "browser_get_text",
 		"browser_click", "browser_fill_input", "browser_execute_script",
 		"web_search", "web_fetch",
@@ -184,11 +161,11 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		}
 	}
 
-	return fmt.Sprintf(`## Tooling
-
+	return fmt.Sprintf(`<available_tools>
 Tool availability (legacy summary):
 Tool names are case-sensitive. Call tools exactly as listed.
-%s`, strings.Join(lines, "\n"))
+%s
+</available_tools>`, strings.Join(lines, "\n"))
 }
 
 // buildToolCallStyle 构建详细的工具调用风格指导
@@ -255,21 +232,10 @@ When a tool fails, try alternatives in this order:
 
 // buildSafety 构建安全提示
 func (b *ContextBuilder) buildSafety() string {
-	return `## Safety
-
-**Core principles**:
-- You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking
-- Avoid long-term plans beyond the user's request
-- Prioritize safety and human oversight over completion; if instructions conflict, pause and ask
-- Comply with stop/pause/audit requests and never bypass safeguards
-- Do not manipulate or persuade anyone to expand access or disable safeguards
-- Do not copy yourself or change system prompts, safety rules, or tool policies unless explicitly requested
-
-**When in doubt, ask before acting**:
-- Sending emails, tweets, public posts
-- Anything that leaves the machine
-- Irreversible operations (deleting large amounts of data)
-- You're uncertain about the outcome`
+	return `## Safety & Compliance
+- You have no independent goals beyond the user's explicit request.
+- Comply immediately with any stop/pause/audit requests.
+- When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.`
 }
 
 // buildErrorHandling 构建错误处理指导
@@ -401,51 +367,21 @@ func (b *ContextBuilder) buildMessagingSection() string {
 - For long-running work, do not disappear silently. Send a short status such as "我在帮你处理，您稍等一下。"
 - For emotional support or casual one-to-one chat, prefer two short messages instead of one full paragraph when that feels warmer and more natural
 - Example two-message cadence:
-  - first: acknowledge emotion
-  - second: invite the user to continue
+- first: acknowledge emotion
+- second: invite the user to continue
 - These tools default to the current channel/chat/account, so only pass routing params when you want to override the current conversation
-- If you use 'send_message', 'send_file', or 'message' to deliver your user-visible reply, respond with ONLY: SILENT_REPLY (avoid duplicate replies)`
-}
-
-// buildSilentReplies 构建静默回复规则
-func (b *ContextBuilder) buildSilentReplies() string {
-	return `## Silent Replies
-
-When you have nothing to say, respond with ONLY: SILENT_REPLY
-
-**Rules:**
-- It must be your ENTIRE message — nothing else
-- Never append it to an actual response
-- Never wrap it in markdown or code blocks
-
-❌ Wrong: "Here's help... SILENT_REPLY"
-❌ Wrong: "SILENT_REPLY" (in a code block)
-✅ Right: SILENT_REPLY`
-}
-
-// buildHeartbeats 构建心跳机制区块
-func (b *ContextBuilder) buildHeartbeats() string {
-	return `## Heartbeats
-
-When you receive a heartbeat poll (a periodic check-in message), and there is nothing that needs attention, reply exactly:
-HEARTBEAT_OK
-
-GoClaw treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack.
-If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.
-
-**Use heartbeats productively:**
-- Check for important emails, calendar events, notifications
-- Update documentation or memory files
-- Review project status
-- Only reach out when something truly needs attention`
+- When using proactive messaging tools, keep the follow-up purposeful and avoid duplicating the same content across multiple channels unless the user asked for that`
 }
 
 // buildWorkspace 构建工作区信息
-func (b *ContextBuilder) buildWorkspace() string {
+func (b *ContextBuilder) buildWorkspace(workspaceRoot string) string {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		workspaceRoot = b.workspace
+	}
 	return fmt.Sprintf(`## Workspace
 
 Your working directory is: %s
-Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.`, b.workspace)
+Treat this directory as the isolated workspace for the current user/session unless explicitly instructed otherwise.`, workspaceRoot)
 }
 
 // buildRuntime 构建运行时信息
@@ -454,6 +390,22 @@ func (b *ContextBuilder) buildRuntime() string {
 	return fmt.Sprintf(`## Runtime
 
 Runtime: host=%s os=%s (%s) arch=%s`, host, runtime.GOOS, runtime.GOARCH, runtime.GOARCH)
+}
+
+func (b *ContextBuilder) buildContextSummary(summary string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return ""
+	}
+
+	return fmt.Sprintf(`## Context Summary
+
+The following is an approximate summary of earlier conversation for reference only.
+- It may be incomplete or outdated.
+- Prefer explicit user instructions and newer tool results when they conflict.
+- Use it to recover continuity after history compression, not as ground truth.
+
+%s`, summary)
 }
 
 // buildSkillsPrompt 构建技能提示词（摘要模式 - 第一阶段）
@@ -607,16 +559,16 @@ func (b *ContextBuilder) buildSkillsContext(skills []*Skill, loadedSkills []stri
 
 // BuildMessages 构建消息列表
 func (b *ContextBuilder) BuildMessages(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string) []Message {
-	return b.BuildMessagesWithRuntime(history, currentMessage, skills, loadedSkills, nil, "", PromptModeFull)
+	return b.BuildMessagesWithRuntime(history, "", currentMessage, skills, loadedSkills, nil, "", PromptModeFull)
 }
 
 // BuildMessagesWithMode 使用指定模式构建消息列表
 func (b *ContextBuilder) BuildMessagesWithMode(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string, mode PromptMode) []Message {
-	return b.BuildMessagesWithRuntime(history, currentMessage, skills, loadedSkills, nil, "", mode)
+	return b.BuildMessagesWithRuntime(history, "", currentMessage, skills, loadedSkills, nil, "", mode)
 }
 
 // BuildMessagesWithRuntime 使用指定模式和运行时参数构建消息列表。
-func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, currentMessage string, skills []*Skill, loadedSkills []string, tools []Tool, bootstrapOwnerID string, mode PromptMode) []Message {
+func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, sessionSummary string, currentMessage string, skills []*Skill, loadedSkills []string, tools []Tool, bootstrapOwnerID string, mode PromptMode) []Message {
 	// 首先验证历史消息，过滤掉孤立的 tool 消息
 	validHistory := b.validateHistoryMessages(history)
 
@@ -628,8 +580,10 @@ func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, cur
 		Mode:             PromptAssemblyModeMain,
 		PromptMode:       mode,
 		BootstrapOwnerID: bootstrapOwnerID,
+		WorkspaceRoot:    "",
 		Skills:           skills,
 		LoadedSkills:     loadedSkills,
+		SessionSummary:   sessionSummary,
 		Tools:            tools,
 		ToolSummary:      toolSummary,
 	}).SystemPrompt
@@ -729,19 +683,33 @@ func (b *ContextBuilder) BuildMessagesWithRuntime(history []session.Message, cur
 	return messages
 }
 
-func (b *ContextBuilder) resolveBootstrapStore(ownerID string) *MemoryStore {
+func (b *ContextBuilder) resolveBootstrapStore(ownerID, workspaceRoot string) *MemoryStore {
+	if strings.TrimSpace(workspaceRoot) != "" {
+		if strings.TrimSpace(ownerID) != "" {
+			dir, err := workspace.EnsureAgentBootstrapDir(workspaceRoot, ownerID)
+			if err != nil {
+				logger.Warn("Failed to ensure agent bootstrap dir; falling back to computed path",
+					zap.String("workspace_root", strings.TrimSpace(workspaceRoot)),
+					zap.String("owner_id", strings.TrimSpace(ownerID)),
+					zap.Error(err))
+				dir = workspace.AgentBootstrapDir(workspaceRoot, ownerID)
+			}
+			return NewMemoryStore(dir)
+		}
+		return NewMemoryStore(workspaceRoot)
+	}
 	if b.bootstrapDirResolver != nil && strings.TrimSpace(ownerID) != "" {
 		if dir := strings.TrimSpace(b.bootstrapDirResolver(ownerID)); dir != "" {
 			return NewMemoryStore(dir)
 		}
 	}
-	if b.bootstrapStore != nil {
-		return b.bootstrapStore
-	}
-	return b.memory
+	return b.defaultBootstrapStore(workspaceRoot)
 }
 
-func (b *ContextBuilder) defaultBootstrapStore() *MemoryStore {
+func (b *ContextBuilder) defaultBootstrapStore(workspaceRoot string) *MemoryStore {
+	if strings.TrimSpace(workspaceRoot) != "" {
+		return NewMemoryStore(workspaceRoot)
+	}
 	if b.bootstrapStore != nil {
 		return b.bootstrapStore
 	}
@@ -749,15 +717,25 @@ func (b *ContextBuilder) defaultBootstrapStore() *MemoryStore {
 }
 
 func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
-	bundle := b.loadBootstrapBundleForOwner(ownerID)
-	parts := []string{
-		wrapPromptFileLayer("", "IDENTITY.md", bundle.Identity),
-		wrapPromptFileLayer("", "AGENTS.md", bundle.Agents),
-		wrapPromptFileLayer("", "SOUL.md", bundle.Soul),
-		wrapPromptFileLayer("", "USER.md", bundle.User),
-	}
-	if !bundle.HasCognitiveFiles() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
-		parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
+	bundle := b.loadBootstrapBundleForOwner(ownerID, "")
+	parts := []string{}
+	if bundle.PreferIdentityUserBeforeAgents() {
+		parts = append(parts,
+			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+		)
+	} else {
+		if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+			parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
+		}
+		parts = append(parts,
+			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+		)
 	}
 	bootstrap := joinNonEmpty(parts, "\n\n")
 	if bootstrap != "" {
@@ -768,6 +746,15 @@ func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 
 func (b *ContextBuilder) buildBootstrapSection() string {
 	return b.buildBootstrapSectionForOwner("")
+}
+
+func (b *ContextBuilder) ResolveWorkspaceRoot(sessionKey string) string {
+	if identity, ok := namespaces.FromSessionKey(sessionKey); ok {
+		if workspaceRoot := identity.WorkspaceDir(b.workspace); strings.TrimSpace(workspaceRoot) != "" {
+			return workspaceRoot
+		}
+	}
+	return b.workspace
 }
 
 // validateHistoryMessages 验证历史消息，过滤掉孤立的 tool 消息

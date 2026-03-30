@@ -21,6 +21,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -44,6 +45,8 @@ func NewTUIAgent(
 	workspace string,
 	maxIterations int,
 	skillsLoader *agent.SkillsLoader,
+	sandboxConfig config.SandboxConfig,
+	approvals config.ApprovalsConfig,
 ) (*TUIAgent, error) {
 	toolRegistry := agent.NewToolRegistry()
 
@@ -68,6 +71,9 @@ func NewTUIAgent(
 	for _, tool := range shellTool.GetTools() {
 		_ = toolRegistry.RegisterExisting(tool)
 	}
+
+	// Register sandbox tool
+	_ = toolRegistry.RegisterExisting(tools.NewSandboxToolWithConfig(sandboxConfig, approvals))
 
 	// Register web tool
 	webTool := tools.NewWebTool("", "", 30)
@@ -96,6 +102,10 @@ func NewTUIAgent(
 		Context:      contextBuilder,
 		Workspace:    workspace,
 		MaxIteration: maxIterations,
+		MaxTokens:    4096,
+		ContextWindow: agent.GuessContextWindowForModel(
+			"",
+		),
 		SkillsLoader: skillsLoader,
 	})
 	if err != nil {
@@ -216,6 +226,10 @@ func runTUI(cmd *cobra.Command, args []string) {
 	if err := internal.EnsureBuiltinSkills(workspace); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to ensure builtin skills: %v\n", err)
 	}
+	if err := workspacepkg.NewManager(workspace).Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to prepare workspace: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create message bus
 	messageBus := bus.NewMessageBus(100)
@@ -231,7 +245,6 @@ func runTUI(cmd *cobra.Command, args []string) {
 
 	// Create memory store
 	memoryStore := agent.NewMemoryStore(workspace)
-	_ = memoryStore.EnsureBootstrapFiles()
 
 	// Create context builder
 	contextBuilder := agent.NewContextBuilder(memoryStore, workspace)
@@ -261,7 +274,7 @@ func runTUI(cmd *cobra.Command, args []string) {
 		maxIterations = 15
 	}
 
-	tuiAgent, err := NewTUIAgent(messageBus, sessionMgr, provider, contextBuilder, workspace, maxIterations, skillsLoader)
+	tuiAgent, err := NewTUIAgent(messageBus, sessionMgr, provider, contextBuilder, workspace, maxIterations, skillsLoader, cfg.Tools.Shell.Sandbox, cfg.Approvals)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create TUI agent: %v\n", err)
 		os.Exit(1)
@@ -543,6 +556,7 @@ func runAgentIteration(
 
 		// Build messages
 		history := sess.GetHistory(tuiHistoryLimit)
+		sessionSummary := sess.GetSummary()
 
 		// 检查是否需要添加错误处理指导
 		var errorGuidance string
@@ -575,7 +589,7 @@ func runAgentIteration(
 		if toolRegistry != nil {
 			promptTools = agent.ToAgentTools(toolRegistry.List())
 		}
-		messages := contextBuilder.BuildMessagesWithRuntime(history, "", skills, loadedSkills, promptTools, "", agent.PromptModeFull)
+		messages := contextBuilder.BuildMessagesWithRuntime(history, sessionSummary, "", skills, loadedSkills, promptTools, "", agent.PromptModeFull)
 		providerMessages := make([]providers.Message, len(messages))
 		for i, msg := range messages {
 			var tcs []providers.ToolCall

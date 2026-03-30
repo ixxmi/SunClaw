@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { fetchControlConfig, saveControlConfig } from "./api/controlConfig";
 import { fetchDashboardSnapshot } from "./api/dashboard";
+import { deleteShrimpBrainRun, fetchShrimpBrainSnapshot } from "./api/shrimpBrain";
 import IconGlyph from "./components/IconGlyph.vue";
 import SectionCard from "./components/SectionCard.vue";
 import StatusPill from "./components/StatusPill.vue";
@@ -9,10 +10,27 @@ import {
   type ControlChannelConfig,
   type ControlConfig,
   type DashboardSnapshot,
+  type ShrimpBrainLoopNode,
+  type ShrimpBrainRun,
+  type ShrimpBrainSnapshot,
+  type ShrimpBrainToolCall,
   navStructure,
   pageMeta,
   type PageId,
 } from "./data/dashboard";
+
+interface ShrimpSessionGroup {
+  blockKey: string;
+  userKey: string;
+  sessionKey: string;
+  channel: string;
+  chatId: string;
+  mainAgentId: string;
+  status: string;
+  startedAt: number;
+  updatedAt: number;
+  runs: ShrimpBrainRun[];
+}
 
 const isSidebarOpen = ref(true);
 const activePage = ref<PageId>("chat");
@@ -25,7 +43,16 @@ const controlLoading = ref(false);
 const controlSaving = ref(false);
 const controlIssues = ref<string[]>([]);
 const controlMessage = ref("");
+const shrimpBrain = ref<ShrimpBrainSnapshot | null>(null);
+const shrimpBrainLoading = ref(false);
+const shrimpBrainError = ref("");
+const shrimpBrainStreamState = ref("connecting");
+const selectedShrimpSessionKey = ref("");
+const deletingShrimpRunId = ref("");
+const isUserInteracting = ref(false);
 let refreshTimer: number | undefined;
+let shrimpBrainStream: EventSource | null = null;
+let interactionTimer: number | undefined;
 
 const currentPage = computed(() => pageMeta[activePage.value]);
 
@@ -44,11 +71,61 @@ const configPreview = computed(() => snapshot.value?.config.preview ?? "");
 const debugRows = computed(() => snapshot.value?.debug ?? []);
 const logs = computed(() => snapshot.value?.logs ?? []);
 const docs = computed(() => snapshot.value?.docs ?? []);
+const shrimpRuns = computed(() => shrimpBrain.value?.runs ?? []);
+const shrimpSessions = computed<ShrimpSessionGroup[]>(() => {
+  const groups = new Map<string, ShrimpSessionGroup>();
+  for (const run of shrimpRuns.value) {
+    const key = run.blockKey || run.sessionKey || run.id;
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, {
+        blockKey: key,
+        userKey: run.userKey,
+        sessionKey: run.sessionKey,
+        channel: run.channel,
+        chatId: run.chatId,
+        mainAgentId: run.mainAgentId,
+        status: run.status,
+        startedAt: run.startedAt,
+        updatedAt: run.updatedAt,
+        runs: [run],
+      });
+      continue;
+    }
+    existing.runs.push(run);
+    existing.startedAt = Math.min(existing.startedAt, run.startedAt);
+    existing.updatedAt = Math.max(existing.updatedAt, run.updatedAt);
+    existing.status = run.status === "completed" && existing.status === "completed" ? "completed" : run.status;
+  }
+
+  const sessions = Array.from(groups.values());
+  for (const session of sessions) {
+    session.runs.sort((a, b) => a.startedAt - b.startedAt);
+  }
+  sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  return sessions;
+});
+const shrimpBrainGeneratedAtLabel = computed(() => {
+  if (!shrimpBrain.value?.generatedAt) {
+    return "";
+  }
+  return new Date(shrimpBrain.value.generatedAt).toLocaleString("zh-CN");
+});
+const selectedShrimpSession = computed(() => {
+  const sessions = shrimpSessions.value;
+  if (!sessions.length) {
+    return null;
+  }
+  return sessions.find((session) => session.blockKey === selectedShrimpSessionKey.value) ?? sessions[0];
+});
 const gatewayControl = computed(() => controlDraft.value?.gateway ?? null);
 const controlChannels = computed(() => controlDraft.value?.channels ?? []);
 const controlBindings = computed(() => controlDraft.value?.bindings ?? []);
 const controlAgents = computed(() => controlDraft.value?.agents ?? []);
 const generatedAtLabel = computed(() => {
+  if (activePage.value === "shrimpBrain") {
+    return shrimpBrainGeneratedAtLabel.value;
+  }
   if (!snapshot.value?.generatedAt) {
     return "";
   }
@@ -152,17 +229,128 @@ function normalizeControlState(value: ControlConfig): ControlConfig {
   return next;
 }
 
-async function loadSnapshot() {
-  loading.value = true;
-  error.value = "";
+function isInteractiveElement(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tag = target.tagName.toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    tag === "button" ||
+    target.isContentEditable
+  );
+}
+
+function beginInteraction(timeoutMs = 6000) {
+  isUserInteracting.value = true;
+  if (interactionTimer) {
+    window.clearTimeout(interactionTimer);
+  }
+  interactionTimer = window.setTimeout(() => {
+    isUserInteracting.value = false;
+  }, timeoutMs);
+}
+
+function endInteractionSoon() {
+  if (interactionTimer) {
+    window.clearTimeout(interactionTimer);
+  }
+  interactionTimer = window.setTimeout(() => {
+    isUserInteracting.value = false;
+  }, 800);
+}
+
+function shouldAutoRefresh() {
+  if (document.hidden) {
+    return false;
+  }
+  if (isUserInteracting.value || controlSaving.value || isControlDirty.value) {
+    return false;
+  }
+  if (activePage.value === "config" || activePage.value === "channels") {
+    return false;
+  }
+  return true;
+}
+
+async function loadSnapshot(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true;
+  if (!silent || !snapshot.value) {
+    loading.value = true;
+  }
+  if (!silent) {
+    error.value = "";
+  }
 
   try {
     snapshot.value = await fetchDashboardSnapshot();
+    if (!shrimpBrain.value && snapshot.value?.shrimpBrain) {
+      shrimpBrain.value = snapshot.value.shrimpBrain;
+      syncSelectedShrimpRun();
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "failed to load dashboard";
     error.value = message;
   } finally {
-    loading.value = false;
+    if (!silent || !snapshot.value) {
+      loading.value = false;
+    }
+  }
+}
+
+function syncSelectedShrimpRun() {
+  const sessions = shrimpSessions.value;
+  if (!sessions.length) {
+    selectedShrimpSessionKey.value = "";
+    return;
+  }
+  if (!selectedShrimpSessionKey.value || !sessions.some((session) => session.blockKey === selectedShrimpSessionKey.value)) {
+    selectedShrimpSessionKey.value = sessions[0].blockKey;
+  }
+}
+
+async function loadShrimpBrain(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true;
+  if (!silent || !shrimpBrain.value) {
+    shrimpBrainLoading.value = true;
+  }
+  if (!silent) {
+    shrimpBrainError.value = "";
+  }
+
+  try {
+    shrimpBrain.value = await fetchShrimpBrainSnapshot();
+    syncSelectedShrimpRun();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "failed to load shrimp brain";
+    shrimpBrainError.value = message;
+  } finally {
+    if (!silent || !shrimpBrain.value) {
+      shrimpBrainLoading.value = false;
+    }
+  }
+}
+
+async function handleDeleteShrimpRun(runId: string) {
+  if (!runId || deletingShrimpRunId.value) {
+    return;
+  }
+
+  const confirmed = window.confirm("删除后该条虾脑协作记录会从本地持久化中移除，是否继续？");
+  if (!confirmed) {
+    return;
+  }
+
+  deletingShrimpRunId.value = runId;
+  try {
+    await deleteShrimpBrainRun(runId);
+    await loadShrimpBrain({ silent: true });
+  } catch (err) {
+    shrimpBrainError.value = err instanceof Error ? err.message : "failed to delete shrimp brain run";
+  } finally {
+    deletingShrimpRunId.value = "";
   }
 }
 
@@ -187,7 +375,168 @@ async function loadControlState() {
 }
 
 async function handleHeaderAction(_action: string) {
-  await loadSnapshot();
+  await Promise.all([loadSnapshot(), loadShrimpBrain()]);
+}
+
+function connectShrimpBrainStream() {
+  if (shrimpBrainStream) {
+    shrimpBrainStream.close();
+    shrimpBrainStream = null;
+  }
+
+  if (typeof window === "undefined" || typeof window.EventSource === "undefined") {
+    shrimpBrainStreamState.value = "unsupported";
+    return;
+  }
+
+  shrimpBrainStreamState.value = "connecting";
+  shrimpBrainStream = new EventSource("/api/shrimp-brain/stream");
+
+  shrimpBrainStream.onopen = () => {
+    shrimpBrainStreamState.value = "live";
+  };
+
+  shrimpBrainStream.onmessage = (event) => {
+    try {
+      shrimpBrain.value = JSON.parse(event.data) as ShrimpBrainSnapshot;
+      shrimpBrainError.value = "";
+      syncSelectedShrimpRun();
+    } catch (err) {
+      shrimpBrainError.value = err instanceof Error ? err.message : "failed to parse shrimp brain event";
+    }
+  };
+
+  shrimpBrainStream.onerror = () => {
+    shrimpBrainStreamState.value = "reconnecting";
+  };
+}
+
+function handleWindowPointerDown() {
+  beginInteraction(5000);
+}
+
+function handleWindowKeyDown() {
+  beginInteraction(5000);
+}
+
+function handleWindowFocusIn(event: FocusEvent) {
+  if (isInteractiveElement(event.target)) {
+    beginInteraction(15000);
+  }
+}
+
+function handleWindowFocusOut() {
+  endInteractionSoon();
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden && shouldAutoRefresh()) {
+    void loadSnapshot({ silent: true });
+    if (shrimpBrainStreamState.value !== "live") {
+      void loadShrimpBrain({ silent: true });
+    }
+  }
+}
+
+function shrimpStateLabel(value: string) {
+  switch (value) {
+    case "live":
+      return "Live";
+    case "connecting":
+      return "Connecting";
+    case "reconnecting":
+      return "Reconnecting";
+    case "unsupported":
+      return "Unsupported";
+    default:
+      return value || "Idle";
+  }
+}
+
+function shrimpStatusBucket(status: string) {
+  switch (status.trim().toLowerCase()) {
+    case "completed":
+    case "ok":
+      return "completed";
+    case "live":
+    case "connecting":
+    case "reconnecting":
+    case "running":
+    case "assigned":
+    case "planning":
+    case "ready":
+      return "running";
+    case "failed":
+    case "error":
+    case "timeout":
+      return "failed";
+    default:
+      return "pending";
+  }
+}
+
+function shrimpStatusBadgeClass(status: string) {
+  return `shrimp-status-badge is-${shrimpStatusBucket(status)}`;
+}
+
+function isFailureStatus(status: string) {
+  return shrimpStatusBucket(status) === "failed";
+}
+
+function formatShrimpTimeShort(timestamp?: number) {
+  if (!timestamp) return "";
+  const d = new Date(timestamp);
+  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
+}
+
+function formatShrimpTime(timestamp?: number) {
+  if (!timestamp) {
+    return "";
+  }
+  return new Date(timestamp).toLocaleString("zh-CN");
+}
+
+function truncateShrimpText(value: string | undefined, limit = 20) {
+  const compact = value?.trim() ?? "";
+  if (!compact) {
+    return "-";
+  }
+  const chars = Array.from(compact);
+  if (chars.length <= limit) {
+    return compact;
+  }
+  return `${chars.slice(0, limit).join("")}...`;
+}
+
+function shrimpTurnTitle(index: number) {
+  return `Turn ${index + 1}`;
+}
+
+function shrimpMainLoopTitle(loop: ShrimpBrainLoopNode) {
+  return `主 Agent 外循环 ${loop.iteration}`;
+}
+
+function shrimpChildLoopTitle(loop: ShrimpBrainLoopNode) {
+  return `子 Agent 内循环 ${loop.iteration}`;
+}
+
+function shrimpSessionPreview(session: ShrimpSessionGroup) {
+  return truncateShrimpText(session.runs[0]?.userRequest, 20);
+}
+
+function shrimpSessionPathSummary(session: ShrimpSessionGroup) {
+  return `channel:${session.channel || "cli"} / sender:${session.chatId || session.userKey || "unknown"}`;
+}
+
+function shrimpSessionPathFull(session: ShrimpSessionGroup) {
+  return `${shrimpSessionPathSummary(session)} / block:${session.blockKey} / session:${session.sessionKey} / main:${session.mainAgentId || "main"}`;
+}
+
+function shrimpToolTitle(tool: ShrimpBrainToolCall) {
+  if (tool.toolName === "sessions_spawn" && tool.childAgentId) {
+    return `派发给 ${tool.childAgentId}`;
+  }
+  return tool.toolName;
 }
 
 function channelLabel(item: ControlChannelConfig) {
@@ -442,14 +791,38 @@ async function saveControlChanges() {
 }
 
 onMounted(() => {
-  void Promise.all([loadSnapshot(), loadControlState()]);
+  void Promise.all([loadSnapshot(), loadControlState(), loadShrimpBrain()]);
+  connectShrimpBrainStream();
+  window.addEventListener("pointerdown", handleWindowPointerDown, true);
+  window.addEventListener("keydown", handleWindowKeyDown, true);
+  window.addEventListener("focusin", handleWindowFocusIn, true);
+  window.addEventListener("focusout", handleWindowFocusOut, true);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   refreshTimer = window.setInterval(() => {
-    void loadSnapshot();
-  }, 15000);
+    if (!shouldAutoRefresh()) {
+      return;
+    }
+    void loadSnapshot({ silent: true });
+    if (shrimpBrainStreamState.value !== "live") {
+      void loadShrimpBrain({ silent: true });
+    }
+  }, 30000);
 });
 
 onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
+  if (interactionTimer) {
+    window.clearTimeout(interactionTimer);
+  }
+  window.removeEventListener("pointerdown", handleWindowPointerDown, true);
+  window.removeEventListener("keydown", handleWindowKeyDown, true);
+  window.removeEventListener("focusin", handleWindowFocusIn, true);
+  window.removeEventListener("focusout", handleWindowFocusOut, true);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  if (shrimpBrainStream) {
+    shrimpBrainStream.close();
+    shrimpBrainStream = null;
+  }
 });
 </script>
 
@@ -502,15 +875,46 @@ onBeforeUnmount(() => {
     </aside>
 
     <main class="main-panel">
-      <div class="main-body">
-        <header class="page-header">
+      <div class="main-body" :class="{ 'main-body-shrimp': activePage === 'shrimpBrain' }">
+        <header class="page-header" :class="{ 'page-header-tight': activePage === 'shrimpBrain' }">
           <div>
             <h1>{{ currentPage.title }}</h1>
             <p>{{ currentPage.subtitle }}</p>
-            <small v-if="generatedAtLabel" class="page-meta">Last updated {{ generatedAtLabel }}</small>
+            <button
+              v-if="activePage === 'shrimpBrain'"
+              class="secondary-button shrimp-refresh-stamp"
+              type="button"
+              :disabled="loading || shrimpBrainLoading"
+              @click="handleHeaderAction('Refresh')"
+            >
+              <svg
+                class="shrimp-refresh-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+              >
+                <path
+                  d="M20 4v6h-6"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M20 10a8 8 0 1 0 2 5.3"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <span>{{ generatedAtLabel ? `Last updated ${generatedAtLabel}` : "Refresh snapshot" }}</span>
+            </button>
+            <small v-else-if="generatedAtLabel" class="page-meta">Last updated {{ generatedAtLabel }}</small>
           </div>
 
-          <div class="page-actions" v-if="currentPage.actions?.length">
+          <div class="page-actions" v-if="currentPage.actions?.length && activePage !== 'shrimpBrain'">
             <button
               v-for="action in currentPage.actions"
               :key="action"
@@ -563,417 +967,348 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <template v-else-if="activePage === 'overview'">
-          <div class="page-stack">
-            <section class="metric-grid">
-              <article v-for="item in overviewCards" :key="item.label" class="metric-card">
-                <div class="metric-top">
-                  <span>{{ item.label }}</span>
-                  <StatusPill :label="item.value" :tone="item.tone" />
-                </div>
-                <p>{{ item.note }}</p>
-              </article>
+        <template v-else-if="activePage === 'shrimpBrain'">
+          <div class="page-stack shrimp-page">
+            <section class="shrimp-top-strip">
+              <div class="shrimp-top-chip">
+                <span>团队</span>
+                <strong>{{ shrimpBrain?.teamName || "虾脑" }}</strong>
+              </div>
+              <div class="shrimp-inline-metric">
+                <span>活跃任务</span>
+                <strong>{{ shrimpBrain?.activeRuns ?? 0 }}</strong>
+              </div>
+              <div class="shrimp-inline-metric">
+                <span>流状态</span>
+                <span :class="shrimpStatusBadgeClass(shrimpBrainStreamState)">{{ shrimpStateLabel(shrimpBrainStreamState) }}</span>
+              </div>
             </section>
 
-            <section class="overview-panel-grid">
+            <div v-if="shrimpBrainLoading" class="runtime-banner tone-sky">
+              <p>Loading shrimp brain snapshot...</p>
+            </div>
+
+            <div v-else-if="shrimpBrainError" class="runtime-banner tone-rose">
+              <p>Failed to load shrimp brain: {{ shrimpBrainError }}</p>
+            </div>
+
+            <div v-else-if="shrimpBrain && !shrimpBrain.available" class="runtime-banner tone-amber">
+              <p>{{ shrimpBrain.note || "Shrimp brain is unavailable in the current runtime." }}</p>
+            </div>
+
+            <div v-else class="shrimp-layout shrimp-layout-expanded">
               <SectionCard
-                v-for="panel in overviewPanels"
-                :key="panel.title"
-                :eyebrow="panel.note"
-                :title="panel.title"
+                class="shrimp-panel shrimp-queue-panel"
+                eyebrow="会话队列"
+                title="任务队列"
+                note="按会话聚合，点击切换当前链路"
               >
-                <ul class="bullet-list">
-                  <li v-for="entry in panel.items" :key="entry">{{ entry }}</li>
-                </ul>
-              </SectionCard>
-            </section>
-
-            <SectionCard
-              eyebrow="Control"
-              title="Gateway Access"
-              note="保存后会同步到配置文件并立即应用到运行态"
-            >
-              <div class="section-stack">
-                <div v-if="controlLoading" class="runtime-banner tone-sky">
-                  <p>Loading control config...</p>
-                </div>
-
-                <div v-else-if="gatewayControl" class="section-stack">
-                  <div v-if="controlIssues.length" class="runtime-banner tone-rose">
-                    <ul class="feedback-list">
-                      <li v-for="issue in controlIssues" :key="issue">{{ issue }}</li>
-                    </ul>
-                  </div>
-                  <div v-else-if="controlMessage" class="runtime-banner tone-emerald">
-                    <p>{{ controlMessage }}</p>
-                  </div>
-
-                  <small v-if="controlGeneratedAtLabel" class="helper-text">
-                    Control config loaded at {{ controlGeneratedAtLabel }}
-                  </small>
-
-                  <div class="form-grid two-col">
-                    <label class="toggle-field">
-                      <span>WebSocket Auth</span>
-                      <input v-model="gatewayControl.webSocketAuthEnabled" type="checkbox" />
-                    </label>
-
-                    <label class="input-field">
-                      <span>WebSocket Token</span>
-                      <input
-                        v-model="gatewayControl.webSocketAuthToken"
-                        class="text-input"
-                        type="password"
-                        placeholder="browser access token"
-                      />
-                    </label>
-                  </div>
-
-                  <div class="control-toolbar">
-                    <button
-                      class="secondary-button"
-                      type="button"
-                      :disabled="controlLoading || controlSaving"
-                      @click="loadControlState"
-                    >
-                      Reload Config
-                    </button>
-                    <button
-                      class="primary-button"
-                      type="button"
-                      :disabled="controlSaving || !isControlDirty"
-                      @click="saveControlChanges"
-                    >
-                      {{ controlSaving ? "Saving..." : "Save and Apply" }}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </SectionCard>
-
-            <SectionCard
-              eyebrow="Control"
-              title="Route Bindings"
-              note="修改 channel 到 agent 的运行时路由"
-            >
-              <div class="section-stack">
-                <div v-if="controlLoading" class="runtime-banner tone-sky">
-                  <p>Loading control bindings...</p>
-                </div>
-
-                <template v-else-if="controlDraft">
-                  <div v-if="controlIssues.length" class="runtime-banner tone-rose">
-                    <ul class="feedback-list">
-                      <li v-for="issue in controlIssues" :key="issue">{{ issue }}</li>
-                    </ul>
-                  </div>
-                  <div v-else-if="controlMessage" class="runtime-banner tone-emerald">
-                    <p>{{ controlMessage }}</p>
-                  </div>
-
-                  <div class="binding-list">
-                    <article
-                      v-for="(binding, index) in controlBindings"
-                      :key="`${binding.channel}-${binding.accountId}-${index}`"
-                      class="binding-row"
-                    >
-                      <label class="input-field">
-                        <span>Channel</span>
-                        <input v-model="binding.channel" class="text-input" type="text" placeholder="telegram" />
-                      </label>
-
-                      <label class="input-field">
-                        <span>Account</span>
-                        <input
-                          v-model="binding.accountId"
-                          class="text-input"
-                          type="text"
-                          placeholder="default or empty"
-                        />
-                      </label>
-
-                      <label class="input-field">
-                        <span>Agent</span>
-                        <select v-model="binding.agentId" class="select-input">
-                          <option value="">Select agent</option>
-                          <option v-for="agent in controlAgents" :key="agent.id" :value="agent.id">
-                            {{ agent.name }}{{ agent.default ? " (default)" : "" }}
-                          </option>
-                        </select>
-                      </label>
-
-                      <button class="danger-button" type="button" @click="removeBindingRow(index)">
-                        Remove
-                      </button>
-                    </article>
-                  </div>
-
-                  <div class="control-toolbar">
-                    <button class="secondary-button" type="button" @click="addBindingRow">
-                      Add Binding
-                    </button>
-                    <button
-                      class="primary-button"
-                      type="button"
-                      :disabled="controlSaving || !isControlDirty"
-                      @click="saveControlChanges"
-                    >
-                      {{ controlSaving ? "Saving..." : "Save and Apply" }}
-                    </button>
-                  </div>
-                </template>
-              </div>
-            </SectionCard>
-          </div>
-        </template>
-
-        <template v-else-if="activePage === 'channels'">
-          <div class="page-stack">
-            <SectionCard eyebrow="Control" title="Channels">
-              <div class="table-wrap">
-                <div class="table-head six">
-                  <span>Name</span>
-                  <span>Account</span>
-                  <span>Route</span>
-                  <span>Mode</span>
-                  <span>Status</span>
-                  <span>Health</span>
-                </div>
-                <div v-for="item in channels" :key="`${item.name}-${item.account}`" class="table-row six">
-                  <strong>{{ item.name }}</strong>
-                  <span>{{ item.account }}</span>
-                  <span>{{ item.route }}</span>
-                  <span>{{ item.mode }}</span>
-                  <StatusPill :label="item.status" :tone="item.tone" />
-                  <span>{{ item.health }}</span>
-                </div>
-              </div>
-            </SectionCard>
-
-            <SectionCard
-              eyebrow="Control"
-              title="Channel Config Editor"
-              note="修改账号配置后会写回 config.yaml 并热加载 channel manager"
-            >
-              <div class="section-stack">
-                <div v-if="controlLoading" class="runtime-banner tone-sky">
-                  <p>Loading channel control config...</p>
-                </div>
-
-                <template v-else-if="controlDraft">
-                  <div v-if="controlIssues.length" class="runtime-banner tone-rose">
-                    <ul class="feedback-list">
-                      <li v-for="issue in controlIssues" :key="issue">{{ issue }}</li>
-                    </ul>
-                  </div>
-                  <div v-else-if="controlMessage" class="runtime-banner tone-emerald">
-                    <p>{{ controlMessage }}</p>
-                  </div>
-
-                  <div v-if="!controlChannels.length" class="runtime-banner tone-slate">
-                    <p>No channel entries were detected in the current config file.</p>
-                  </div>
-
-                  <div v-else class="channel-editor-list">
-                    <article v-for="item in controlChannels" :key="`${item.channel}-${item.accountId}`" class="channel-editor-card">
-                      <div class="info-head">
-                        <div>
-                          <strong>{{ channelLabel(item) }}</strong>
-                          <p class="muted">{{ channelHint(item) }}</p>
-                        </div>
-                        <label class="toggle-inline">
-                          <input v-model="item.enabled" type="checkbox" />
-                          <span>Enabled</span>
-                        </label>
+                <div class="shrimp-queue-cards">
+                  <button
+                    v-for="session in shrimpSessions"
+                    :key="session.blockKey"
+                    class="shrimp-queue-card"
+                    :class="{ active: selectedShrimpSession?.blockKey === session.blockKey }"
+                    type="button"
+                    @click="selectedShrimpSessionKey = session.blockKey"
+                  >
+                    <div class="shrimp-queue-card-head">
+                      <div class="shrimp-queue-agent-block">
+                        <span class="shrimp-queue-label">Agent ID</span>
+                        <strong class="shrimp-queue-agent">{{ session.mainAgentId || "main" }}</strong>
                       </div>
+                      <span :class="shrimpStatusBadgeClass(session.status)">{{ session.status }}</span>
+                    </div>
 
-                      <div class="field-summary">
-                        <p>Required when enabled: {{ channelRequiredSummary(item) }}</p>
-                        <p v-if="item.enabled && missingRequiredFieldSummary(item)" class="field-warning">
-                          Missing: {{ missingRequiredFieldSummary(item) }}
+                    <div class="shrimp-queue-card-body">
+                      <div class="shrimp-queue-main">
+                        <span class="shrimp-queue-label">首条用户输入</span>
+                        <p
+                          class="shrimp-queue-request"
+                          :title="session.runs[0]?.userRequest || ''"
+                        >
+                          {{ shrimpSessionPreview(session) }}
                         </p>
                       </div>
 
-                      <div class="form-grid three-col">
-                        <label class="input-field">
-                          <span>Name</span>
-                          <input v-model="item.name" class="text-input" type="text" placeholder="display name" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'mode')" class="input-field">
-                          <span>Mode</span>
-                          <select v-if="item.channel === 'wework'" v-model="item.mode" class="select-input">
-                            <option value="webhook">webhook</option>
-                            <option value="websocket">websocket</option>
-                          </select>
-                          <select v-else-if="item.channel === 'weixin'" v-model="item.mode" class="select-input">
-                            <option value="bridge">bridge</option>
-                            <option value="direct">direct</option>
-                          </select>
-                          <input
-                            v-else
-                            v-model="item.mode"
-                            class="text-input"
-                            type="text"
-                            placeholder="webhook / websocket"
-                          />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'token')" class="input-field">
-                          <span>Token</span>
-                          <input v-model="item.token" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'baseUrl')" class="input-field full-width">
-                          <span>Base URL</span>
-                          <input v-model="item.baseUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'cdnBaseUrl')" class="input-field full-width">
-                          <span>CDN Base URL</span>
-                          <input v-model="item.cdnBaseUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'proxy')" class="input-field full-width">
-                          <span>Proxy</span>
-                          <input v-model="item.proxy" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'appId')" class="input-field">
-                          <span>App ID</span>
-                          <input v-model="item.appId" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'appSecret')" class="input-field">
-                          <span>App Secret</span>
-                          <input v-model="item.appSecret" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'corpId')" class="input-field">
-                          <span>Corp ID</span>
-                          <input v-model="item.corpId" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'agentId')" class="input-field">
-                          <span>Agent ID</span>
-                          <input v-model="item.agentId" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'secret')" class="input-field">
-                          <span>Secret</span>
-                          <input v-model="item.secret" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'botId')" class="input-field">
-                          <span>Bot ID</span>
-                          <input v-model="item.botId" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'botSecret')" class="input-field">
-                          <span>Bot Secret</span>
-                          <input v-model="item.botSecret" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'clientId')" class="input-field">
-                          <span>Client ID</span>
-                          <input v-model="item.clientId" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'clientSecret')" class="input-field">
-                          <span>Client Secret</span>
-                          <input v-model="item.clientSecret" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'bridgeUrl')" class="input-field full-width">
-                          <span>Bridge URL</span>
-                          <input v-model="item.bridgeUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'webhookUrl')" class="input-field full-width">
-                          <span>Webhook URL</span>
-                          <input v-model="item.webhookUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'webSocketUrl')" class="input-field full-width">
-                          <span>WebSocket URL</span>
-                          <input v-model="item.webSocketUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'aesKey')" class="input-field">
-                          <span>AES Key</span>
-                          <input v-model="item.aesKey" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'encodingAESKey')" class="input-field">
-                          <span>Encoding AES Key</span>
-                          <input v-model="item.encodingAESKey" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'encryptKey')" class="input-field">
-                          <span>Encrypt Key</span>
-                          <input v-model="item.encryptKey" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'verificationToken')" class="input-field">
-                          <span>Verification Token</span>
-                          <input v-model="item.verificationToken" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'serverUrl')" class="input-field full-width">
-                          <span>Server URL</span>
-                          <input v-model="item.serverUrl" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'appToken')" class="input-field">
-                          <span>App Token</span>
-                          <input v-model="item.appToken" class="text-input" type="text" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'priority')" class="input-field">
-                          <span>Priority</span>
-                          <input v-model.number="item.priority" class="text-input" type="number" min="0" />
-                        </label>
-
-                        <label v-if="supportsField(item.channel, 'webhookPort')" class="input-field">
-                          <span>Webhook Port</span>
-                          <input v-model.number="item.webhookPort" class="text-input" type="number" min="0" />
-                        </label>
-
-                        <label class="input-field full-width">
-                          <span>Allowed IDs</span>
-                          <input
-                            :value="allowedIdsText(item)"
-                            class="text-input"
-                            type="text"
-                            placeholder="comma-separated"
-                            @input="onAllowedIdsInput(item, $event)"
-                          />
-                        </label>
+                      <div class="shrimp-queue-meta-grid">
+                        <div class="shrimp-queue-meta-item">
+                          <span class="shrimp-queue-label">开始时间</span>
+                          <strong :title="formatShrimpTime(session.startedAt)">{{ formatShrimpTimeShort(session.startedAt) }}</strong>
+                        </div>
+                        <div class="shrimp-queue-meta-item">
+                          <span class="shrimp-queue-label">渠道</span>
+                          <strong>{{ session.channel || "cli" }}</strong>
+                        </div>
+                        <div class="shrimp-queue-meta-item">
+                          <span class="shrimp-queue-label">轮数</span>
+                          <strong>{{ session.runs.length }}</strong>
+                        </div>
                       </div>
-                    </article>
+                    </div>
+                  </button>
+                  <div v-if="!shrimpSessions.length" class="shrimp-empty-state">暂无任务队列数据</div>
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                v-if="selectedShrimpSession"
+                class="shrimp-panel shrimp-detail-panel"
+                eyebrow="团队协作"
+                title="会话全链路"
+              >
+                <div class="section-stack shrimp-section-stack">
+                  <div class="shrimp-session-inline">
+                    <div class="shrimp-summary-card">
+                      <span>主 Agent</span>
+                      <strong>{{ selectedShrimpSession.mainAgentId || "main" }}</strong>
+                    </div>
+                    <div class="shrimp-summary-card">
+                      <span>Sender</span>
+                      <strong>{{ selectedShrimpSession.chatId || selectedShrimpSession.userKey || "-" }}</strong>
+                    </div>
+                    <div class="shrimp-summary-card">
+                      <span>状态</span>
+                      <span :class="shrimpStatusBadgeClass(selectedShrimpSession.status)">{{ selectedShrimpSession.status }}</span>
+                    </div>
+                    <div class="shrimp-summary-card">
+                      <span>开始时间</span>
+                      <strong>{{ formatShrimpTime(selectedShrimpSession.startedAt) }}</strong>
+                    </div>
                   </div>
 
-                  <div class="control-toolbar">
-                    <button
-                      class="secondary-button"
-                      type="button"
-                      :disabled="controlLoading || controlSaving"
-                      @click="loadControlState"
-                    >
-                      Reload Config
-                    </button>
-                    <button
-                      class="primary-button"
-                      type="button"
-                      :disabled="controlSaving || !isControlDirty"
-                      @click="saveControlChanges"
-                    >
-                      {{ controlSaving ? "Saving..." : "Save and Apply" }}
-                    </button>
+                  <details class="shrimp-inline-details shrimp-session-path">
+                    <summary>
+                      <span>Session 路径</span>
+                      <code>{{ shrimpSessionPathSummary(selectedShrimpSession) }}</code>
+                    </summary>
+                    <div class="shrimp-inline-body">
+                      <code>{{ shrimpSessionPathFull(selectedShrimpSession) }}</code>
+                    </div>
+                  </details>
+
+                  <div class="shrimp-turn-list">
+                    <template v-for="(run, runIndex) in selectedShrimpSession.runs" :key="run.id">
+                      <article class="shrimp-turn-card" :class="{ failed: isFailureStatus(run.status) }">
+                        <div class="shrimp-turn-toolbar">
+                          <div class="shrimp-turn-meta">
+                            <strong>{{ shrimpTurnTitle(runIndex) }}</strong>
+                            <span :class="shrimpStatusBadgeClass(run.status)">{{ run.status }}</span>
+                            <span class="shrimp-turn-time" :title="formatShrimpTime(run.startedAt)">{{ formatShrimpTimeShort(run.startedAt) }}</span>
+                          </div>
+                          <button
+                            class="danger-button shrimp-delete-button"
+                            type="button"
+                            :disabled="deletingShrimpRunId === run.id"
+                            @click="handleDeleteShrimpRun(run.id)"
+                          >
+                            {{ deletingShrimpRunId === run.id ? "Deleting..." : "删除此轮" }}
+                          </button>
+                        </div>
+
+                        <div class="shrimp-primary-block">
+                          <div class="shrimp-block-head">
+                            <strong>用户输入</strong>
+                            <span class="shrimp-inline-key">mainAgentId: {{ run.mainAgentId }}</span>
+                          </div>
+                          <p>{{ run.userRequest }}</p>
+                        </div>
+
+                        <details v-if="run.mainPrompt" class="shrimp-collapsible">
+                          <summary>
+                            <span>主 Agent 提示词</span>
+                            <small>{{ run.mainLayers?.length ?? 0 }} layers</small>
+                          </summary>
+                          <small v-if="run.mainPromptAt" class="helper-text">{{ formatShrimpTime(run.mainPromptAt) }}</small>
+                          <div v-if="run.mainLayers?.length" class="shrimp-chip-row">
+                            <span v-for="layer in run.mainLayers" :key="`${run.id}-${layer}`">{{ layer }}</span>
+                          </div>
+                          <pre>{{ run.mainPrompt }}</pre>
+                        </details>
+
+                        <details v-if="run.mainLoops?.length" class="shrimp-collapsible">
+                          <summary>
+                            <span>mainLoops</span>
+                            <small>{{ run.mainLoops.length }}</small>
+                          </summary>
+                          <div class="shrimp-secondary-stack">
+                            <article
+                              v-for="loop in run.mainLoops"
+                              :key="loop.id"
+                              class="shrimp-secondary-card"
+                              :class="{ failed: isFailureStatus(loop.status) }"
+                            >
+                              <div class="shrimp-secondary-head">
+                                <div>
+                                  <strong>{{ shrimpMainLoopTitle(loop) }}</strong>
+                                  <p>{{ loop.summary || loop.reply || "本轮暂无摘要" }}</p>
+                                </div>
+                                <span :class="shrimpStatusBadgeClass(loop.stopReason || loop.status)">{{ loop.stopReason || loop.status }}</span>
+                              </div>
+                              <div class="shrimp-secondary-meta">
+                                <span>agentId: {{ loop.agentId }}</span>
+                                <span>{{ formatShrimpTime(loop.updatedAt) }}</span>
+                              </div>
+
+                              <details v-if="loop.reply" class="shrimp-inline-details">
+                                <summary>本轮模型回复</summary>
+                                <pre>{{ loop.reply }}</pre>
+                              </details>
+
+                              <details v-if="loop.toolCalls?.length" class="shrimp-inline-details">
+                                <summary>
+                                  <span>toolCalls</span>
+                                  <small>{{ loop.toolCalls.length }}</small>
+                                </summary>
+                                <div class="shrimp-tool-stack">
+                                  <article
+                                    v-for="tool in loop.toolCalls"
+                                    :key="tool.id || `${loop.id}-${tool.toolName}`"
+                                    class="shrimp-tool-row"
+                                    :class="{ failed: isFailureStatus(tool.childStatus || tool.status) }"
+                                  >
+                                    <div class="shrimp-secondary-head">
+                                      <div>
+                                        <strong>{{ shrimpToolTitle(tool) }}</strong>
+                                        <p>{{ tool.summary || tool.task || tool.result || tool.error || "工具调用" }}</p>
+                                      </div>
+                                      <span :class="shrimpStatusBadgeClass(tool.childStatus || tool.status)">
+                                        {{ tool.childAgentId || tool.status }}
+                                      </span>
+                                    </div>
+                                    <div class="shrimp-secondary-meta">
+                                      <span>{{ formatShrimpTime(tool.updatedAt) }}</span>
+                                      <span v-if="tool.childAgentId">child: {{ tool.childAgentId }}</span>
+                                    </div>
+
+                                    <details v-if="tool.task" class="shrimp-inline-details">
+                                      <summary>派发任务</summary>
+                                      <pre>{{ tool.task }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.arguments" class="shrimp-inline-details">
+                                      <summary>工具参数</summary>
+                                      <pre>{{ tool.arguments }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.result" class="shrimp-inline-details">
+                                      <summary>工具结果</summary>
+                                      <pre>{{ tool.result }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.error" class="shrimp-inline-details danger">
+                                      <summary>工具错误</summary>
+                                      <pre>{{ tool.error }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.childPrompt" class="shrimp-inline-details">
+                                      <summary>
+                                        <span>子 Agent 提示词</span>
+                                        <small>{{ tool.childPromptLayers?.length ?? 0 }} layers</small>
+                                      </summary>
+                                      <small class="helper-text">{{ formatShrimpTime(tool.updatedAt) }}</small>
+                                      <div v-if="tool.childPromptLayers?.length" class="shrimp-chip-row">
+                                        <span v-for="layer in tool.childPromptLayers" :key="`${tool.id}-${layer}`">{{ layer }}</span>
+                                      </div>
+                                      <pre>{{ tool.childPrompt }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.childReply" class="shrimp-inline-details">
+                                      <summary>子 Agent 回复</summary>
+                                      <small class="helper-text">{{ formatShrimpTime(tool.updatedAt) }}</small>
+                                      <pre>{{ tool.childReply }}</pre>
+                                    </details>
+
+                                    <details v-if="tool.childLoops?.length" class="shrimp-inline-details">
+                                      <summary>
+                                        <span>childLoops</span>
+                                        <small>{{ tool.childLoops.length }}</small>
+                                      </summary>
+                                      <div class="shrimp-secondary-stack">
+                                        <article
+                                          v-for="childLoop in tool.childLoops"
+                                          :key="childLoop.id"
+                                          class="shrimp-secondary-card child"
+                                          :class="{ failed: isFailureStatus(childLoop.status) }"
+                                        >
+                                          <div class="shrimp-secondary-head">
+                                            <div>
+                                              <strong>{{ shrimpChildLoopTitle(childLoop) }}</strong>
+                                              <p>{{ childLoop.summary || childLoop.reply || "本轮暂无摘要" }}</p>
+                                            </div>
+                                            <span :class="shrimpStatusBadgeClass(childLoop.stopReason || childLoop.status)">
+                                              {{ childLoop.stopReason || childLoop.status }}
+                                            </span>
+                                          </div>
+                                          <div class="shrimp-secondary-meta">
+                                            <span>agentId: {{ childLoop.agentId }}</span>
+                                            <span>{{ formatShrimpTime(childLoop.updatedAt) }}</span>
+                                          </div>
+
+                                          <details v-if="childLoop.reply" class="shrimp-inline-details">
+                                            <summary>子 Agent 本轮回复</summary>
+                                            <pre>{{ childLoop.reply }}</pre>
+                                          </details>
+
+                                          <details v-if="childLoop.toolCalls?.length" class="shrimp-inline-details">
+                                            <summary>
+                                              <span>toolCalls</span>
+                                              <small>{{ childLoop.toolCalls.length }}</small>
+                                            </summary>
+                                            <div class="shrimp-tool-stack">
+                                              <article
+                                                v-for="childTool in childLoop.toolCalls"
+                                                :key="childTool.id || `${childLoop.id}-${childTool.toolName}`"
+                                                class="shrimp-tool-row compact"
+                                                :class="{ failed: isFailureStatus(childTool.status) }"
+                                              >
+                                                <div class="shrimp-secondary-head">
+                                                  <div>
+                                                    <strong>{{ childTool.toolName }}</strong>
+                                                    <p>{{ childTool.summary || childTool.result || childTool.error || "工具调用" }}</p>
+                                                  </div>
+                                                  <span :class="shrimpStatusBadgeClass(childTool.status)">{{ childTool.status }}</span>
+                                                </div>
+                                                <div class="shrimp-secondary-meta">
+                                                  <span>{{ formatShrimpTime(childTool.updatedAt) }}</span>
+                                                </div>
+                                              </article>
+                                            </div>
+                                          </details>
+                                        </article>
+                                      </div>
+                                    </details>
+                                  </article>
+                                </div>
+                              </details>
+                            </article>
+                          </div>
+                        </details>
+
+                        <div v-if="run.mainReply" class="shrimp-primary-block shrimp-reply-block">
+                          <div class="shrimp-block-head">
+                            <strong>主 Agent 最终回复</strong>
+                            <small class="helper-text">{{ formatShrimpTime(run.mainReplyAt) }}</small>
+                          </div>
+                          <pre>{{ run.mainReply }}</pre>
+                        </div>
+                      </article>
+
+                      <div
+                        v-if="runIndex < selectedShrimpSession.runs.length - 1"
+                        class="shrimp-transition-card"
+                      >
+                        <strong>中止等待用户确认</strong>
+                        <p>
+                          下一轮用户继续输入：
+                          {{ selectedShrimpSession.runs[runIndex + 1]?.userRequest }}
+                        </p>
+                      </div>
+                    </template>
                   </div>
-                </template>
-              </div>
-            </SectionCard>
+                </div>
+              </SectionCard>
+            </div>
           </div>
         </template>
 
@@ -1153,3 +1488,670 @@ onBeforeUnmount(() => {
     </main>
   </div>
 </template>
+
+<style scoped>
+.main-body-shrimp {
+  padding: 18px 20px 20px;
+  width: 100%;
+  max-width: none;
+}
+
+.page-header-tight {
+  margin-bottom: 10px;
+}
+
+.shrimp-refresh-stamp {
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.shrimp-refresh-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.shrimp-page {
+  gap: 10px;
+}
+
+.shrimp-page .runtime-banner {
+  margin-bottom: 0;
+}
+
+.shrimp-top-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shrimp-top-chip,
+.shrimp-inline-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.shrimp-top-chip > span,
+.shrimp-inline-metric > span:first-child {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.shrimp-top-chip strong,
+.shrimp-inline-metric strong {
+  font-size: 12px;
+}
+
+/* 虾脑布局 - 铺满屏幕 */
+.shrimp-layout-expanded {
+  display: grid;
+  grid-template-columns: minmax(400px, 1fr) minmax(0, 2fr);
+  gap: 16px;
+  align-items: start;
+  height: calc(100vh - 140px);
+}
+
+.shrimp-layout-expanded .shrimp-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.shrimp-layout-expanded .shrimp-panel :deep(.section-body) {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px 14px;
+}
+
+/* 会话队列面板优化 */
+.shrimp-queue-panel :deep(.section-head) {
+  gap: 8px;
+  padding: 12px 14px 0;
+  flex-shrink: 0;
+}
+
+.shrimp-queue-panel :deep(.section-head h3) {
+  font-size: 15px;
+}
+
+.shrimp-queue-panel :deep(.section-note) {
+  font-size: 10px;
+}
+
+/* 会话详情面板优化 */
+.shrimp-detail-panel :deep(.section-head) {
+  gap: 8px;
+  padding: 12px 14px 0;
+  flex-shrink: 0;
+}
+
+.shrimp-detail-panel :deep(.section-head h3) {
+  font-size: 15px;
+}
+
+.shrimp-detail-panel :deep(.section-note) {
+  font-size: 10px;
+}
+
+.shrimp-detail-panel :deep(.section-body) {
+  padding: 12px 14px 14px;
+}
+
+.shrimp-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.shrimp-panel :deep(.section-head) {
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.shrimp-panel :deep(.section-head h3) {
+  font-size: 15px;
+}
+
+.shrimp-panel :deep(.section-note) {
+  font-size: 10px;
+}
+
+.shrimp-panel :deep(.section-body) {
+  padding: 10px 12px 12px;
+}
+
+.shrimp-queue-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.shrimp-queue-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.shrimp-queue-card::before,
+.shrimp-turn-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: transparent;
+}
+
+.shrimp-queue-card::before {
+  top: 10px;
+  bottom: 10px;
+}
+
+.shrimp-queue-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(96, 165, 250, 0.24);
+  background: var(--panel-soft);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.shrimp-queue-card.active {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: var(--accent-soft);
+  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
+}
+
+.shrimp-queue-card.active::before {
+  background: var(--accent-strong);
+}
+
+.shrimp-queue-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.shrimp-queue-card-body {
+  display: grid;
+  gap: 10px;
+}
+
+.shrimp-queue-agent-block,
+.shrimp-queue-main,
+.shrimp-queue-meta-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.shrimp-queue-label {
+  color: var(--muted-soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.shrimp-queue-agent {
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.shrimp-queue-request {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.shrimp-queue-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.shrimp-queue-meta-item strong {
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.shrimp-empty-state {
+  padding: 10px 0 2px;
+  color: var(--muted-soft);
+  font-size: 11px;
+}
+
+.shrimp-section-stack {
+  gap: 8px;
+}
+
+.shrimp-session-inline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.shrimp-summary-card,
+.shrimp-primary-block,
+.shrimp-collapsible,
+.shrimp-inline-details,
+.shrimp-turn-card,
+.shrimp-secondary-card,
+.shrimp-tool-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.shrimp-summary-card {
+  padding: 10px 12px;
+}
+
+.shrimp-summary-card > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.shrimp-summary-card strong {
+  font-size: 13px;
+}
+
+.shrimp-turn-list {
+  display: grid;
+  gap: 8px;
+}
+
+.shrimp-turn-card {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.shrimp-turn-card::before {
+  top: 10px;
+  bottom: 10px;
+}
+
+.shrimp-turn-card.failed::before {
+  background: #ef4444;
+}
+
+.shrimp-turn-toolbar,
+.shrimp-block-head,
+.shrimp-secondary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.shrimp-turn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.shrimp-turn-meta strong {
+  font-size: 13px;
+}
+
+.shrimp-turn-time,
+.shrimp-secondary-meta {
+  color: var(--muted-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.shrimp-delete-button {
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 11px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.shrimp-turn-card:hover .shrimp-delete-button,
+.shrimp-turn-card:focus-within .shrimp-delete-button {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.shrimp-primary-block {
+  padding: 10px 12px;
+}
+
+.shrimp-inline-key {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.shrimp-primary-block p,
+.shrimp-secondary-head p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.shrimp-primary-block p {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.shrimp-reply-block {
+  background: var(--accent-soft);
+  border-color: rgba(37, 99, 235, 0.2);
+}
+
+.shrimp-reply-block pre,
+.shrimp-collapsible pre,
+.shrimp-inline-details pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.shrimp-collapsible,
+.shrimp-inline-details {
+  padding: 0 10px;
+}
+
+.shrimp-collapsible[open],
+.shrimp-inline-details[open] {
+  padding-bottom: 10px;
+}
+
+.shrimp-collapsible summary,
+.shrimp-inline-details summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.shrimp-collapsible summary::-webkit-details-marker,
+.shrimp-inline-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.shrimp-collapsible summary code,
+.shrimp-collapsible summary small,
+.shrimp-inline-details summary code,
+.shrimp-inline-details summary small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.shrimp-session-path summary code {
+  max-width: calc(100% - 104px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shrimp-inline-body {
+  padding-top: 2px;
+}
+
+.shrimp-inline-body code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.shrimp-collapsible .helper-text,
+.shrimp-inline-details .helper-text {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.shrimp-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.shrimp-chip-row span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--slate-soft);
+  color: var(--slate);
+  font-size: 10px;
+}
+
+.shrimp-secondary-stack,
+.shrimp-tool-stack {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.shrimp-secondary-card,
+.shrimp-tool-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.shrimp-secondary-card.failed,
+.shrimp-tool-row.failed,
+.shrimp-inline-details.danger {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.shrimp-secondary-head > div {
+  min-width: 0;
+}
+
+.shrimp-secondary-head strong {
+  display: block;
+  font-size: 12px;
+}
+
+.shrimp-secondary-head p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.shrimp-secondary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shrimp-transition-card {
+  padding: 10px 12px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 10px 10px 0;
+  background: var(--amber-soft);
+}
+
+.shrimp-transition-card strong {
+  display: block;
+  font-size: 12px;
+}
+
+.shrimp-transition-card p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+  font-size: 11px;
+}
+
+.shrimp-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.shrimp-status-badge.is-completed {
+  color: var(--emerald);
+  background: var(--emerald-soft);
+}
+
+.shrimp-status-badge.is-running {
+  color: var(--sky);
+  background: var(--sky-soft);
+}
+
+.shrimp-status-badge.is-failed {
+  color: #dc2626;
+  background: #fee2e2;
+}
+
+.shrimp-status-badge.is-pending {
+  color: var(--slate);
+  background: var(--slate-soft);
+}
+
+@media (max-width: 1400px) {
+  .shrimp-layout-expanded {
+    grid-template-columns: minmax(360px, 1fr) minmax(0, 1.5fr);
+  }
+}
+
+@media (max-width: 1180px) {
+  .main-body-shrimp {
+    padding: 16px 16px 18px;
+  }
+
+  .shrimp-layout {
+    grid-template-columns: 1fr;
+  }
+  
+  .shrimp-layout-expanded {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  
+  .shrimp-layout-expanded .shrimp-panel {
+    height: auto;
+    max-height: 60vh;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-body-shrimp {
+    padding: 14px 14px 16px;
+  }
+
+  .shrimp-session-inline {
+    grid-template-columns: 1fr;
+  }
+
+  .shrimp-top-strip {
+    flex-direction: column;
+  }
+
+  .shrimp-top-chip,
+  .shrimp-inline-metric {
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 760px) {
+  .main-body-shrimp {
+    padding: 12px 12px 14px;
+  }
+
+  .shrimp-panel :deep(.section-head) {
+    flex-direction: column;
+  }
+
+  .shrimp-queue-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .shrimp-queue-card-head,
+  .shrimp-session-path summary {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .shrimp-queue-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .shrimp-session-path summary code {
+    max-width: 100%;
+    margin-left: 0;
+  }
+
+  .shrimp-turn-toolbar,
+  .shrimp-block-head,
+  .shrimp-secondary-head {
+    flex-direction: column;
+  }
+
+  .shrimp-delete-button {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    align-self: flex-start;
+  }
+
+  .shrimp-inline-key {
+    white-space: normal;
+  }
+}
+</style>

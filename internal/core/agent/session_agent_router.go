@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -70,7 +71,13 @@ func (r *SessionAgentRouter) loadFromDisk() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &r.routes)
+	if err := json.Unmarshal(data, &r.routes); err != nil {
+		return err
+	}
+	if r.pruneLegacyRoutes() {
+		_ = r.saveToDisk()
+	}
+	return nil
 }
 
 // saveToDisk 持久化路由表到磁盘（调用方已持有写锁）
@@ -86,6 +93,27 @@ func (r *SessionAgentRouter) saveToDisk() error {
 		return err
 	}
 	return os.WriteFile(r.dataPath, data, 0o644)
+}
+
+func (r *SessionAgentRouter) pruneLegacyRoutes() bool {
+	if len(r.routes) == 0 {
+		return false
+	}
+
+	changed := false
+	for sessionKey := range r.routes {
+		if isNamespacedSessionKey(sessionKey) {
+			continue
+		}
+		delete(r.routes, sessionKey)
+		changed = true
+	}
+	return changed
+}
+
+func isNamespacedSessionKey(sessionKey string) bool {
+	_, ok := namespaces.FromSessionKey(strings.TrimSpace(sessionKey))
+	return ok
 }
 
 // agentSwitchResult 切换指令解析结果

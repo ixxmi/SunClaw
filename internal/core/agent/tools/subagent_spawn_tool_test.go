@@ -127,10 +127,17 @@ func TestSubagentSpawnTool_CrossAgentUsesTargetBootstrapOwner(t *testing.T) {
 	}
 }
 
-func TestSubagentSpawnTool_RequiresExplicitAgentIDWhenAllowAgentsConfigured(t *testing.T) {
+func TestSubagentSpawnTool_ResolvesAgentByNameWhenAllowAgentsConfigured(t *testing.T) {
 	reg := &fakeSubagentRegistry{}
 	tool := NewSubagentSpawnTool(reg)
 
+	tool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		return []config.AgentConfig{
+			{ID: "vibecoding", Name: "vibecoding"},
+			{ID: "coder", Name: "Coder"},
+			{ID: "frontend", Name: "Frontend"},
+		}
+	})
 	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
 		if agentID == "vibecoding" {
 			return &config.AgentConfig{
@@ -147,15 +154,186 @@ func TestSubagentSpawnTool_RequiresExplicitAgentIDWhenAllowAgentsConfigured(t *t
 	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
 
 	out, err := tool.Execute(ctx, map[string]interface{}{
-		"task": "implement current step",
+		"task":       "implement current step",
+		"agent_name": "Coder",
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if !strings.Contains(out, "Forbidden:") {
-		t.Fatalf("expected forbidden output, got %s", out)
+	if !strings.Contains(out, "Subagent spawned successfully") {
+		t.Fatalf("expected success output, got %s", out)
 	}
-	if !strings.Contains(out, "requires explicit agent_id") {
-		t.Fatalf("expected explicit agent_id error, got %s", out)
+	if !strings.Contains(out, "Agent: coder") {
+		t.Fatalf("expected resolved target agent coder, got %s", out)
+	}
+}
+
+func TestSubagentSpawnTool_InfersAgentFromTaskMention(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	tool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		return []config.AgentConfig{
+			{ID: "vibecoding", Name: "vibecoding"},
+			{ID: "reviewer", Name: "Reviewer"},
+			{ID: "coder", Name: "Coder"},
+		}
+	})
+	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
+		if agentID == "vibecoding" {
+			return &config.AgentConfig{
+				ID: "vibecoding",
+				Subagents: &config.AgentSubagentConfig{
+					AllowAgents: []string{"reviewer", "coder"},
+				},
+			}
+		}
+		return &config.AgentConfig{ID: agentID, Name: agentID}
+	})
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"task": "让 Reviewer 先审查当前改动风险",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Agent: reviewer") {
+		t.Fatalf("expected inferred reviewer target, got %s", out)
+	}
+}
+
+func TestSubagentSpawnTool_BuildsStructuredDelegatedTask(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	var spawned *SubagentSpawnResult
+	tool.SetOnSpawn(func(spawnParams *SubagentSpawnResult) error {
+		spawned = spawnParams
+		return nil
+	})
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"task":           "实现当前 API 改动",
+		"context":        "只处理用户资料更新接口，不要扩到鉴权和测试阶段。",
+		"relevant_files": []interface{}{"internal/api/user.go", "internal/service/profile.go"},
+		"constraints":    []interface{}{"保持现有接口兼容", "不要改动无关模块"},
+		"deliverables":   []interface{}{"代码改动", "涉及文件列表"},
+		"done_when":      []interface{}{"接口逻辑完成", "返回结构化结果"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Subagent spawned successfully") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	if spawned == nil {
+		t.Fatalf("expected onSpawn callback to be called")
+	}
+	for _, marker := range []string{
+		"## 当前步骤目标",
+		"## 必要上下文",
+		"## 相关文件",
+		"## 约束条件",
+		"## 期望产出",
+		"## 完成标准",
+	} {
+		if !strings.Contains(spawned.Task, marker) {
+			t.Fatalf("expected structured task to contain %q, got %q", marker, spawned.Task)
+		}
+	}
+	if reg.last == nil || !strings.Contains(reg.last.Task, "## 当前步骤目标") {
+		t.Fatalf("expected structured task to be stored in registry, got %+v", reg.last)
+	}
+}
+
+func TestSubagentSpawnTool_PassesRuntimeOverridesAndNestedSpawnHint(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
+		if agentID == "vibecoding" {
+			return &config.AgentConfig{
+				ID:        "vibecoding",
+				Subagents: &config.AgentSubagentConfig{AllowAgents: []string{"planner"}},
+			}
+		}
+		if agentID == "planner" {
+			return &config.AgentConfig{
+				ID: "planner",
+				Subagents: &config.AgentSubagentConfig{
+					AllowTools: []string{"read_file", "sessions_spawn"},
+				},
+			}
+		}
+		return &config.AgentConfig{ID: agentID}
+	})
+
+	var spawned *SubagentSpawnResult
+	tool.SetOnSpawn(func(spawnParams *SubagentSpawnResult) error {
+		spawned = spawnParams
+		return nil
+	})
+
+	ctx := context.WithValue(context.Background(), "agent_id", "vibecoding")
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"task":        "继续编排当前研发任务",
+		"agent_id":    "planner",
+		"model":       "gpt-5.4",
+		"thinking":    "high",
+		"max_tokens":  2048,
+		"temperature": 0.2,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Agent: planner") {
+		t.Fatalf("expected target agent in output, got %s", out)
+	}
+	if spawned == nil {
+		t.Fatalf("expected onSpawn callback to be called")
+	}
+	if spawned.Model != "gpt-5.4" || spawned.Thinking != "high" || spawned.MaxTokens != 2048 || spawned.Temperature != 0.2 {
+		t.Fatalf("unexpected runtime overrides: %+v", spawned)
+	}
+	if !strings.Contains(spawned.ChildSystemPrompt, "继续派发规则") || !strings.Contains(spawned.ChildSystemPrompt, "sessions_spawn") {
+		t.Fatalf("expected nested spawn guidance in child prompt, got %q", spawned.ChildSystemPrompt)
+	}
+}
+
+func TestSubagentSpawnTool_TruncatesOversizedDelegationContext(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	var spawned *SubagentSpawnResult
+	tool.SetOnSpawn(func(spawnParams *SubagentSpawnResult) error {
+		spawned = spawnParams
+		return nil
+	})
+
+	manyFiles := make([]interface{}, 0, delegatedListMaxItems+3)
+	for i := 0; i < delegatedListMaxItems+3; i++ {
+		manyFiles = append(manyFiles, strings.Repeat("a", delegatedItemMaxRunes+20))
+	}
+
+	_, err := tool.Execute(context.Background(), map[string]interface{}{
+		"task":           strings.Repeat("t", delegatedTaskMaxRunes+50),
+		"context":        strings.Repeat("c", delegatedContextMaxRunes+200),
+		"relevant_files": manyFiles,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if spawned == nil {
+		t.Fatalf("expected onSpawn callback to be called")
+	}
+	if !strings.Contains(spawned.Task, "...(truncated)") {
+		t.Fatalf("expected task truncation markers, got %q", spawned.Task)
+	}
+	if !strings.Contains(spawned.Task, "省略其余") {
+		t.Fatalf("expected omitted-items marker, got %q", spawned.Task)
 	}
 }

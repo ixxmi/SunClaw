@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
 // MemoryStore 记忆存储
@@ -166,33 +168,18 @@ func (m *MemoryStore) EnsureBootstrapFiles() error {
 		return err
 	}
 
-	// bootstrap 文件列表
-	bootstrapFiles := []string{
-		"IDENTITY.md",
-		"AGENTS.md",
-		"SOUL.md",
-		"USER.md",
-	}
-
-	for _, filename := range bootstrapFiles {
+	for _, filename := range workspacepkg.CognitiveFiles {
 		path := filepath.Join(m.workspace, filename)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			// 创建默认内容
-			var defaultContent string
-			switch filename {
-			case "IDENTITY.md":
-				defaultContent = "# Identity\n\nThis file defines the agent's identity and character."
-			case "AGENTS.md":
-				defaultContent = "# Agent Configuration\n\nThis file defines the agent's capabilities and configuration."
-			case "SOUL.md":
-				defaultContent = "# Agent Soul\n\nThis file defines the agent's personality and core principles."
-			case "USER.md":
-				defaultContent = "# User Information\n\nThis file contains information about the user."
+			defaultContent, err := workspacepkg.ReadEmbeddedTemplate(filename)
+			if err != nil {
+				return fmt.Errorf("failed to read bootstrap template %s: %w", filename, err)
 			}
-
 			if err := os.WriteFile(path, []byte(defaultContent), 0644); err != nil {
 				return fmt.Errorf("failed to create bootstrap file %s: %w", filename, err)
 			}
+		} else if err != nil {
+			return err
 		}
 	}
 

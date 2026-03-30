@@ -91,6 +91,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.port", 8080)
 	v.SetDefault("gateway.read_timeout", 30)
 	v.SetDefault("gateway.write_timeout", 30)
+	v.SetDefault("gateway.inbound_workers", 4)
 
 	// 工具默认配置
 	v.SetDefault("tools.shell.enabled", true)

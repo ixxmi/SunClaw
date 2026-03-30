@@ -5,30 +5,43 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
-func TestBuildSystemPromptIncludesHumanCommunicationGuidance(t *testing.T) {
+func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	prompt := builder.BuildSystemPrompt(nil)
+
+	if !strings.Contains(prompt, "## Builtin Boundary") {
+		t.Fatalf("expected builtin boundary in prompt, got %q", prompt)
+	}
+	for _, marker := range []string{"## Builtin Generic Core", "## Communication Style", "## Error Handling"} {
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("did not expect builtin generic core marker %q in prompt, got %q", marker, prompt)
+		}
+	}
+}
+
+func TestBuildSystemPromptIncludesCommonBoundaryAndAgentsAuthority(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
 	checks := []string{
-		"## Communication Style",
-		"收到，我先帮你看下这个问题。",
-		"我在帮你处理，您稍等一下。",
-		`Do not fake a process with "我先看下" when no real waiting or tool work is needed.`,
-		"Do not fragment a normal answer into many small messages just because you can.",
-		"emotional support, comforting, or soft check-in moments where two short beats feel more human than one polished paragraph",
-		"when the user is sharing feelings or feeling low, default to two short messages instead of one overly complete block",
-		"哎，心情不好的时候真的很难受。",
-		"发生什么事了？想说就说，我听着。",
-		"Prefer 'send_message' when you want deliberate acknowledgement, progress reporting, or exact control over whether the user sees one message or several",
+		"This layer defines only common, non-overridable boundaries.",
+		"When a first-class tool exists for an action, you MUST use the tool instead of claiming results from memory.",
+		"Do not describe planned, partial, attempted, or inferred work as completed work.",
+		"`AGENTS.md` is the authoritative decision layer unless it conflicts with system safety or tool policy.",
+		"follow `AGENTS.md` rather than inventing a competing process in the builtin boundary layer.",
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing guidance %q", want)
+			t.Fatalf("prompt missing common boundary rule %q", want)
 		}
 	}
 }
@@ -45,6 +58,7 @@ func TestBuildSystemPromptListsProgressMessagingTools(t *testing.T) {
 		"- sessions_spawn:",
 		"- memory_search:",
 		"- memory_add:",
+		"- sandbox_execute:",
 	}
 
 	for _, want := range checks {
@@ -169,10 +183,6 @@ func TestBuildBootstrapSectionFallsBackToBootstrapGuideWhenNoCognitiveFiles(t *t
 	workspaceDir := t.TempDir()
 	ownerDir := filepath.Join(t.TempDir(), "agents", "new-agent", "bootstrap")
 
-	if err := os.WriteFile(filepath.Join(workspaceDir, "BOOTSTRAP.md"), []byte("# Bootstrap\n\nfirst-run ritual"), 0644); err != nil {
-		t.Fatalf("write BOOTSTRAP.md: %v", err)
-	}
-
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
 	builder.SetBootstrapDirResolver(func(ownerID string) string {
 		if ownerID == "new-agent" {
@@ -185,7 +195,11 @@ func TestBuildBootstrapSectionFallsBackToBootstrapGuideWhenNoCognitiveFiles(t *t
 	if !strings.Contains(got, "BOOTSTRAP.md") {
 		t.Fatalf("expected BOOTSTRAP.md section, got %q", got)
 	}
-	if !strings.Contains(got, "first-run ritual") {
+	bootstrapTemplate, err := workspacepkg.ReadEmbeddedTemplate("BOOTSTRAP.md")
+	if err != nil {
+		t.Fatalf("read BOOTSTRAP template: %v", err)
+	}
+	if !strings.Contains(got, strings.TrimSpace(bootstrapTemplate)) {
 		t.Fatalf("expected bootstrap guide content, got %q", got)
 	}
 }
@@ -194,7 +208,7 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
-	msgs := builder.BuildMessagesWithRuntime(nil, "hello", nil, nil, []Tool{
+	msgs := builder.BuildMessagesWithRuntime(nil, "", "hello", nil, nil, []Tool{
 		&summaryOnlyTool{name: "read_file"},
 	}, "", PromptModeFull)
 
@@ -202,7 +216,7 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 		t.Fatalf("expected messages to be built")
 	}
 	systemPrompt := msgs[0].Content
-	if !strings.Contains(systemPrompt, "## 可用工具") {
+	if !strings.Contains(systemPrompt, "<available_tools>") {
 		t.Fatalf("expected runtime tool layer in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "**read_file**") {
@@ -210,5 +224,23 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 	}
 	if strings.Contains(systemPrompt, "Tool availability (legacy summary)") {
 		t.Fatalf("did not expect legacy tool summary when runtime tools are provided, got %q", systemPrompt)
+	}
+}
+
+func TestBuildMessagesWithRuntimeIncludesSessionSummary(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	msgs := builder.BuildMessagesWithRuntime(nil, "Earlier work summary", "hello", nil, nil, nil, "", PromptModeFull)
+	if len(msgs) == 0 {
+		t.Fatalf("expected messages to be built")
+	}
+
+	systemPrompt := msgs[0].Content
+	if !strings.Contains(systemPrompt, "## Context Summary") {
+		t.Fatalf("expected context summary layer in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Earlier work summary") {
+		t.Fatalf("expected session summary content in system prompt, got %q", systemPrompt)
 	}
 }

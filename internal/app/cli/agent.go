@@ -16,6 +16,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
+	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -98,8 +99,8 @@ func runAgent(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get workspace path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(workspace, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create workspace: %v\n", err)
+	if err := workspacepkg.NewManager(workspace).Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to prepare workspace: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -121,11 +122,6 @@ func runAgent(cmd *cobra.Command, args []string) {
 
 	// Create memory store
 	memoryStore := agent.NewMemoryStore(workspace)
-	if err := memoryStore.EnsureBootstrapFiles(); err != nil {
-		if agentVerbose {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to create bootstrap files: %v\n", err)
-		}
-	}
 
 	// Create context builder
 	contextBuilder := agent.NewContextBuilder(memoryStore, workspace)
@@ -177,6 +173,12 @@ func runAgent(cmd *cobra.Command, args []string) {
 	}
 
 	// Register browser tool if enabled
+
+	// Register sandbox tool
+	if err := toolRegistry.RegisterExisting(tools.NewSandboxToolWithConfig(cfg.Tools.Shell.Sandbox, cfg.Approvals)); err != nil && agentVerbose {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to register tool sandbox_execute: %v\n", err)
+	}
+
 	if cfg.Tools.Browser.Enabled {
 		browserTool := tools.NewBrowserTool(
 			cfg.Tools.Browser.Headless,
@@ -227,6 +229,10 @@ func runAgent(cmd *cobra.Command, args []string) {
 		Context:      contextBuilder,
 		Workspace:    workspace,
 		MaxIteration: agentMaxIterations,
+		MaxTokens:    cfg.Agents.Defaults.MaxTokens,
+		ContextWindow: agent.GuessContextWindowForModel(
+			cfg.Agents.Defaults.Model,
+		),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create agent: %v\n", err)

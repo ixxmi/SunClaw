@@ -1,6 +1,8 @@
 package bus
 
 import (
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -28,7 +30,41 @@ type Media struct {
 
 // SessionKey 返回会话键
 func (m *InboundMessage) SessionKey() string {
-	return m.Channel + ":" + m.ChatID
+	if m == nil {
+		return ""
+	}
+
+	accountID := strings.TrimSpace(m.AccountID)
+	if accountID == "" {
+		accountID = "default"
+	}
+	senderID := strings.TrimSpace(m.SenderID)
+	if senderID == "" {
+		senderID = "default"
+	}
+	tenantID := "default"
+	if m.Metadata != nil {
+		for _, key := range []string{"tenant_id", "tenantId", "org_id", "orgId", "enterprise_id", "enterpriseId", "corp_id", "corpId"} {
+			if raw, ok := m.Metadata[key].(string); ok && strings.TrimSpace(raw) != "" {
+				tenantID = strings.TrimSpace(raw)
+				break
+			}
+		}
+	}
+
+	sessionKey := fmt.Sprintf("tenant:%s:channel:%s:account:%s:sender:%s", tenantID, m.Channel, accountID, senderID)
+	if chatID := strings.TrimSpace(m.ChatID); chatID != "" && chatID != "default" {
+		sessionKey += ":chat:" + chatID
+	}
+	if m.Metadata != nil {
+		for _, key := range []string{"thread_id", "thread_ts", "message_thread_id"} {
+			if raw, ok := m.Metadata[key].(string); ok && strings.TrimSpace(raw) != "" {
+				sessionKey += ":thread:" + strings.TrimSpace(raw)
+				break
+			}
+		}
+	}
+	return sessionKey
 }
 
 // OutboundMessage 出站消息

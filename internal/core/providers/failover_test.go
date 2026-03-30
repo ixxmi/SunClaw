@@ -117,7 +117,7 @@ func TestFailoverProviderFailoverOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestFailoverProviderNoFailbackOnTimeout(t *testing.T) {
+func TestFailoverProviderFailoverOnTimeout(t *testing.T) {
 	primary := &mockProvider{
 		shouldFail: true,
 		failError:  stderrors.New("timeout"),
@@ -130,15 +130,12 @@ func TestFailoverProviderNoFailbackOnTimeout(t *testing.T) {
 	fp := NewFailoverProvider(primary, fallback, classifier)
 
 	ctx := context.Background()
-	_, err := fp.Chat(ctx, nil, nil)
-
-	if err == nil {
-		t.Error("Expected error for timeout (should not failover)")
+	resp, err := fp.Chat(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
 	}
-
-	// Circuit should NOT be open for non-failover errors
-	if fp.GetCircuitBreaker().IsOpen() {
-		t.Error("Expected circuit breaker to remain closed for non-failover errors")
+	if resp.Content != "fallback response" {
+		t.Errorf("Expected 'fallback response', got '%s'", resp.Content)
 	}
 }
 
@@ -214,7 +211,7 @@ func TestFailoverProviderShouldFailover(t *testing.T) {
 		{"auth error", errors.FailoverReasonAuth, true},
 		{"rate limit", errors.FailoverReasonRateLimit, true},
 		{"billing", errors.FailoverReasonBilling, true},
-		{"timeout", errors.FailoverReasonTimeout, false},
+		{"timeout", errors.FailoverReasonTimeout, true},
 		{"unknown", errors.FailoverReasonUnknown, false},
 	}
 

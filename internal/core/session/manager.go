@@ -39,6 +39,7 @@ type Message struct {
 type Session struct {
 	Key       string                 `json:"key"`
 	Messages  []Message              `json:"messages"`
+	Summary   string                 `json:"summary,omitempty"`
 	CreatedAt time.Time              `json:"created_at"`
 	UpdatedAt time.Time              `json:"updated_at"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
@@ -159,6 +160,32 @@ func (s *Session) GetHistorySafe(maxMessages int) []Message {
 	return result
 }
 
+// GetSummary returns the persisted conversation summary.
+func (s *Session) GetSummary() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return strings.TrimSpace(s.Summary)
+}
+
+// SetSummary replaces the persisted conversation summary.
+func (s *Session) SetSummary(summary string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Summary = strings.TrimSpace(summary)
+	s.UpdatedAt = time.Now()
+}
+
+// ReplaceHistory atomically replaces the stored message history.
+func (s *Session) ReplaceHistory(messages []Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Messages = append([]Message(nil), messages...)
+	s.UpdatedAt = time.Now()
+}
+
 // Clear 清空消息
 func (s *Session) Clear() {
 	s.mu.Lock()
@@ -241,6 +268,7 @@ func (m *Manager) Save(session *Session) error {
 		"_type":      "metadata",
 		"created_at": session.CreatedAt,
 		"updated_at": session.UpdatedAt,
+		"summary":    session.Summary,
 		"metadata":   session.Metadata,
 	}
 	if err := encoder.Encode(metadata); err != nil {
@@ -337,6 +365,9 @@ func (m *Manager) load(key string) (*Session, error) {
 			}
 			if updatedAt, ok := raw["updated_at"].(string); ok {
 				session.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+			}
+			if summary, ok := raw["summary"].(string); ok {
+				session.Summary = strings.TrimSpace(summary)
 			}
 			if metadata, ok := raw["metadata"].(map[string]interface{}); ok {
 				session.Metadata = metadata

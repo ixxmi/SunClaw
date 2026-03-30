@@ -66,6 +66,7 @@ type ChatOption func(*ChatOptions)
 // ChatOptions 聊天配置
 type ChatOptions struct {
 	Model       string
+	Thinking    string
 	Temperature float64
 	MaxTokens   int
 	Stream      bool
@@ -75,6 +76,13 @@ type ChatOptions struct {
 func WithModel(model string) ChatOption {
 	return func(o *ChatOptions) {
 		o.Model = model
+	}
+}
+
+// WithThinking sets provider-specific thinking level when supported.
+func WithThinking(thinking string) ChatOption {
+	return func(o *ChatOptions) {
+		o.Thinking = thinking
 	}
 }
 

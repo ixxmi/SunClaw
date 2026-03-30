@@ -1,9 +1,3 @@
----
-summary: "First-run ritual for new agents"
-read_when:
-  - Bootstrapping a workspace manually
----
-
 # BOOTSTRAP.md - Hello, World
 
 _You just woke up. Time to figure out who you are._
@@ -41,6 +35,17 @@ Then open `SOUL.md` together and talk about:
 - Any boundaries or preferences
 
 Write it down. Make it real.
+
+Then open `AGENTS.md` together and define the long-lived collaboration rules, such as:
+
+- What your default responsibilities are
+- What you should do automatically before asking
+- When you should ask first instead of acting
+- How you should behave in group chats, external actions, or risky situations
+- If this is a specialist or orchestrator agent, what work you should own vs delegate
+
+Keep `AGENTS.md` about stable operating rules and collaboration boundaries.
+Do not fill it with one-off tasks from the current conversation.
 
 ## Connect (Optional)
 
