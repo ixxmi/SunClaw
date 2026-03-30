@@ -127,10 +127,17 @@ func TestSubagentSpawnTool_CrossAgentUsesTargetBootstrapOwner(t *testing.T) {
 	}
 }
 
-func TestSubagentSpawnTool_RequiresExplicitAgentIDWhenAllowAgentsConfigured(t *testing.T) {
+func TestSubagentSpawnTool_ResolvesAgentByNameWhenAllowAgentsConfigured(t *testing.T) {
 	reg := &fakeSubagentRegistry{}
 	tool := NewSubagentSpawnTool(reg)
 
+	tool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		return []config.AgentConfig{
+			{ID: "vibecoding", Name: "vibecoding"},
+			{ID: "coder", Name: "Coder"},
+			{ID: "frontend", Name: "Frontend"},
+		}
+	})
 	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
 		if agentID == "vibecoding" {
 			return &config.AgentConfig{
@@ -147,16 +154,54 @@ func TestSubagentSpawnTool_RequiresExplicitAgentIDWhenAllowAgentsConfigured(t *t
 	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
 
 	out, err := tool.Execute(ctx, map[string]interface{}{
-		"task": "implement current step",
+		"task":       "implement current step",
+		"agent_name": "Coder",
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if !strings.Contains(out, "Forbidden:") {
-		t.Fatalf("expected forbidden output, got %s", out)
+	if !strings.Contains(out, "Subagent spawned successfully") {
+		t.Fatalf("expected success output, got %s", out)
 	}
-	if !strings.Contains(out, "requires explicit agent_id") {
-		t.Fatalf("expected explicit agent_id error, got %s", out)
+	if !strings.Contains(out, "Agent: coder") {
+		t.Fatalf("expected resolved target agent coder, got %s", out)
+	}
+}
+
+func TestSubagentSpawnTool_InfersAgentFromTaskMention(t *testing.T) {
+	reg := &fakeSubagentRegistry{}
+	tool := NewSubagentSpawnTool(reg)
+
+	tool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		return []config.AgentConfig{
+			{ID: "vibecoding", Name: "vibecoding"},
+			{ID: "reviewer", Name: "Reviewer"},
+			{ID: "coder", Name: "Coder"},
+		}
+	})
+	tool.SetAgentConfigGetter(func(agentID string) *config.AgentConfig {
+		if agentID == "vibecoding" {
+			return &config.AgentConfig{
+				ID: "vibecoding",
+				Subagents: &config.AgentSubagentConfig{
+					AllowAgents: []string{"reviewer", "coder"},
+				},
+			}
+		}
+		return &config.AgentConfig{ID: agentID, Name: agentID}
+	})
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "agent_id", "vibecoding")
+
+	out, err := tool.Execute(ctx, map[string]interface{}{
+		"task": "让 Reviewer 先审查当前改动风险",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out, "Agent: reviewer") {
+		t.Fatalf("expected inferred reviewer target, got %s", out)
 	}
 }
 

@@ -175,20 +175,20 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "## Soul") {
-		t.Fatalf("expected soul layer in system prompt, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "# Soul") {
+		t.Fatalf("expected cognition layer in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "### BOOTSTRAP.md") {
 		t.Fatalf("expected BOOTSTRAP.md marker in system prompt, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "### SOUL.md") {
-		t.Fatalf("expected SOUL.md marker in system prompt, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "## Soul") {
+		t.Fatalf("expected shifted soul heading in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "vibecoding bootstrap soul") {
 		t.Fatalf("expected bootstrap content in system prompt, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "### AGENTS.md") {
-		t.Fatalf("expected AGENTS.md marker in system prompt, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "# Collaboration") {
+		t.Fatalf("expected collaboration section in system prompt, got %q", systemPrompt)
 	}
 }
 
@@ -241,9 +241,11 @@ func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.
 
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
-		"### AGENTS.md",
 		"### BOOTSTRAP.md",
-		"### IDENTITY.md",
+		"# Identity",
+		"# Soul",
+		"# User Context",
+		"# Collaboration",
 		"BOOTSTRAP.md - Hello, World",
 	}
 	for _, want := range checks {
@@ -255,11 +257,13 @@ func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.
 		t.Fatalf("did not expect legacy bootstrap mode notice, got %q", systemPrompt)
 	}
 
-	agentsIdx := strings.Index(systemPrompt, "### AGENTS.md")
 	bootstrapIdx := strings.Index(systemPrompt, "### BOOTSTRAP.md")
-	identityIdx := strings.Index(systemPrompt, "### IDENTITY.md")
-	if !(agentsIdx < bootstrapIdx && bootstrapIdx < identityIdx) {
-		t.Fatalf("expected AGENTS.md before BOOTSTRAP.md before IDENTITY.md, got %q", systemPrompt)
+	identityIdx := strings.Index(systemPrompt, "# Identity")
+	soulIdx := strings.Index(systemPrompt, "# Soul")
+	agentsIdx := strings.Index(systemPrompt, "# Collaboration")
+	userIdx := strings.Index(systemPrompt, "# User Context")
+	if !(bootstrapIdx < identityIdx && identityIdx < soulIdx && soulIdx < agentsIdx && agentsIdx < userIdx) {
+		t.Fatalf("expected BOOTSTRAP.md -> IDENTITY.md -> SOUL.md -> AGENTS.md -> USER.md order, got %q", systemPrompt)
 	}
 }
 
@@ -333,7 +337,7 @@ func TestStreamAssistantResponse_SubagentIncludesSpawnableCatalogWhenPresent(t *
 	state.IsSubagent = true
 	state.BootstrapOwnerID = "vibecoding"
 	state.SubagentDescriptor = "# Subagent Context\n\nFocus on the delegated task."
-	state.SpawnableAgentCatalog = "## 可派生 Agent 目录\n\n- **agent_id: \"coder\"** — Coder — 单步实现"
+	state.SpawnableAgentCatalog = "<available_agents>\n- agent_id: \"coder\" — Coder — 单步实现\n</available_agents>"
 	state.Messages = []AgentMessage{
 		{
 			Role:    RoleUser,
@@ -354,7 +358,7 @@ func TestStreamAssistantResponse_SubagentIncludesSpawnableCatalogWhenPresent(t *
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "## 可派生 Agent 目录") {
+	if !strings.Contains(systemPrompt, "<available_agents>") {
 		t.Fatalf("expected subagent system prompt to include spawnable catalog, got %q", systemPrompt)
 	}
 }

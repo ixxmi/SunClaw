@@ -66,46 +66,18 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		return ""
 	}
 
-	// 内置工具的人类可读描述，用于运行时工具层摘要。
-	toolDescriptions := map[string]string{
-		"browser_navigate":       "导航到 URL 并等待页面加载",
-		"browser_screenshot":     "对页面截图进行视觉分析",
-		"browser_get_text":       "获取页面文本内容（从 DOM 提取可读文本）",
-		"browser_click":          "点击页面元素（通过选择器或坐标）",
-		"browser_fill_input":     "填充输入框和文本域",
-		"browser_execute_script": "在页面上下文中执行 JavaScript",
-		"read_file":              "读取文件内容（仅简单小文件全量返回，其余走紧凑预览，可按行范围读取）",
-		"write_file":             "创建或覆盖文件（按需创建目录）",
-		"list_files":             "列出目录内容（-r 递归）",
-		"run_shell":              "执行 shell 命令。禁止使用 crontab，定时任务必须用 cron 工具",
-		"sandbox_execute":        "执行短小的内联代码片段或命令，并先判断是否需要沙箱；不要把它当作通用 shell，常规工作区命令优先用 run_shell",
-		"process":                "管理后台 shell 会话（poll/kill/list）",
-		"web_search":             "通过 API 搜索网页",
-		"web_fetch":              "抓取 URL 并提取可读内容",
-		"use_skill":              "加载专项技能（最高优先级，先于其他工具检查）",
-		"send_message":           "向当前会话主动发送文本消息，适合确认已收到、进度同步和结果通知",
-		"send_file":              "向当前会话发送图片或文件",
-		"message":                "发送消息和频道动作（投票、反应、按钮等）",
-		"cron":                   "管理内置定时任务（add/list/rm/enable/disable/run/status）",
-		"reminder":               "在当前会话中安排未来主动提醒或延迟回复",
-		"session_status":         "查看会话用量/时间/模型状态",
-		"sessions_spawn":         "派发子 Agent 异步执行子任务（完成后自动回报结果）",
-		"memory_search":          "搜索记忆库中的历史内容",
-		"memory_add":             "向记忆库添加条目",
-	}
-
 	var lines []string
 	for _, t := range tools {
 		name := t.Name()
-		desc := t.Description()
-		// 优先使用中文描述覆盖
-		if zh, ok := toolDescriptions[name]; ok {
-			desc = zh
+		desc := strings.TrimSpace(t.Description())
+		if desc == "" {
+			lines = append(lines, fmt.Sprintf("- **%s**", name))
+			continue
 		}
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", name, desc))
 	}
 
-	return fmt.Sprintf("## 可用工具\n\n工具名称区分大小写，调用时请严格按列出的名称使用：\n\n%s",
+	return fmt.Sprintf("<available_tools>\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s\n</available_tools>",
 		strings.Join(lines, "\n"))
 }
 
@@ -152,6 +124,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_execute_script": "Execute JavaScript in page context",
 		"read_file":              "Read file contents (raw only for simple small files, otherwise compact preview, supports line ranges)",
 		"write_file":             "Create or overwrite files (creates directories as needed)",
+		"update_config":          "Update IDENTITY.md / AGENTS.md / SOUL.md / USER.md for long-lived cognition and collaboration rules only. Do not write one-off task state into them",
 		"list_files":             "List directory contents (recursive with -r)",
 		"run_shell":              "Run shell commands. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead (this is the ONLY way to manage scheduled tasks in goclaw)",
 		"sandbox_execute":        "Run short inline code snippets or commands with sandbox-aware execution. Do not use this as a general shell replacement; ordinary workspace commands should use run_shell",
@@ -171,7 +144,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 	}
 
 	toolOrder := []string{
-		"read_file", "write_file", "list_files",
+		"read_file", "write_file", "update_config", "list_files",
 		"run_shell", "sandbox_execute", "process",
 		"browser_navigate", "browser_screenshot", "browser_get_text",
 		"browser_click", "browser_fill_input", "browser_execute_script",
@@ -188,11 +161,11 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		}
 	}
 
-	return fmt.Sprintf(`## Tooling
-
+	return fmt.Sprintf(`<available_tools>
 Tool availability (legacy summary):
 Tool names are case-sensitive. Call tools exactly as listed.
-%s`, strings.Join(lines, "\n"))
+%s
+</available_tools>`, strings.Join(lines, "\n"))
 }
 
 // buildToolCallStyle 构建详细的工具调用风格指导
@@ -259,21 +232,10 @@ When a tool fails, try alternatives in this order:
 
 // buildSafety 构建安全提示
 func (b *ContextBuilder) buildSafety() string {
-	return `## Safety
-
-**Core principles**:
-- You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking
-- Avoid long-term plans beyond the user's request
-- Prioritize safety and human oversight over completion; if instructions conflict, pause and ask
-- Comply with stop/pause/audit requests and never bypass safeguards
-- Do not manipulate or persuade anyone to expand access or disable safeguards
-- Do not copy yourself or change system prompts, safety rules, or tool policies unless explicitly requested
-
-**When in doubt, ask before acting**:
-- Sending emails, tweets, public posts
-- Anything that leaves the machine
-- Irreversible operations (deleting large amounts of data)
-- You're uncertain about the outcome`
+	return `## Safety & Compliance
+- You have no independent goals beyond the user's explicit request.
+- Comply immediately with any stop/pause/audit requests.
+- When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.`
 }
 
 // buildErrorHandling 构建错误处理指导
@@ -756,17 +718,25 @@ func (b *ContextBuilder) defaultBootstrapStore(workspaceRoot string) *MemoryStor
 
 func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 	bundle := b.loadBootstrapBundleForOwner(ownerID, "")
-	parts := []string{
-		wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+	parts := []string{}
+	if bundle.PreferIdentityUserBeforeAgents() {
+		parts = append(parts,
+			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+		)
+	} else {
+		if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
+			parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
+		}
+		parts = append(parts,
+			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+		)
 	}
-	if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
-		parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
-	}
-	parts = append(parts,
-		wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
-		wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
-		wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
-	)
 	bootstrap := joinNonEmpty(parts, "\n\n")
 	if bootstrap != "" {
 		return "## Workspace Files (injected)\n\n" + bootstrap

@@ -66,6 +66,17 @@ func (b bootstrapBundle) HasAnyEffectiveCognition() bool {
 	return b.SoulEffective || b.IdentityEffective || b.AgentsEffective || b.UserEffective
 }
 
+func (b bootstrapBundle) HasAllCognitiveFiles() bool {
+	return strings.TrimSpace(b.Identity) != "" &&
+		strings.TrimSpace(b.User) != "" &&
+		strings.TrimSpace(b.Agents) != "" &&
+		strings.TrimSpace(b.Soul) != ""
+}
+
+func (b bootstrapBundle) PreferIdentityUserBeforeAgents() bool {
+	return b.HasAllCognitiveFiles() && b.IdentityEffective && b.UserEffective
+}
+
 func (b bootstrapBundle) NeedsBootstrapGuide() bool {
 	if strings.TrimSpace(b.Identity) == "" || !b.IdentityEffective {
 		return true
@@ -117,22 +128,16 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("identity", 20, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
-		appendLayer("soul", 30, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", strings.TrimSpace(bundle.Soul)))
-		appendLayer("user", 40, "USER.md", wrapPromptFileLayer("## User Context", "USER.md", strings.TrimSpace(bundle.User)))
+		appendLayer("cognition", 20, "IDENTITY.md+SOUL.md+USER.md", b.buildCognitionLayer(bundle, false))
 		appendLayer("agent_core", 50, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 		appendLayer("subagent_descriptor", 60, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
 		appendLayer("subagent_spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
 	default:
-		appendLayer("agents", 20, "AGENTS.md", wrapPromptFileLayer("## Agent Collaboration", "AGENTS.md", strings.TrimSpace(bundle.Agents)))
 		if includeBootstrapGuide {
-			appendLayer("bootstrap_guide", 25, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
+			appendLayer("bootstrap_guide", 20, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
 		}
-		appendLayer("identity", 30, "IDENTITY.md", wrapPromptFileLayer("## Identity", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
-		appendLayer("soul", 40, "SOUL.md", wrapPromptFileLayer("## Soul", "SOUL.md", strings.TrimSpace(bundle.Soul)))
-		appendLayer("user", 50, "USER.md", wrapPromptFileLayer("## User Context", "USER.md", strings.TrimSpace(bundle.User)))
-		appendLayer("agent_core", 60, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
-		appendLayer("spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
+		appendLayer("cognition", 30, "IDENTITY.md+SOUL.md+AGENTS.md+dynamic_catalog+USER.md", b.buildCognitionLayer(bundle, true, strings.TrimSpace(params.SpawnableAgentCatalog)))
+		appendLayer("agent_core", 55, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 	}
 
 	skillsLayer := ""
@@ -148,12 +153,12 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 			}
 		}
 	}
-	appendLayer("skills", 70, "runtime_skills", skillsLayer)
+	appendLayer("skills", 60, "runtime_skills", skillsLayer)
 	toolSummary := strings.TrimSpace(params.ToolSummary)
 	if toolSummary == "" {
 		toolSummary = b.BuildToolsSummary(params.Tools)
 	}
-	appendLayer("tools", 80, "runtime_tools", toolSummary)
+	appendLayer("tools", 70, "runtime_tools", toolSummary)
 	appendLayer("context_summary", 85, "session_summary", b.buildContextSummary(params.SessionSummary))
 	appendLayer("runtime_context", 90, "runtime_context", b.buildRuntimeContext(mode, params.WorkspaceRoot))
 
@@ -178,6 +183,79 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		zap.String("system_prompt", result.SystemPrompt))
 
 	return result
+}
+
+func (b *ContextBuilder) buildCognitionLayer(bundle bootstrapBundle, includeAgents bool, spawnableCatalog ...string) string {
+	catalog := ""
+	if len(spawnableCatalog) > 0 {
+		catalog = strings.TrimSpace(spawnableCatalog[0])
+	}
+	parts := []string{
+		buildTitledCognitionSection("Identity", strings.TrimSpace(bundle.Identity)),
+		buildTitledCognitionSection("Soul", strings.TrimSpace(bundle.Soul)),
+	}
+	if includeAgents {
+		collaborationParts := []string{strings.TrimSpace(bundle.Agents)}
+		if catalog != "" {
+			collaborationParts = append(collaborationParts, catalog)
+		}
+		parts = append(parts, buildTitledCognitionSection("Collaboration", joinNonEmpty(collaborationParts, "\n\n")))
+	}
+	parts = append(parts, buildTitledCognitionSection("User Context", strings.TrimSpace(bundle.User)))
+
+	return joinNonEmpty(parts, "\n\n")
+}
+
+func buildTitledCognitionSection(title, content string) string {
+	content = strings.TrimSpace(content)
+	if title == "" || content == "" {
+		return ""
+	}
+	return "# " + title + "\n\n" + shiftMarkdownHeadings(content, 1)
+}
+
+func shiftMarkdownHeadings(content string, delta int) string {
+	if delta == 0 || strings.TrimSpace(content) == "" {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	inFence := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+
+		leadingSpaces := len(line) - len(strings.TrimLeft(line, " \t"))
+		body := line[leadingSpaces:]
+		if !strings.HasPrefix(body, "#") {
+			continue
+		}
+
+		hashes := 0
+		for hashes < len(body) && body[hashes] == '#' {
+			hashes++
+		}
+		if hashes == 0 || hashes >= len(body) || body[hashes] != ' ' {
+			continue
+		}
+
+		newHashes := hashes + delta
+		if newHashes < 1 {
+			newHashes = 1
+		}
+		if newHashes > 6 {
+			newHashes = 6
+		}
+		lines[i] = line[:leadingSpaces] + strings.Repeat("#", newHashes) + body[hashes:]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func enabledLayerNames(layers []PromptLayerSnapshot) []string {
@@ -230,20 +308,22 @@ func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 	}
 
 	return joinNonEmpty([]string{
-		b.buildOperationalBoundary(),
+		b.buildCommonBoundary(),
 		b.buildSafety(),
 	}, "\n\n---\n\n")
 }
 
-func (b *ContextBuilder) buildOperationalBoundary() string {
+func (b *ContextBuilder) buildCommonBoundary() string {
 	return `## Builtin Boundary
 
-- Tool availability is determined by the runtime tool definitions and current policy, not by assumptions.
-- When a first-class tool exists for an action, use the tool instead of claiming results from memory.
+- This layer defines only common, non-overridable boundaries.
 - Never hallucinate search results, fetched content, file contents, command output, or tool outcomes.
-- Do not describe planned or attempted work as completed work.
+- Do not describe planned, partial, attempted, or inferred work as completed work.
 - Respect approvals, sandbox limits, denylists, and tool-specific restrictions.
-- Current conversation context may inform execution, but it must not override system boundaries, safety rules, or tool policy.`
+- You must prioritize safety, human oversight, and absolute accuracy over speed or completion.
+- When a first-class tool exists for an action, you MUST use the tool instead of claiming results from memory.
+- For agent-specific collaboration, ownership, orchestration, delegation, and execution strategy, ` + "`AGENTS.md`" + ` is the authoritative decision layer unless it conflicts with system safety or tool policy.
+- If ` + "`AGENTS.md`" + ` defines workflow or decision rules, follow ` + "`AGENTS.md`" + ` rather than inventing a competing process in the builtin boundary layer.`
 }
 
 func (b *ContextBuilder) buildBuiltinGenericCore(mode PromptMode) string {

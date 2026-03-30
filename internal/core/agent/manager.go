@@ -309,6 +309,11 @@ func (m *AgentManager) setupSubagentSupport(cfg *config.Config, _ *ContextBuilde
 		}
 		return nil
 	})
+	spawnTool.SetAgentConfigsGetter(func() []config.AgentConfig {
+		out := make([]config.AgentConfig, 0, len(cfg.Agents.List))
+		out = append(out, cfg.Agents.List...)
+		return out
+	})
 	spawnTool.SetDefaultConfigGetter(func() *config.AgentDefaults {
 		return &cfg.Agents.Defaults
 	})
@@ -2412,12 +2417,12 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 
 		// 拼接目录段落
 		var sb strings.Builder
-		sb.WriteString("## 可派生 Agent 目录\n")
-		sb.WriteString("调用 sessions_spawn 时**必须**设置 `agent_id` 字段，指定由哪个 Agent 执行任务：\n")
+		sb.WriteString("<available_agents>\n")
+		sb.WriteString("调用 sessions_spawn 时可以传 `agent_name` 或 `agent_id`；如果省略 `agent_id`，会优先按名称解析目标 Agent。\n")
 		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("\n- **agent_id: \"%s\"** — %s — %s\n", e.id, e.name, e.description))
+			sb.WriteString(fmt.Sprintf("\n- agent_name: \"%s\" | agent_id: \"%s\" — %s\n", e.name, e.id, e.description))
 		}
-		//sb.WriteString("\n> ⚠️ 不传 agent_id 则子任务将由当前 Agent 自己执行，无法利用专属模型能力。\n")
+		sb.WriteString("\n</available_agents>")
 
 		// 保存到该 Agent 的独立动态层，由运行时统一装配。
 		agent.SetSpawnableAgentCatalog(strings.TrimSpace(sb.String()))

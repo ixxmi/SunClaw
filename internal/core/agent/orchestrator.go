@@ -495,10 +495,10 @@ func isBootstrapGuideModeContent(content string) bool {
 		return false
 	}
 	cognitiveHeaders := []string{
-		"### IDENTITY.md",
-		"### AGENTS.md",
-		"### SOUL.md",
-		"### USER.md",
+		"# Identity",
+		"# Collaboration",
+		"# Soul",
+		"# User Context",
 	}
 	for _, header := range cognitiveHeaders {
 		if strings.Contains(content, header) {

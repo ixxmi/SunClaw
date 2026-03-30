@@ -25,6 +25,27 @@ func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *test
 	}
 }
 
+func TestBuildSystemPromptIncludesCommonBoundaryAndAgentsAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	prompt := builder.BuildSystemPrompt(nil)
+
+	checks := []string{
+		"This layer defines only common, non-overridable boundaries.",
+		"When a first-class tool exists for an action, you MUST use the tool instead of claiming results from memory.",
+		"Do not describe planned, partial, attempted, or inferred work as completed work.",
+		"`AGENTS.md` is the authoritative decision layer unless it conflicts with system safety or tool policy.",
+		"follow `AGENTS.md` rather than inventing a competing process in the builtin boundary layer.",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing common boundary rule %q", want)
+		}
+	}
+}
+
 func TestBuildSystemPromptListsProgressMessagingTools(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
@@ -195,7 +216,7 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 		t.Fatalf("expected messages to be built")
 	}
 	systemPrompt := msgs[0].Content
-	if !strings.Contains(systemPrompt, "## 可用工具") {
+	if !strings.Contains(systemPrompt, "<available_tools>") {
 		t.Fatalf("expected runtime tool layer in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "**read_file**") {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -278,6 +279,9 @@ func (r *SessionContextRouter) loadFromDisk() error {
 	if state.Archived != nil {
 		r.archived = state.Archived
 	}
+	if r.pruneLegacyRoutes() {
+		_ = r.saveToDisk()
+	}
 	return nil
 }
 
@@ -330,4 +334,68 @@ func normalizeSessionAlias(alias string) string {
 
 func buildLogicalSessionKey(baseSessionKey, alias string) string {
 	return fmt.Sprintf("%s:session:%s", baseSessionKey, alias)
+}
+
+func (r *SessionContextRouter) pruneLegacyRoutes() bool {
+	changed := false
+
+	for baseSessionKey := range r.activeAlias {
+		if isStructuredContextBaseKey(baseSessionKey) {
+			continue
+		}
+		delete(r.activeAlias, baseSessionKey)
+		changed = true
+	}
+
+	for baseSessionKey, aliases := range r.aliases {
+		if !isStructuredContextBaseKey(baseSessionKey) {
+			delete(r.aliases, baseSessionKey)
+			delete(r.archived, baseSessionKey)
+			changed = true
+			continue
+		}
+
+		for alias, actual := range aliases {
+			if isNamespacedContextSessionKey(actual) {
+				continue
+			}
+			delete(aliases, alias)
+			if archived := r.archived[baseSessionKey]; archived != nil {
+				delete(archived, alias)
+				if len(archived) == 0 {
+					delete(r.archived, baseSessionKey)
+				}
+			}
+			if strings.TrimSpace(r.activeAlias[baseSessionKey]) == alias {
+				delete(r.activeAlias, baseSessionKey)
+			}
+			changed = true
+		}
+
+		if len(aliases) == 0 {
+			delete(r.aliases, baseSessionKey)
+			delete(r.archived, baseSessionKey)
+			delete(r.activeAlias, baseSessionKey)
+			changed = true
+		}
+	}
+
+	for baseSessionKey := range r.archived {
+		if !isStructuredContextBaseKey(baseSessionKey) {
+			delete(r.archived, baseSessionKey)
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func isStructuredContextBaseKey(baseSessionKey string) bool {
+	identity, ok := namespaces.FromSessionKey(strings.TrimSpace(baseSessionKey))
+	return ok && strings.TrimSpace(identity.NamespaceKey()) != ""
+}
+
+func isNamespacedContextSessionKey(sessionKey string) bool {
+	identity, ok := namespaces.FromSessionKey(strings.TrimSpace(sessionKey))
+	return ok && strings.TrimSpace(identity.NamespaceKey()) != ""
 }
