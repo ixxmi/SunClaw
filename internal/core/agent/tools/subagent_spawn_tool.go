@@ -184,6 +184,7 @@ type SubagentSpawnToolParams struct {
 	Task              string   `json:"task"`                          // 任务描述（必填）
 	Label             string   `json:"label,omitempty"`               // 可选标签
 	AgentID           string   `json:"agent_id,omitempty"`            // 目标 Agent ID
+	AgentName         string   `json:"agent_name,omitempty"`          // 目标 Agent 名称/别名
 	Model             string   `json:"model,omitempty"`               // 模型覆盖
 	Thinking          string   `json:"thinking,omitempty"`            // 思考级别
 	MaxTokens         int      `json:"max_tokens,omitempty"`          // 最大输出 token
@@ -225,6 +226,7 @@ type SubagentRegistryInterface interface {
 type SubagentSpawnTool struct {
 	registry         SubagentRegistryInterface
 	getAgentConfig   func(agentID string) *config.AgentConfig
+	listAgentConfigs func() []config.AgentConfig
 	getDefaultConfig func() *config.AgentDefaults
 	getAgentID       func(sessionKey string) string
 	onSpawn          func(spawnParams *SubagentSpawnResult) error
@@ -245,6 +247,11 @@ func (t *SubagentSpawnTool) SetAgentConfigGetter(getter func(agentID string) *co
 // SetDefaultConfigGetter 设置默认配置获取器
 func (t *SubagentSpawnTool) SetDefaultConfigGetter(getter func() *config.AgentDefaults) {
 	t.getDefaultConfig = getter
+}
+
+// SetAgentConfigsGetter 设置 Agent 配置列表获取器
+func (t *SubagentSpawnTool) SetAgentConfigsGetter(getter func() []config.AgentConfig) {
+	t.listAgentConfigs = getter
 }
 
 // SetAgentIDGetter 设置 Agent ID 获取器
@@ -282,7 +289,11 @@ func (t *SubagentSpawnTool) Parameters() map[string]interface{} {
 			},
 			"agent_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Optional target agent ID. When this agent has a spawnable catalog, set this explicitly.",
+				"description": "Optional target agent ID. If omitted, the tool may resolve a target from agent_name or names mentioned in the task/context.",
+			},
+			"agent_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional target agent display name, identity name, or role alias such as Reviewer, Coder, inspector, reviewer.",
 			},
 			"model": map[string]interface{}{
 				"type":        "string",
@@ -407,19 +418,23 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		zap.String("bootstrap_owner_id", bootstrapOwnerID),
 		zap.String("requester_session_key", requesterSessionKey),
 		zap.String("target_agent_id_param", spawnParams.AgentID),
+		zap.String("target_agent_name_param", spawnParams.AgentName),
 		zap.String("task_preview", normalizeText(delegatedTask)))
 
 	// 确定目标 Agent ID
 	targetAgentID := requesterAgentID
-	if strings.TrimSpace(spawnParams.AgentID) == "" && t.requiresExplicitAgentID(requesterAgentID) {
+	resolvedTargetAgentID, err := t.resolveTargetAgentID(requesterAgentID, spawnParams)
+	if err != nil {
 		result := &SubagentSpawnResult{
 			Status: "forbidden",
-			Error:  "sessions_spawn requires explicit agent_id for this agent; choose one from the allowed agent catalog",
+			Error:  err.Error(),
 		}
 		return t.marshalResult(result), nil
 	}
-	if spawnParams.AgentID != "" {
-		targetAgentID = spawnParams.AgentID
+	if strings.TrimSpace(resolvedTargetAgentID) != "" {
+		targetAgentID = resolvedTargetAgentID
+	}
+	if targetAgentID != requesterAgentID {
 		// 跨 Agent 派发时，子 agent 的认知文件应来自目标 Agent 本身。
 		bootstrapOwnerID = targetAgentID
 	}
@@ -588,6 +603,13 @@ func (t *SubagentSpawnTool) parseParams(params map[string]interface{}) (*Subagen
 		}
 	}
 
+	// 解析 agent_name
+	if val, ok := params["agent_name"]; ok {
+		if str, ok := val.(string); ok {
+			result.AgentName = str
+		}
+	}
+
 	// 解析 model
 	if val, ok := params["model"]; ok {
 		if str, ok := val.(string); ok {
@@ -718,6 +740,237 @@ func (t *SubagentSpawnTool) requiresExplicitAgentID(requesterID string) bool {
 	}
 
 	return len(agentCfg.Subagents.AllowAgents) > 0
+}
+
+func (t *SubagentSpawnTool) resolveTargetAgentID(requesterID string, params *SubagentSpawnToolParams) (string, error) {
+	if params == nil {
+		return requesterID, nil
+	}
+
+	if ref := strings.TrimSpace(params.AgentID); ref != "" {
+		return t.resolveAgentReference(requesterID, ref)
+	}
+	if ref := strings.TrimSpace(params.AgentName); ref != "" {
+		return t.resolveAgentReference(requesterID, ref)
+	}
+
+	inferred := t.inferTargetAgentFromTask(requesterID, params)
+	if strings.TrimSpace(inferred) != "" {
+		return inferred, nil
+	}
+
+	if t.requiresExplicitAgentID(requesterID) {
+		return "", fmt.Errorf("sessions_spawn requires a target agent selection for this agent; provide agent_name or mention a unique subagent name in the task")
+	}
+
+	return requesterID, nil
+}
+
+func (t *SubagentSpawnTool) resolveAgentReference(requesterID, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", fmt.Errorf("empty agent reference")
+	}
+
+	candidates := t.allowedTargetAgentConfigs(requesterID)
+	if len(candidates) == 0 {
+		candidates = t.allAgentConfigs()
+	}
+
+	matches := make([]config.AgentConfig, 0, 2)
+	needle := normalizeAgentReference(ref)
+	for _, cfg := range candidates {
+		if agentConfigMatchesRef(cfg, needle) {
+			matches = append(matches, cfg)
+		}
+	}
+
+	if len(matches) == 1 {
+		return matches[0].ID, nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("agent reference %q is ambiguous; please use a more specific agent_name or agent_id", ref)
+	}
+
+	if t.getAgentConfig != nil {
+		if cfg := t.getAgentConfig(ref); cfg != nil {
+			return cfg.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("agent reference %q not found", ref)
+}
+
+func (t *SubagentSpawnTool) inferTargetAgentFromTask(requesterID string, params *SubagentSpawnToolParams) string {
+	candidates := t.allowedTargetAgentConfigs(requesterID)
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0].ID
+	}
+
+	haystack := normalizeAgentReference(strings.Join([]string{
+		strings.TrimSpace(params.Task),
+		strings.TrimSpace(params.Label),
+		strings.TrimSpace(params.Context),
+	}, " "))
+	if haystack == "" {
+		return ""
+	}
+
+	bestID := ""
+	bestScore := 0
+	tied := false
+	for _, cfg := range candidates {
+		score := scoreAgentReferenceMatch(cfg, haystack)
+		if score == 0 {
+			continue
+		}
+		if score > bestScore {
+			bestID = cfg.ID
+			bestScore = score
+			tied = false
+			continue
+		}
+		if score == bestScore {
+			tied = true
+		}
+	}
+
+	if bestID == "" || tied {
+		return ""
+	}
+	return bestID
+}
+
+func (t *SubagentSpawnTool) allowedTargetAgentConfigs(requesterID string) []config.AgentConfig {
+	all := t.allAgentConfigs()
+	if len(all) == 0 {
+		return nil
+	}
+
+	if t.getAgentConfig == nil {
+		return all
+	}
+	requesterCfg := t.getAgentConfig(requesterID)
+	if requesterCfg == nil || requesterCfg.Subagents == nil || len(requesterCfg.Subagents.AllowAgents) == 0 {
+		return filterNonSelfConfigs(all, requesterID)
+	}
+
+	allowedSet := make(map[string]struct{}, len(requesterCfg.Subagents.AllowAgents))
+	allowAll := false
+	for _, id := range requesterCfg.Subagents.AllowAgents {
+		id = strings.TrimSpace(id)
+		if id == "*" {
+			allowAll = true
+			break
+		}
+		if id != "" {
+			allowedSet[strings.ToLower(id)] = struct{}{}
+		}
+	}
+
+	result := make([]config.AgentConfig, 0, len(all))
+	for _, cfg := range all {
+		if strings.EqualFold(cfg.ID, requesterID) {
+			continue
+		}
+		if allowAll {
+			result = append(result, cfg)
+			continue
+		}
+		if _, ok := allowedSet[strings.ToLower(strings.TrimSpace(cfg.ID))]; ok {
+			result = append(result, cfg)
+		}
+	}
+	return result
+}
+
+func (t *SubagentSpawnTool) allAgentConfigs() []config.AgentConfig {
+	if t.listAgentConfigs == nil {
+		return nil
+	}
+	configs := t.listAgentConfigs()
+	out := make([]config.AgentConfig, 0, len(configs))
+	for _, cfg := range configs {
+		if strings.TrimSpace(cfg.ID) == "" {
+			continue
+		}
+		out = append(out, cfg)
+	}
+	return out
+}
+
+func filterNonSelfConfigs(configs []config.AgentConfig, selfID string) []config.AgentConfig {
+	out := make([]config.AgentConfig, 0, len(configs))
+	for _, cfg := range configs {
+		if strings.EqualFold(strings.TrimSpace(cfg.ID), strings.TrimSpace(selfID)) {
+			continue
+		}
+		out = append(out, cfg)
+	}
+	return out
+}
+
+func normalizeAgentReference(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func agentConfigMatchesRef(cfg config.AgentConfig, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for _, alias := range agentConfigAliases(cfg) {
+		if normalizeAgentReference(alias) == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func scoreAgentReferenceMatch(cfg config.AgentConfig, haystack string) int {
+	score := 0
+	for _, alias := range agentConfigAliases(cfg) {
+		alias = normalizeAgentReference(alias)
+		if alias == "" {
+			continue
+		}
+		if len(alias) < 3 && alias != strings.ToLower(strings.TrimSpace(cfg.ID)) {
+			continue
+		}
+		if strings.Contains(haystack, alias) {
+			if len(alias) > score {
+				score = len(alias)
+			}
+		}
+	}
+	return score
+}
+
+func agentConfigAliases(cfg config.AgentConfig) []string {
+	aliases := []string{cfg.ID, cfg.Name}
+	if cfg.Identity != nil {
+		aliases = append(aliases, cfg.Identity.Name)
+	}
+	if role, ok := cfg.Metadata["role"].(string); ok {
+		aliases = append(aliases, role)
+	}
+	out := make([]string, 0, len(aliases))
+	seen := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		key := normalizeAgentReference(alias)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, alias)
+	}
+	return out
 }
 
 func (t *SubagentSpawnTool) canTargetAgentSpawn(agentID string) bool {
