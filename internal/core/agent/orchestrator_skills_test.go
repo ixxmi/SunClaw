@@ -320,6 +320,10 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		"## Selected Skills (active)",
 		"## Bootstrap Mode",
 		"BOOTSTRAP.md - Hello, World",
+		"# Identity",
+		"# Soul",
+		"# Collaboration",
+		"# User Context",
 	} {
 		if strings.Contains(systemPrompt, marker) {
 			t.Fatalf("did not expect %q in subagent system prompt, got %q", marker, systemPrompt)

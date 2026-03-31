@@ -68,7 +68,7 @@ pre {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  width: 72px;
+  width: 256px;
   border-right: 1px solid var(--line);
   background: var(--panel);
   transition: width 240ms ease;
@@ -76,20 +76,24 @@ pre {
   overflow: hidden;
 }
 
-.sidebar:hover {
+.sidebar.collapsed {
+  width: 72px;
+}
+
+.sidebar:not(.collapsed):hover {
   width: 256px;
 }
 
-.sidebar:not(:hover) .brand-copy,
-.sidebar:not(:hover) .nav-group-head span:first-child,
-.sidebar:not(:hover) .nav-item span {
+.sidebar.collapsed .brand-block,
+.sidebar.collapsed .nav-group-head span:first-child,
+.sidebar.collapsed .nav-item span {
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
   display: none;
 }
 
-.sidebar:not(:hover) .sidebar-header {
+.sidebar.collapsed .sidebar-header {
   justify-content: center;
   padding: 0;
 }
@@ -229,7 +233,7 @@ pre {
   font-weight: 600;
 }
 
-.sidebar:not(:hover) .nav-item {
+.sidebar.collapsed .nav-item {
   justify-content: center;
   width: 44px;
   height: 44px;

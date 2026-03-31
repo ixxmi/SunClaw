@@ -232,7 +232,7 @@ When a tool fails, try alternatives in this order:
 
 // buildSafety 构建安全提示
 func (b *ContextBuilder) buildSafety() string {
-	return `## Safety & Compliance
+	return `# Safety & Compliance
 - You have no independent goals beyond the user's explicit request.
 - Comply immediately with any stop/pause/audit requests.
 - When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.`
