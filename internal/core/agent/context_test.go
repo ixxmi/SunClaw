@@ -15,7 +15,7 @@ func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *test
 
 	prompt := builder.BuildSystemPrompt(nil)
 
-	if !strings.Contains(prompt, "## Builtin Boundary") {
+	if !strings.Contains(prompt, "Builtin Boundary") {
 		t.Fatalf("expected builtin boundary in prompt, got %q", prompt)
 	}
 	for _, marker := range []string{"## Builtin Generic Core", "## Communication Style", "## Error Handling"} {

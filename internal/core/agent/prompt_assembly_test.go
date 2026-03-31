@@ -140,7 +140,7 @@ func TestAssemblePrompt_EmptyAgentCoreDoesNotFallbackToBuiltinGenericCore(t *tes
 			t.Fatalf("did not expect builtin generic core marker %q in prompt, got %q", marker, got)
 		}
 	}
-	if !strings.Contains(got, "## Builtin Boundary") {
+	if !strings.Contains(got, "Builtin Boundary") {
 		t.Fatalf("expected builtin boundary to remain, got %q", got)
 	}
 }

@@ -123,10 +123,11 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_fill_input":     "Fill input fields and textareas",
 		"browser_execute_script": "Execute JavaScript in page context",
 		"read_file":              "Read file contents (raw only for simple small files, otherwise compact preview, supports line ranges)",
-		"write_file":             "Create or overwrite files (creates directories as needed)",
+		"write_file":             "Create a new file or fully overwrite an existing file with complete content. Do not use run_shell for ordinary file writing when this tool fits",
+		"edit_file":              "Edit an existing file by exact text replacement. Preferred tool for normal code edits to existing files",
 		"update_config":          "Update IDENTITY.md / AGENTS.md / SOUL.md / USER.md for long-lived cognition and collaboration rules only. Do not write one-off task state into them",
 		"list_files":             "List directory contents (recursive with -r)",
-		"run_shell":              "Run shell commands. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead (this is the ONLY way to manage scheduled tasks in goclaw)",
+		"run_shell":              "Run shell commands for builds, tests, scripts, package installs, curl, and diagnostics. Do not use it for ordinary source-file edits or writes when file tools fit. PROHIBITED: Never use 'crontab' commands for scheduled tasks - use the 'cron' tool instead",
 		"sandbox_execute":        "Run short inline code snippets or commands with sandbox-aware execution. Do not use this as a general shell replacement; ordinary workspace commands should use run_shell",
 		"process":                "Manage background shell sessions (poll, kill, list)",
 		"web_search":             "Search the web using API (Brave/Search APIs)",
@@ -144,7 +145,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 	}
 
 	toolOrder := []string{
-		"read_file", "write_file", "update_config", "list_files",
+		"read_file", "write_file", "edit_file", "update_config", "list_files",
 		"run_shell", "sandbox_execute", "process",
 		"browser_navigate", "browser_screenshot", "browser_get_text",
 		"browser_click", "browser_fill_input", "browser_execute_script",
@@ -191,6 +192,12 @@ func (b *ContextBuilder) buildToolCallStyle() string {
 **Keep narration**: Brief and value-dense; avoid repeating obvious steps. Use plain human language unless in a technical context.
 
 **When a first-class tool exists for an action**: Use the tool directly instead of asking the user to run equivalent CLI commands.
+
+**Tool selection for file work**:
+- Use read_file or list_dir to inspect files and directories.
+- Use edit_file for normal edits to existing files.
+- Use write_file only when creating a file or replacing the whole file content.
+- Do NOT use run_shell for ordinary source-file edits or writes when file tools can express the change directly.
 
 ## Examples
 
