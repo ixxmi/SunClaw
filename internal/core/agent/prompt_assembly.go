@@ -128,7 +128,6 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("cognition", 20, "IDENTITY.md+SOUL.md+USER.md", b.buildCognitionLayer(bundle, false))
 		appendLayer("agent_core", 50, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
 		appendLayer("subagent_descriptor", 60, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
 		appendLayer("subagent_spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
@@ -314,16 +313,11 @@ func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 }
 
 func (b *ContextBuilder) buildCommonBoundary() string {
-	return `## Builtin Boundary
-
-- This layer defines only common, non-overridable boundaries.
+	return `# Builtin Boundary
 - Never hallucinate search results, fetched content, file contents, command output, or tool outcomes.
 - Do not describe planned, partial, attempted, or inferred work as completed work.
 - Respect approvals, sandbox limits, denylists, and tool-specific restrictions.
-- You must prioritize safety, human oversight, and absolute accuracy over speed or completion.
-- When a first-class tool exists for an action, you MUST use the tool instead of claiming results from memory.
-- For agent-specific collaboration, ownership, orchestration, delegation, and execution strategy, ` + "`AGENTS.md`" + ` is the authoritative decision layer unless it conflicts with system safety or tool policy.
-- If ` + "`AGENTS.md`" + ` defines workflow or decision rules, follow ` + "`AGENTS.md`" + ` rather than inventing a competing process in the builtin boundary layer.`
+- You must prioritize safety, human oversight, and absolute accuracy over speed or completion.`
 }
 
 func (b *ContextBuilder) buildBuiltinGenericCore(mode PromptMode) string {

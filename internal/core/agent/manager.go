@@ -23,7 +23,6 @@ import (
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
-	platformerrors "github.com/smallnest/goclaw/internal/platform/errors"
 	"github.com/smallnest/goclaw/internal/workspace"
 	"go.uber.org/zap"
 )
@@ -430,11 +429,13 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 	logger.Info("━━ Subagent spawn ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
 		zap.String("target_agent_id", resolvedTargetAgentID),
 		zap.String("subagent_id", subagentID),
-		zap.String("model", firstNonEmpty(strings.TrimSpace(result.Model), targetAgent.orchestrator.config.Model)),
+		zap.String("model", strings.TrimSpace(targetAgent.orchestrator.config.Model)),
 		zap.String("task_preview", truncateSubagentTask(result.Task, 80)))
 
 	timeoutSeconds := m.resolveSubagentTimeoutSeconds(resolvedTargetAgentID, result.RunTimeoutSeconds)
-	effectiveModel := firstNonEmpty(strings.TrimSpace(result.Model), targetAgent.orchestrator.config.Model)
+	// 子 agent 必须固定使用目标 Agent 在配置文件中解析出的模型。
+	// 不允许由 sessions_spawn 传入的 per-run model 覆盖，以避免运行时把请求送到错误的模型/计费通道。
+	effectiveModel := strings.TrimSpace(targetAgent.orchestrator.config.Model)
 	effectiveMaxTokens := targetAgent.orchestrator.config.MaxTokens
 	if result.MaxTokens > 0 {
 		effectiveMaxTokens = result.MaxTokens
@@ -823,22 +824,15 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 				}
 			}
 
-			// 显式绑定 profile 的 agent 默认会绕过全局 rotation/failover。
-			// 当上游出现 502/503/504/timeout 时，这会让子 agent 直接失败。
-			// 这里保留指定 profile 作为首选提供商，同时用全局轮换提供商作为故障转移后备。
+			// 注意：显式绑定 profile 的 agent 不能再包一层“全局 failover”。
+			// 全局轮换池里可能混有 Gemini / Claude / Minimax 等不同 base_url 与计费模型。
+			// 一旦主 profile 失败，请求会被错误地切到不兼容的 provider 端点，但仍携带原模型名，
+			// 典型报错就是把 gpt-* 模型发到 gemini 兼容端点，导致 SETTLEMENT_UNKNOWN_MODEL。
+			// 因此显式 profile agent 必须固定使用自己的 provider/profile。
 			if globalCfg.Providers.Failover.Enabled && len(globalCfg.Providers.Profiles) > 1 {
-				if fallbackProvider, fbErr := providers.NewRotationProviderFromConfig(globalCfg); fbErr != nil {
-					logger.Warn("Failed to create fallback provider for agent profile; using direct provider only",
-						zap.String("agent_id", cfg.ID),
-						zap.String("profile", cfg.Provider),
-						zap.Error(fbErr))
-				} else {
-					agentProvider = providers.NewFailoverProvider(p, fallbackProvider, platformerrors.NewSimpleErrorClassifier())
-					agentProviderType = cfg.Provider + "+failover"
-					logger.Info("Agent profile provider wrapped with global failover",
-						zap.String("agent_id", cfg.ID),
-						zap.String("primary_profile", cfg.Provider))
-				}
+				logger.Info("Agent profile provider uses direct profile without global failover",
+					zap.String("agent_id", cfg.ID),
+					zap.String("profile", cfg.Provider))
 			}
 		}
 	}
