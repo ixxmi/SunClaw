@@ -425,7 +425,7 @@ func (t *FileSystemTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"write_file",
-			"Write content to a file",
+			"Create a new file or fully overwrite an existing file with the complete target content. Use this when you intend to replace the whole file. Do NOT use run_shell for ordinary file writing when this tool fits.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -444,7 +444,7 @@ func (t *FileSystemTool) GetTools() []Tool {
 		),
 		NewBaseTool(
 			"edit_file",
-			"Replace all occurrences of old_string with new_string in a file. Use for precise edits to existing files.",
+			"Edit an existing file by replacing exact text matches. Preferred tool for precise code or text changes in existing files. Do NOT use run_shell for normal source-file edits when this tool fits.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

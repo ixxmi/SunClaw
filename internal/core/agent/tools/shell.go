@@ -327,7 +327,8 @@ func (t *ShellTool) GetTools() []Tool {
 		desc.WriteString(" on the host system")
 	}
 
-	desc.WriteString(". Use this for file operations, running scripts (Python, Node.js, etc.), installing dependencies, HTTP requests (curl), system diagnostics and more. Commands run in a non-interactive shell. ")
+	desc.WriteString(". Use this for command execution tasks such as builds, tests, scripts, package installs, HTTP requests (curl), and system diagnostics. Commands run in a non-interactive shell. ")
+	desc.WriteString("Do NOT use this tool for ordinary source-file creation or edits when read_file, write_file, edit_file, or list_dir can express the task directly. ")
 	desc.WriteString("PROHIBITED: Do NOT use 'crontab', 'crontab -l', 'crontab -e', or any system cron commands. ")
 	desc.WriteString("For ALL scheduled task operations (create, list, edit, delete, enable, disable), you MUST use the 'cron' tool instead. ")
 	desc.WriteString("The 'cron' tool manages goclaw's built-in scheduler - this is the ONLY way to manage scheduled tasks. ")
@@ -342,7 +343,7 @@ func (t *ShellTool) GetTools() []Tool {
 				"properties": map[string]interface{}{
 					"command": map[string]interface{}{
 						"type":        "string",
-						"description": "Shell command to execute. DO NOT use crontab commands - use the 'cron' tool for scheduled task management.",
+						"description": "Shell command to execute. Use for builds/tests/scripts/diagnostics. Do NOT use this to edit or write normal source files when file tools are available. DO NOT use crontab commands - use the 'cron' tool for scheduled task management.",
 					},
 				},
 				"required": []string{"command"},

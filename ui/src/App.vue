@@ -49,6 +49,7 @@ const shrimpBrainError = ref("");
 const shrimpBrainStreamState = ref("connecting");
 const selectedShrimpSessionKey = ref("");
 const deletingShrimpRunId = ref("");
+const expandedShrimpReplies = ref<Record<string, boolean>>({});
 const isUserInteracting = ref(false);
 let refreshTimer: number | undefined;
 let shrimpBrainStream: EventSource | null = null;
@@ -494,6 +495,29 @@ function formatShrimpTime(timestamp?: number) {
     return "";
   }
   return new Date(timestamp).toLocaleString("zh-CN");
+}
+
+const SHRIMP_REPLY_COLLAPSE_LINES = 8;
+const SHRIMP_REPLY_COLLAPSE_THRESHOLD = 240;
+
+function shouldShowShrimpReplyToggle(reply?: string) {
+  const content = reply?.trim() ?? "";
+  if (!content) {
+    return false;
+  }
+  const lineCount = content.split(/\r?\n/).length;
+  return lineCount > SHRIMP_REPLY_COLLAPSE_LINES || content.length > SHRIMP_REPLY_COLLAPSE_THRESHOLD;
+}
+
+function isShrimpReplyExpanded(runId: string) {
+  return Boolean(expandedShrimpReplies.value[runId]);
+}
+
+function toggleShrimpReply(runId: string) {
+  expandedShrimpReplies.value = {
+    ...expandedShrimpReplies.value,
+    [runId]: !expandedShrimpReplies.value[runId],
+  };
 }
 
 function truncateShrimpText(value: string | undefined, limit = 20) {
@@ -1290,7 +1314,18 @@ onBeforeUnmount(() => {
                             <strong>主 Agent 最终回复</strong>
                             <small class="helper-text">{{ formatShrimpTime(run.mainReplyAt) }}</small>
                           </div>
-                          <pre>{{ run.mainReply }}</pre>
+                          <pre
+                            class="shrimp-reply-content"
+                            :class="{ collapsed: shouldShowShrimpReplyToggle(run.mainReply) && !isShrimpReplyExpanded(run.id) }"
+                          >{{ run.mainReply }}</pre>
+                          <button
+                            v-if="shouldShowShrimpReplyToggle(run.mainReply)"
+                            class="shrimp-reply-toggle"
+                            type="button"
+                            @click="toggleShrimpReply(run.id)"
+                          >
+                            {{ isShrimpReplyExpanded(run.id) ? "收起" : "展开" }}
+                          </button>
                         </div>
                       </article>
 
@@ -1974,6 +2009,29 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 8px;
   margin-top: 8px;
+}
+
+.shrimp-reply-content.collapsed {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  overflow: hidden;
+}
+
+.shrimp-reply-toggle {
+  align-self: flex-start;
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--sky);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.shrimp-reply-toggle:hover {
+  text-decoration: underline;
 }
 
 .shrimp-secondary-card,
