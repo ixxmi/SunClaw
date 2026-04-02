@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 )
 
 // ContentBlock represents a block of content in a message
@@ -66,15 +68,22 @@ type BaseTool struct {
 	name        string
 	description string
 	parameters  map[string]interface{}
+	spec        tooltypes.ToolSpec
 	executeFunc func(ctx context.Context, params map[string]interface{}) (string, error)
 }
 
 // NewBaseTool 创建基础工具
 func NewBaseTool(name, description string, parameters map[string]interface{}, executeFunc func(ctx context.Context, params map[string]interface{}) (string, error)) *BaseTool {
+	return NewBaseToolWithSpec(name, description, parameters, tooltypes.ToolSpec{}, executeFunc)
+}
+
+// NewBaseToolWithSpec creates a base tool with structured runtime metadata.
+func NewBaseToolWithSpec(name, description string, parameters map[string]interface{}, spec tooltypes.ToolSpec, executeFunc func(ctx context.Context, params map[string]interface{}) (string, error)) *BaseTool {
 	return &BaseTool{
 		name:        name,
 		description: description,
 		parameters:  parameters,
+		spec:        spec.Normalized(name),
 		executeFunc: executeFunc,
 	}
 }
@@ -92,6 +101,11 @@ func (t *BaseTool) Description() string {
 // Parameters 返回参数定义
 func (t *BaseTool) Parameters() map[string]interface{} {
 	return t.parameters
+}
+
+// Spec returns the tool's structured runtime metadata.
+func (t *BaseTool) Spec() tooltypes.ToolSpec {
+	return t.spec.Normalized(t.name)
 }
 
 // Execute 执行工具

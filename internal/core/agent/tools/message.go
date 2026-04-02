@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/channels"
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -297,14 +299,39 @@ func normalizeMessageToolMediaType(raw string) (string, error) {
 }
 
 func contextString(ctx context.Context, key string) string {
-	if ctx == nil {
-		return ""
+	switch key {
+	case "session_key":
+		return execution.SessionKey(ctx)
+	case "agent_id":
+		return execution.AgentID(ctx)
+	case "bootstrap_owner_id":
+		return execution.BootstrapOwnerID(ctx)
+	case "workspace_root":
+		return execution.WorkspaceRoot(ctx)
+	case "channel":
+		return execution.Channel(ctx)
+	case "account_id":
+		return execution.AccountID(ctx)
+	case "chat_id":
+		return execution.ChatID(ctx)
+	case "sender_id":
+		return execution.SenderID(ctx)
+	case "tenant_id":
+		return execution.TenantID(ctx)
+	case "chat_type":
+		return execution.ChatType(ctx)
+	case "thread_id":
+		return execution.ThreadID(ctx)
+	default:
+		if ctx == nil {
+			return ""
+		}
+		value, ok := ctx.Value(key).(string)
+		if !ok {
+			return ""
+		}
+		return strings.TrimSpace(value)
 	}
-	value, ok := ctx.Value(key).(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(value)
 }
 
 // isFilteredContent 检查内容是否应该被过滤
@@ -370,7 +397,7 @@ func isFilteredContent(content string) bool {
 // GetTools 获取所有消息工具
 func (t *MessageTool) GetTools() []Tool {
 	return []Tool{
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"send_message",
 			"Send a proactive text message to the current or specified chat. Use this for progress updates or user-visible notifications.",
 			map[string]interface{}{
@@ -399,9 +426,15 @@ func (t *MessageTool) GetTools() []Tool {
 				},
 				"required": []string{"content"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyExclusive,
+				Mutation:    tooltypes.MutationSideEffect,
+				Risk:        tooltypes.RiskMedium,
+				Tags:        []string{"message", "channel", "notify"},
+			},
 			t.SendMessage,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"send_file",
 			"Send one image or file to the current or specified chat. Supports a local file path, a remote URL, or base64 data.",
 			map[string]interface{}{
@@ -454,9 +487,15 @@ func (t *MessageTool) GetTools() []Tool {
 					},
 				},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyExclusive,
+				Mutation:    tooltypes.MutationSideEffect,
+				Risk:        tooltypes.RiskMedium,
+				Tags:        []string{"message", "file", "channel"},
+			},
 			t.SendFile,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"message",
 			"Legacy alias for send_message. Prefer send_message for new tool calls.",
 			map[string]interface{}{
@@ -484,6 +523,12 @@ func (t *MessageTool) GetTools() []Tool {
 					},
 				},
 				"required": []string{"content"},
+			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyExclusive,
+				Mutation:    tooltypes.MutationSideEffect,
+				Risk:        tooltypes.RiskMedium,
+				Tags:        []string{"message", "legacy-alias"},
 			},
 			t.SendMessage,
 		),

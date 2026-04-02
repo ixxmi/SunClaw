@@ -1,19 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { fetchControlConfig, saveControlConfig } from "./api/controlConfig";
 import { fetchDashboardSnapshot } from "./api/dashboard";
 import { deleteShrimpBrainRun, fetchShrimpBrainSnapshot } from "./api/shrimpBrain";
 import IconGlyph from "./components/IconGlyph.vue";
 import SectionCard from "./components/SectionCard.vue";
+import ShrimpLoopTrace from "./components/ShrimpLoopTrace.vue";
 import StatusPill from "./components/StatusPill.vue";
 import {
   type ControlChannelConfig,
   type ControlConfig,
   type DashboardSnapshot,
-  type ShrimpBrainLoopNode,
+  type ShrimpBrainEvent,
   type ShrimpBrainRun,
   type ShrimpBrainSnapshot,
-  type ShrimpBrainToolCall,
   navStructure,
   pageMeta,
   type PageId,
@@ -50,10 +50,18 @@ const shrimpBrainStreamState = ref("connecting");
 const selectedShrimpSessionKey = ref("");
 const deletingShrimpRunId = ref("");
 const expandedShrimpReplies = ref<Record<string, boolean>>({});
+const expandedShrimpTurns = ref<Record<string, boolean>>({});
+const shrimpEventStreamRef = ref<HTMLElement | null>(null);
+const isShrimpAutoFollowEnabled = ref(true);
+const showShrimpFollowButton = ref(false);
+const shrimpPendingUpdateCount = ref(0);
+const shrimpFollowNotice = ref("");
 const isUserInteracting = ref(false);
 let refreshTimer: number | undefined;
 let shrimpBrainStream: EventSource | null = null;
 let interactionTimer: number | undefined;
+let shrimpFollowNoticeTimer: number | undefined;
+let lastShrimpRunsSignature = "";
 
 const currentPage = computed(() => pageMeta[activePage.value]);
 
@@ -520,6 +528,90 @@ function toggleShrimpReply(runId: string) {
   };
 }
 
+function isShrimpTurnExpanded(runId: string) {
+  const explicit = expandedShrimpTurns.value[runId];
+  if (typeof explicit === "boolean") {
+    return explicit;
+  }
+  const runs = selectedShrimpSession.value?.runs ?? [];
+  return runs.length > 0 && runs[runs.length - 1]?.id === runId;
+}
+
+function toggleShrimpTurn(runId: string) {
+  expandedShrimpTurns.value = {
+    ...expandedShrimpTurns.value,
+    [runId]: !expandedShrimpTurns.value[runId],
+  };
+}
+
+function isNearShrimpEventStreamBottom() {
+  const container = shrimpEventStreamRef.value;
+  if (!container) {
+    return true;
+  }
+  return container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
+}
+
+function setShrimpFollowNotice(message: string, duration = 2200) {
+  shrimpFollowNotice.value = message;
+  if (shrimpFollowNoticeTimer) {
+    window.clearTimeout(shrimpFollowNoticeTimer);
+  }
+  if (!message) {
+    return;
+  }
+  shrimpFollowNoticeTimer = window.setTimeout(() => {
+    shrimpFollowNotice.value = "";
+  }, duration);
+}
+
+function shrimpFollowStatusLabel() {
+  if (shrimpPendingUpdateCount.value > 0 && !isShrimpAutoFollowEnabled.value) {
+    return `已暂停自动跟随 · 有 ${shrimpPendingUpdateCount.value} 条新内容`;
+  }
+  return isShrimpAutoFollowEnabled.value ? "自动跟随中" : "已暂停自动跟随";
+}
+
+function scrollShrimpEventStreamToBottom(force = false) {
+  const container = shrimpEventStreamRef.value;
+  if (!container) {
+    return;
+  }
+  if (!force && !isShrimpAutoFollowEnabled.value) {
+    return;
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+function handleShrimpEventStreamScroll() {
+  const isAtBottom = isNearShrimpEventStreamBottom();
+  showShrimpFollowButton.value = !isAtBottom || shrimpPendingUpdateCount.value > 0;
+  if (isAtBottom) {
+    if (!isShrimpAutoFollowEnabled.value) {
+      setShrimpFollowNotice("已回到底部，恢复自动跟随");
+    }
+    isShrimpAutoFollowEnabled.value = true;
+    shrimpPendingUpdateCount.value = 0;
+    return;
+  }
+  if (shrimpEventStreamRef.value && isShrimpAutoFollowEnabled.value) {
+    setShrimpFollowNotice("你已离开底部，自动跟随已暂停");
+  }
+  if (shrimpEventStreamRef.value) {
+    isShrimpAutoFollowEnabled.value = false;
+  }
+}
+
+function restoreShrimpAutoFollow() {
+  isShrimpAutoFollowEnabled.value = true;
+  shrimpPendingUpdateCount.value = 0;
+  showShrimpFollowButton.value = false;
+  setShrimpFollowNotice("已恢复自动跟随");
+  void nextTick(() => {
+    scrollShrimpEventStreamToBottom(true);
+  });
+}
+
 function truncateShrimpText(value: string | undefined, limit = 20) {
   const compact = value?.trim() ?? "";
   if (!compact) {
@@ -536,13 +628,52 @@ function shrimpTurnTitle(index: number) {
   return `Turn ${index + 1}`;
 }
 
-function shrimpMainLoopTitle(loop: ShrimpBrainLoopNode) {
-  return `主 Agent 外循环 ${loop.iteration}`;
-}
+watch(selectedShrimpSessionKey, async () => {
+  isShrimpAutoFollowEnabled.value = true;
+  showShrimpFollowButton.value = false;
+  shrimpPendingUpdateCount.value = 0;
+  shrimpFollowNotice.value = "";
+  await nextTick();
+  scrollShrimpEventStreamToBottom(true);
+});
 
-function shrimpChildLoopTitle(loop: ShrimpBrainLoopNode) {
-  return `子 Agent 内循环 ${loop.iteration}`;
-}
+watch(
+  () => selectedShrimpSession.value?.runs.map((run) => `${run.id}:${run.updatedAt ?? run.startedAt ?? 0}`).join("|") ?? "",
+  async (signature) => {
+    const runs = selectedShrimpSession.value?.runs ?? [];
+    const latestRunId = runs[runs.length - 1]?.id;
+    if (latestRunId) {
+      expandedShrimpTurns.value = Object.fromEntries(runs.slice(0, -1).map((run) => [run.id, false]));
+      expandedShrimpTurns.value[latestRunId] = true;
+    } else {
+      expandedShrimpTurns.value = {};
+    }
+
+    const previousSignature = lastShrimpRunsSignature;
+    const hadPreviousSnapshot = previousSignature !== "";
+    const signatureChanged = previousSignature !== signature;
+    lastShrimpRunsSignature = signature;
+
+    await nextTick();
+
+    if (signatureChanged && hadPreviousSnapshot && !isShrimpAutoFollowEnabled.value) {
+      shrimpPendingUpdateCount.value += 1;
+      showShrimpFollowButton.value = true;
+      setShrimpFollowNotice(`有 ${shrimpPendingUpdateCount.value} 条新内容，点击可恢复跟随`, 3200);
+      return;
+    }
+
+    if (isShrimpAutoFollowEnabled.value) {
+      shrimpPendingUpdateCount.value = 0;
+      scrollShrimpEventStreamToBottom();
+      showShrimpFollowButton.value = !isNearShrimpEventStreamBottom();
+      return;
+    }
+
+    showShrimpFollowButton.value = !isNearShrimpEventStreamBottom() || shrimpPendingUpdateCount.value > 0;
+  },
+  { immediate: true },
+);
 
 function shrimpSessionPreview(session: ShrimpSessionGroup) {
   return truncateShrimpText(session.runs[0]?.userRequest, 20);
@@ -556,11 +687,30 @@ function shrimpSessionPathFull(session: ShrimpSessionGroup) {
   return `${shrimpSessionPathSummary(session)} / block:${session.blockKey} / session:${session.sessionKey} / main:${session.mainAgentId || "main"}`;
 }
 
-function shrimpToolTitle(tool: ShrimpBrainToolCall) {
-  if (tool.toolName === "sessions_spawn" && tool.childAgentId) {
-    return `派发给 ${tool.childAgentId}`;
+function shrimpEventStatus(event: ShrimpBrainEvent) {
+  if (event.status) {
+    return event.status;
   }
-  return tool.toolName;
+  if (event.error) {
+    return "error";
+  }
+  if (event.kind.endsWith("_prompt")) {
+    return "ready";
+  }
+  return "completed";
+}
+
+function shrimpEventStatusLabel(event: ShrimpBrainEvent) {
+  if (event.status) {
+    return event.status;
+  }
+  if (event.kind.endsWith("_prompt")) {
+    return "prompt";
+  }
+  if (event.error) {
+    return "error";
+  }
+  return "done";
 }
 
 function channelLabel(item: ControlChannelConfig) {
@@ -1111,223 +1261,162 @@ onBeforeUnmount(() => {
                     </div>
                   </details>
 
-                  <div class="shrimp-turn-list">
-                    <template v-for="(run, runIndex) in selectedShrimpSession.runs" :key="run.id">
-                      <article class="shrimp-turn-card" :class="{ failed: isFailureStatus(run.status) }">
-                        <div class="shrimp-turn-toolbar">
-                          <div class="shrimp-turn-meta">
-                            <strong>{{ shrimpTurnTitle(runIndex) }}</strong>
-                            <span :class="shrimpStatusBadgeClass(run.status)">{{ run.status }}</span>
-                            <span class="shrimp-turn-time" :title="formatShrimpTime(run.startedAt)">{{ formatShrimpTimeShort(run.startedAt) }}</span>
+                  <div class="shrimp-turn-list-wrap">
+                    <div class="shrimp-follow-status-bar" :class="{ paused: !isShrimpAutoFollowEnabled }">
+                      <span class="shrimp-follow-status-dot" />
+                      <strong>{{ shrimpFollowStatusLabel() }}</strong>
+                      <span v-if="shrimpFollowNotice" class="shrimp-follow-notice">{{ shrimpFollowNotice }}</span>
+                    </div>
+                    <div
+                      ref="shrimpEventStreamRef"
+                      class="shrimp-turn-list"
+                      @scroll.passive="handleShrimpEventStreamScroll"
+                    >
+                      <template v-for="(run, runIndex) in selectedShrimpSession.runs" :key="run.id">
+                        <article class="shrimp-turn-card" :class="{ failed: isFailureStatus(run.status) }">
+                          <div class="shrimp-turn-toolbar">
+                            <div class="shrimp-turn-meta">
+                              <strong>{{ shrimpTurnTitle(runIndex) }}</strong>
+                              <span :class="shrimpStatusBadgeClass(run.status)">{{ run.status }}</span>
+                              <span class="shrimp-turn-time" :title="formatShrimpTime(run.startedAt)">{{ formatShrimpTimeShort(run.startedAt) }}</span>
+                            </div>
+                            <div class="shrimp-turn-actions">
+                              <button
+                                class="shrimp-turn-toggle"
+                                type="button"
+                                @click="toggleShrimpTurn(run.id)"
+                              >
+                                {{ isShrimpTurnExpanded(run.id) ? "收起" : "展开" }}
+                              </button>
+                              <button
+                                class="danger-button shrimp-delete-button"
+                                type="button"
+                                :disabled="deletingShrimpRunId === run.id"
+                                @click="handleDeleteShrimpRun(run.id)"
+                              >
+                                {{ deletingShrimpRunId === run.id ? "Deleting..." : "删除此轮" }}
+                              </button>
+                            </div>
                           </div>
-                          <button
-                            class="danger-button shrimp-delete-button"
-                            type="button"
-                            :disabled="deletingShrimpRunId === run.id"
-                            @click="handleDeleteShrimpRun(run.id)"
-                          >
-                            {{ deletingShrimpRunId === run.id ? "Deleting..." : "删除此轮" }}
-                          </button>
-                        </div>
 
-                        <div class="shrimp-primary-block">
-                          <div class="shrimp-block-head">
-                            <strong>用户输入</strong>
-                            <span class="shrimp-inline-key">mainAgentId: {{ run.mainAgentId }}</span>
-                          </div>
-                          <p>{{ run.userRequest }}</p>
-                        </div>
-
-                        <details v-if="run.mainPrompt" class="shrimp-collapsible">
-                          <summary>
-                            <span>主 Agent 提示词</span>
-                            <small>{{ run.mainLayers?.length ?? 0 }} layers</small>
-                          </summary>
-                          <small v-if="run.mainPromptAt" class="helper-text">{{ formatShrimpTime(run.mainPromptAt) }}</small>
-                          <div v-if="run.mainLayers?.length" class="shrimp-chip-row">
-                            <span v-for="layer in run.mainLayers" :key="`${run.id}-${layer}`">{{ layer }}</span>
-                          </div>
-                          <pre>{{ run.mainPrompt }}</pre>
-                        </details>
-
-                        <details v-if="run.mainLoops?.length" class="shrimp-collapsible">
-                          <summary>
-                            <span>mainLoops</span>
-                            <small>{{ run.mainLoops.length }}</small>
-                          </summary>
-                          <div class="shrimp-secondary-stack">
-                            <article
-                              v-for="loop in run.mainLoops"
-                              :key="loop.id"
-                              class="shrimp-secondary-card"
-                              :class="{ failed: isFailureStatus(loop.status) }"
-                            >
-                              <div class="shrimp-secondary-head">
-                                <div>
-                                  <strong>{{ shrimpMainLoopTitle(loop) }}</strong>
-                                  <p>{{ loop.summary || loop.reply || "本轮暂无摘要" }}</p>
-                                </div>
-                                <span :class="shrimpStatusBadgeClass(loop.stopReason || loop.status)">{{ loop.stopReason || loop.status }}</span>
+                          <template v-if="isShrimpTurnExpanded(run.id)">
+                            <div class="shrimp-primary-block">
+                              <div class="shrimp-block-head">
+                                <strong>用户输入</strong>
+                                <span class="shrimp-inline-key">mainAgentId: {{ run.mainAgentId }}</span>
                               </div>
-                              <div class="shrimp-secondary-meta">
-                                <span>agentId: {{ loop.agentId }}</span>
-                                <span>{{ formatShrimpTime(loop.updatedAt) }}</span>
+                              <p>{{ run.userRequest }}</p>
+                            </div>
+
+                            <details v-if="run.mainPrompt" class="shrimp-collapsible">
+                              <summary>
+                                <span>主 Agent 提示词</span>
+                                <small>{{ run.mainLayers?.length ?? 0 }} layers</small>
+                              </summary>
+                              <small v-if="run.mainPromptAt" class="helper-text">{{ formatShrimpTime(run.mainPromptAt) }}</small>
+                              <div v-if="run.mainLayers?.length" class="shrimp-chip-row">
+                                <span v-for="layer in run.mainLayers" :key="`${run.id}-${layer}`">{{ layer }}</span>
                               </div>
+                              <pre>{{ run.mainPrompt }}</pre>
+                            </details>
 
-                              <details v-if="loop.reply" class="shrimp-inline-details">
-                                <summary>本轮模型回复</summary>
-                                <pre>{{ loop.reply }}</pre>
-                              </details>
+                            <details v-if="run.mainLoops?.length" class="shrimp-collapsible">
+                              <summary>
+                                <span>mainLoops</span>
+                                <small>{{ run.mainLoops.length }}</small>
+                              </summary>
+                              <div class="shrimp-secondary-stack">
+                                <ShrimpLoopTrace
+                                  v-for="loop in run.mainLoops"
+                                  :key="loop.id"
+                                  :loop="loop"
+                                />
+                              </div>
+                            </details>
 
-                              <details v-if="loop.toolCalls?.length" class="shrimp-inline-details">
-                                <summary>
-                                  <span>toolCalls</span>
-                                  <small>{{ loop.toolCalls.length }}</small>
-                                </summary>
-                                <div class="shrimp-tool-stack">
-                                  <article
-                                    v-for="tool in loop.toolCalls"
-                                    :key="tool.id || `${loop.id}-${tool.toolName}`"
-                                    class="shrimp-tool-row"
-                                    :class="{ failed: isFailureStatus(tool.childStatus || tool.status) }"
-                                  >
-                                    <div class="shrimp-secondary-head">
-                                      <div>
-                                        <strong>{{ shrimpToolTitle(tool) }}</strong>
-                                        <p>{{ tool.summary || tool.task || tool.result || tool.error || "工具调用" }}</p>
-                                      </div>
-                                      <span :class="shrimpStatusBadgeClass(tool.childStatus || tool.status)">
-                                        {{ tool.childAgentId || tool.status }}
-                                      </span>
+                            <div v-if="run.mainReply" class="shrimp-primary-block shrimp-reply-block">
+                              <div class="shrimp-block-head">
+                                <strong>主 Agent 最终回复</strong>
+                                <small class="helper-text">{{ formatShrimpTime(run.mainReplyAt) }}</small>
+                              </div>
+                              <pre
+                                class="shrimp-reply-content"
+                                :class="{ collapsed: shouldShowShrimpReplyToggle(run.mainReply) && !isShrimpReplyExpanded(run.id) }"
+                              >{{ run.mainReply }}</pre>
+                              <button
+                                v-if="shouldShowShrimpReplyToggle(run.mainReply)"
+                                class="shrimp-reply-toggle"
+                                type="button"
+                                @click="toggleShrimpReply(run.id)"
+                              >
+                                {{ isShrimpReplyExpanded(run.id) ? "收起" : "展开" }}
+                              </button>
+                            </div>
+
+                            <details v-if="run.events?.length" class="shrimp-collapsible">
+                              <summary>
+                                <span>完整事件时间线</span>
+                                <small>{{ run.events.length }}</small>
+                              </summary>
+                              <div class="shrimp-event-list">
+                                <article
+                                  v-for="event in run.events"
+                                  :key="event.id"
+                                  class="shrimp-event-card"
+                                  :class="{ failed: isFailureStatus(shrimpEventStatus(event)) }"
+                                >
+                                  <div class="shrimp-secondary-head">
+                                    <div>
+                                      <strong>{{ event.title }}</strong>
+                                      <p>{{ event.summary || event.task || event.agentId || event.kind }}</p>
                                     </div>
-                                    <div class="shrimp-secondary-meta">
-                                      <span>{{ formatShrimpTime(tool.updatedAt) }}</span>
-                                      <span v-if="tool.childAgentId">child: {{ tool.childAgentId }}</span>
-                                    </div>
-
-                                    <details v-if="tool.task" class="shrimp-inline-details">
-                                      <summary>派发任务</summary>
-                                      <pre>{{ tool.task }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.arguments" class="shrimp-inline-details">
-                                      <summary>工具参数</summary>
-                                      <pre>{{ tool.arguments }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.result" class="shrimp-inline-details">
-                                      <summary>工具结果</summary>
-                                      <pre>{{ tool.result }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.error" class="shrimp-inline-details danger">
-                                      <summary>工具错误</summary>
-                                      <pre>{{ tool.error }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.childPrompt" class="shrimp-inline-details">
-                                      <summary>
-                                        <span>子 Agent 提示词</span>
-                                        <small>{{ tool.childPromptLayers?.length ?? 0 }} layers</small>
-                                      </summary>
-                                      <small class="helper-text">{{ formatShrimpTime(tool.updatedAt) }}</small>
-                                      <div v-if="tool.childPromptLayers?.length" class="shrimp-chip-row">
-                                        <span v-for="layer in tool.childPromptLayers" :key="`${tool.id}-${layer}`">{{ layer }}</span>
-                                      </div>
-                                      <pre>{{ tool.childPrompt }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.childReply" class="shrimp-inline-details">
-                                      <summary>子 Agent 回复</summary>
-                                      <small class="helper-text">{{ formatShrimpTime(tool.updatedAt) }}</small>
-                                      <pre>{{ tool.childReply }}</pre>
-                                    </details>
-
-                                    <details v-if="tool.childLoops?.length" class="shrimp-inline-details">
-                                      <summary>
-                                        <span>childLoops</span>
-                                        <small>{{ tool.childLoops.length }}</small>
-                                      </summary>
-                                      <div class="shrimp-secondary-stack">
-                                        <article
-                                          v-for="childLoop in tool.childLoops"
-                                          :key="childLoop.id"
-                                          class="shrimp-secondary-card child"
-                                          :class="{ failed: isFailureStatus(childLoop.status) }"
-                                        >
-                                          <div class="shrimp-secondary-head">
-                                            <div>
-                                              <strong>{{ shrimpChildLoopTitle(childLoop) }}</strong>
-                                              <p>{{ childLoop.summary || childLoop.reply || "本轮暂无摘要" }}</p>
-                                            </div>
-                                            <span :class="shrimpStatusBadgeClass(childLoop.stopReason || childLoop.status)">
-                                              {{ childLoop.stopReason || childLoop.status }}
-                                            </span>
-                                          </div>
-                                          <div class="shrimp-secondary-meta">
-                                            <span>agentId: {{ childLoop.agentId }}</span>
-                                            <span>{{ formatShrimpTime(childLoop.updatedAt) }}</span>
-                                          </div>
-
-                                          <details v-if="childLoop.reply" class="shrimp-inline-details">
-                                            <summary>子 Agent 本轮回复</summary>
-                                            <pre>{{ childLoop.reply }}</pre>
-                                          </details>
-
-                                          <details v-if="childLoop.toolCalls?.length" class="shrimp-inline-details">
-                                            <summary>
-                                              <span>toolCalls</span>
-                                              <small>{{ childLoop.toolCalls.length }}</small>
-                                            </summary>
-                                            <div class="shrimp-tool-stack">
-                                              <article
-                                                v-for="childTool in childLoop.toolCalls"
-                                                :key="childTool.id || `${childLoop.id}-${childTool.toolName}`"
-                                                class="shrimp-tool-row compact"
-                                                :class="{ failed: isFailureStatus(childTool.status) }"
-                                              >
-                                                <div class="shrimp-secondary-head">
-                                                  <div>
-                                                    <strong>{{ childTool.toolName }}</strong>
-                                                    <p>{{ childTool.summary || childTool.result || childTool.error || "工具调用" }}</p>
-                                                  </div>
-                                                  <span :class="shrimpStatusBadgeClass(childTool.status)">{{ childTool.status }}</span>
-                                                </div>
-                                                <div class="shrimp-secondary-meta">
-                                                  <span>{{ formatShrimpTime(childTool.updatedAt) }}</span>
-                                                </div>
-                                              </article>
-                                            </div>
-                                          </details>
-                                        </article>
-                                      </div>
-                                    </details>
-                                  </article>
-                                </div>
-                              </details>
-                            </article>
-                          </div>
-                        </details>
-
-                        <div v-if="run.mainReply" class="shrimp-primary-block shrimp-reply-block">
-                          <div class="shrimp-block-head">
-                            <strong>主 Agent 最终回复</strong>
-                            <small class="helper-text">{{ formatShrimpTime(run.mainReplyAt) }}</small>
-                          </div>
-                          <pre
-                            class="shrimp-reply-content"
-                            :class="{ collapsed: shouldShowShrimpReplyToggle(run.mainReply) && !isShrimpReplyExpanded(run.id) }"
-                          >{{ run.mainReply }}</pre>
-                          <button
-                            v-if="shouldShowShrimpReplyToggle(run.mainReply)"
-                            class="shrimp-reply-toggle"
-                            type="button"
-                            @click="toggleShrimpReply(run.id)"
-                          >
-                            {{ isShrimpReplyExpanded(run.id) ? "收起" : "展开" }}
-                          </button>
-                        </div>
-                      </article>
+                                    <span :class="shrimpStatusBadgeClass(shrimpEventStatus(event))">
+                                      {{ shrimpEventStatusLabel(event) }}
+                                    </span>
+                                  </div>
+                                  <div class="shrimp-secondary-meta">
+                                    <span>{{ formatShrimpTimeShort(event.timestamp) }}</span>
+                                    <span v-if="event.agentId">agent: {{ event.agentId }}</span>
+                                    <span v-if="event.sessionKey">session: {{ event.sessionKey }}</span>
+                                    <span v-if="event.label">{{ event.label }}</span>
+                                  </div>
+                                  <p v-if="event.task && event.task !== event.summary" class="muted">任务: {{ event.task }}</p>
+                                  <div v-if="event.layers?.length" class="shrimp-chip-row">
+                                    <span v-for="(layer, layerIndex) in event.layers" :key="`${event.id}-layer-${layerIndex}`">
+                                      {{ layer }}
+                                    </span>
+                                  </div>
+                                  <div v-if="event.sources?.length" class="shrimp-chip-row">
+                                    <span
+                                      v-for="(source, sourceIndex) in event.sources"
+                                      :key="`${event.id}-source-${sourceIndex}`"
+                                    >
+                                      {{ source }}
+                                    </span>
+                                  </div>
+                                  <details v-if="event.prompt" class="shrimp-inline-details">
+                                    <summary>
+                                      <span>提示词</span>
+                                    </summary>
+                                    <pre>{{ event.prompt }}</pre>
+                                  </details>
+                                  <details v-if="event.reply" class="shrimp-inline-details">
+                                    <summary>
+                                      <span>回复</span>
+                                    </summary>
+                                    <pre>{{ event.reply }}</pre>
+                                  </details>
+                                  <details v-if="event.error" class="shrimp-inline-details danger">
+                                    <summary>
+                                      <span>错误</span>
+                                    </summary>
+                                    <pre>{{ event.error }}</pre>
+                                  </details>
+                                </article>
+                              </div>
+                            </details>
+                          </template>
+                        </article>
 
                       <div
                         v-if="runIndex < selectedShrimpSession.runs.length - 1"
@@ -1339,7 +1428,16 @@ onBeforeUnmount(() => {
                           {{ selectedShrimpSession.runs[runIndex + 1]?.userRequest }}
                         </p>
                       </div>
-                    </template>
+                      </template>
+                    </div>
+                    <button
+                      v-if="showShrimpFollowButton"
+                      class="shrimp-follow-button"
+                      type="button"
+                      @click="restoreShrimpAutoFollow"
+                    >
+                      {{ shrimpPendingUpdateCount > 0 ? `查看 ${shrimpPendingUpdateCount} 条新内容并恢复跟随` : "回到底部 / 恢复跟随" }}
+                    </button>
                   </div>
                 </div>
               </SectionCard>
@@ -1640,6 +1738,9 @@ onBeforeUnmount(() => {
 
 .shrimp-detail-panel :deep(.section-body) {
   padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .shrimp-layout {
@@ -1788,11 +1889,12 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-.shrimp-session-inline {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+.shrimp-turn-list-wrap {
+  position: relative;
+  min-height: 0;
+  flex: 1;
 }
+
 
 .shrimp-summary-card,
 .shrimp-primary-block,
@@ -1800,7 +1902,8 @@ onBeforeUnmount(() => {
 .shrimp-inline-details,
 .shrimp-turn-card,
 .shrimp-secondary-card,
-.shrimp-tool-row {
+.shrimp-tool-row,
+.shrimp-event-card {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
@@ -1892,6 +1995,74 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
 }
 
+.shrimp-turn-list {
+  display: grid;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.shrimp-follow-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.06);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.shrimp-follow-status-bar.paused {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.shrimp-follow-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--emerald);
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.12);
+  flex: none;
+}
+
+.shrimp-follow-status-bar.paused .shrimp-follow-status-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.14);
+}
+
+.shrimp-follow-notice {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.shrimp-turn-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shrimp-turn-toggle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.shrimp-turn-toggle:hover {
+  text-decoration: underline;
+}
+
 .shrimp-inline-key {
   color: var(--muted);
   font-size: 10px;
@@ -1907,6 +2078,25 @@ onBeforeUnmount(() => {
 .shrimp-primary-block p {
   color: var(--text);
   font-size: 12px;
+}
+
+.shrimp-follow-button {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
+}
+
+.shrimp-follow-button:hover {
+  background: rgba(30, 41, 59, 0.96);
 }
 
 .shrimp-reply-block {
@@ -2005,7 +2195,8 @@ onBeforeUnmount(() => {
 }
 
 .shrimp-secondary-stack,
-.shrimp-tool-stack {
+.shrimp-tool-stack,
+.shrimp-event-list {
   display: grid;
   gap: 8px;
   margin-top: 8px;
@@ -2035,7 +2226,8 @@ onBeforeUnmount(() => {
 }
 
 .shrimp-secondary-card,
-.shrimp-tool-row {
+.shrimp-tool-row,
+.shrimp-event-card {
   display: grid;
   gap: 6px;
   padding: 10px 12px;
@@ -2044,6 +2236,7 @@ onBeforeUnmount(() => {
 
 .shrimp-secondary-card.failed,
 .shrimp-tool-row.failed,
+.shrimp-event-card.failed,
 .shrimp-inline-details.danger {
   border-color: #fecaca;
   background: #fff7f7;

@@ -8,6 +8,7 @@ import (
 
 	"github.com/smallnest/goclaw/internal/core/acp"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/execution"
 )
 
 // Ensure SpawnAcpTool implements Tool
@@ -130,7 +131,7 @@ func (t *SpawnAcpTool) Execute(ctx context.Context, params map[string]any, onUpd
 
 	// Build spawn context from current agent session context.
 	spawnCtx := acp.SpawnAcpContext{}
-	if sessionKey, ok := ctx.Value(SessionKeyContextKey).(string); ok && sessionKey != "" {
+	if sessionKey := execution.SessionKey(ctx); sessionKey != "" {
 		derivedCtx, deriveErr := buildSpawnContextFromSessionKey(sessionKey)
 		if deriveErr != nil && thread {
 			return ToolResult{}, deriveErr

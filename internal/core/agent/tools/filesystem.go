@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/workspace"
 )
@@ -336,8 +338,7 @@ func (t *FileSystemTool) resolveConfigDir(ctx context.Context) string {
 	explicitWorkspaceRoot := t.resolveWorkspaceRoot(ctx)
 
 	if ctx != nil {
-		if ownerID, ok := ctx.Value("bootstrap_owner_id").(string); ok && strings.TrimSpace(ownerID) != "" {
-			ownerID = strings.TrimSpace(ownerID)
+		if ownerID := execution.BootstrapOwnerID(ctx); strings.TrimSpace(ownerID) != "" {
 			if explicitWorkspaceRoot != "" {
 				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, ownerID)
 			}
@@ -347,8 +348,7 @@ func (t *FileSystemTool) resolveConfigDir(ctx context.Context) string {
 				}
 			}
 		}
-		if agentID, ok := ctx.Value("agent_id").(string); ok && strings.TrimSpace(agentID) != "" {
-			agentID = strings.TrimSpace(agentID)
+		if agentID := execution.AgentID(ctx); strings.TrimSpace(agentID) != "" {
 			if explicitWorkspaceRoot != "" {
 				return workspace.AgentBootstrapDir(explicitWorkspaceRoot, agentID)
 			}
@@ -371,18 +371,14 @@ func (t *FileSystemTool) resolveWorkspaceRoot(ctx context.Context) string {
 		return ""
 	}
 
-	if root, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(root) != "" {
+	if root := execution.WorkspaceRoot(ctx); strings.TrimSpace(root) != "" {
 		return strings.TrimSpace(root)
 	}
 
-	channel, _ := ctx.Value("channel").(string)
-	accountID, _ := ctx.Value("account_id").(string)
-	senderID, _ := ctx.Value("sender_id").(string)
-	tenantID, _ := ctx.Value("tenant_id").(string)
-	channel = strings.TrimSpace(channel)
-	accountID = strings.TrimSpace(accountID)
-	senderID = strings.TrimSpace(senderID)
-	tenantID = strings.TrimSpace(tenantID)
+	channel := strings.TrimSpace(execution.Channel(ctx))
+	accountID := strings.TrimSpace(execution.AccountID(ctx))
+	senderID := strings.TrimSpace(execution.SenderID(ctx))
+	tenantID := strings.TrimSpace(execution.TenantID(ctx))
 	if channel == "" || senderID == "" {
 		return ""
 	}
@@ -398,7 +394,7 @@ func (t *FileSystemTool) resolveWorkspaceRoot(ctx context.Context) string {
 // GetTools 获取所有文件系统工具
 func (t *FileSystemTool) GetTools() []Tool {
 	tools := []Tool{
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"read_file",
 			"Read a file. Small/simple text files may be returned in full; dense or large files return a compact preview. Supports start_line/end_line, but wide ranges are capped.",
 			map[string]interface{}{
@@ -421,9 +417,15 @@ func (t *FileSystemTool) GetTools() []Tool {
 				},
 				"required": []string{"path"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyConcurrent,
+				Mutation:    tooltypes.MutationRead,
+				Risk:        tooltypes.RiskLow,
+				Tags:        []string{"filesystem", "read"},
+			},
 			t.ReadFile,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"write_file",
 			"Create a new file or fully overwrite an existing file with the complete target content. Use this when you intend to replace the whole file. Do NOT use run_shell for ordinary file writing when this tool fits.",
 			map[string]interface{}{
@@ -440,9 +442,15 @@ func (t *FileSystemTool) GetTools() []Tool {
 				},
 				"required": []string{"path", "content"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyExclusive,
+				Mutation:    tooltypes.MutationWrite,
+				Risk:        tooltypes.RiskMedium,
+				Tags:        []string{"filesystem", "write"},
+			},
 			t.WriteFile,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"edit_file",
 			"Edit an existing file by replacing exact text matches. Preferred tool for precise code or text changes in existing files. Do NOT use run_shell for normal source-file edits when this tool fits.",
 			map[string]interface{}{
@@ -463,9 +471,15 @@ func (t *FileSystemTool) GetTools() []Tool {
 				},
 				"required": []string{"path", "old_string", "new_string"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyExclusive,
+				Mutation:    tooltypes.MutationWrite,
+				Risk:        tooltypes.RiskMedium,
+				Tags:        []string{"filesystem", "edit"},
+			},
 			t.EditFile,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"list_dir",
 			"List contents of a directory",
 			map[string]interface{}{
@@ -478,6 +492,12 @@ func (t *FileSystemTool) GetTools() []Tool {
 				},
 				"required": []string{"path"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency: tooltypes.ConcurrencyConcurrent,
+				Mutation:    tooltypes.MutationRead,
+				Risk:        tooltypes.RiskLow,
+				Tags:        []string{"filesystem", "list"},
+			},
 			t.ListDir,
 		),
 	}
@@ -485,7 +505,7 @@ func (t *FileSystemTool) GetTools() []Tool {
 	// 添加配置文件管理工具
 	if t.workspace != "" {
 		tools = append(tools,
-			NewBaseTool(
+			NewBaseToolWithSpec(
 				"update_config",
 				"Update the current agent's configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md). Changes take effect in the next conversation.",
 				map[string]interface{}{
@@ -503,9 +523,16 @@ func (t *FileSystemTool) GetTools() []Tool {
 					},
 					"required": []string{"file", "content"},
 				},
+				tooltypes.ToolSpec{
+					Concurrency:      tooltypes.ConcurrencyExclusive,
+					Mutation:         tooltypes.MutationWrite,
+					Risk:             tooltypes.RiskHigh,
+					RequiresApproval: true,
+					Tags:             []string{"filesystem", "config", "cognition"},
+				},
 				t.UpdateConfig,
 			),
-			NewBaseTool(
+			NewBaseToolWithSpec(
 				"read_config",
 				"Read the current agent's configuration file (IDENTITY.md, AGENTS.md, SOUL.md, or USER.md)",
 				map[string]interface{}{
@@ -518,6 +545,12 @@ func (t *FileSystemTool) GetTools() []Tool {
 						},
 					},
 					"required": []string{"file"},
+				},
+				tooltypes.ToolSpec{
+					Concurrency: tooltypes.ConcurrencyConcurrent,
+					Mutation:    tooltypes.MutationRead,
+					Risk:        tooltypes.RiskLow,
+					Tags:        []string{"filesystem", "config", "read"},
 				},
 				t.ReadConfig,
 			),

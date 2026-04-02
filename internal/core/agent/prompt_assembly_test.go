@@ -50,13 +50,16 @@ func TestAssemblePrompt_TemplateCognitionIsInjectedAndBootstrapFollowsAgents(t *
 	}).SystemPrompt
 
 	for name, content := range templates {
-		expected := shiftMarkdownHeadings(content, 1)
+		expected := strings.TrimSpace(content)
+		if name != "AGENTS.md" {
+			expected = shiftMarkdownHeadings(content, 1)
+		}
 		if !strings.Contains(got, expected) {
-			t.Fatalf("expected prompt to include normalized template cognition %s content, got %q", name, got)
+			t.Fatalf("expected prompt to include template cognition %s content, got %q", name, got)
 		}
 	}
 
-	for _, marker := range []string{"# Identity", "# Soul", "# Collaboration", "# User Context", "### BOOTSTRAP.md", "custom core"} {
+	for _, marker := range []string{"# Identity", "# Collaboration Rules", "# User Context", "# Personality", "### BOOTSTRAP.md", "custom core"} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("expected %q in prompt, got %q", marker, got)
 		}
@@ -66,13 +69,13 @@ func TestAssemblePrompt_TemplateCognitionIsInjectedAndBootstrapFollowsAgents(t *
 	}
 
 	bootstrapIdx := strings.Index(got, "### BOOTSTRAP.md")
-	identityIdx := strings.Index(got, "# Identity")
-	soulIdx := strings.Index(got, "# Soul")
-	agentsIdx := strings.Index(got, "# Collaboration")
-	userIdx := strings.Index(got, "# User Context")
 	coreIdx := strings.Index(got, "custom core")
-	if !(bootstrapIdx < identityIdx && identityIdx < soulIdx && soulIdx < agentsIdx && agentsIdx < userIdx && userIdx < coreIdx) {
-		t.Fatalf("expected BOOTSTRAP -> IDENTITY -> SOUL -> AGENTS -> USER -> core order, got %q", got)
+	identityIdx := strings.Index(got, "# Identity")
+	agentsIdx := strings.Index(got, "# Collaboration Rules")
+	userIdx := strings.Index(got, "# User Context")
+	personalityIdx := strings.Index(got, "# Personality")
+	if !(bootstrapIdx < coreIdx && coreIdx < identityIdx && identityIdx < agentsIdx && agentsIdx < userIdx && userIdx < personalityIdx) {
+		t.Fatalf("expected BOOTSTRAP -> core -> IDENTITY -> AGENTS -> USER -> PERSONALITY order, got %q", got)
 	}
 }
 
@@ -117,13 +120,13 @@ func TestAssemblePrompt_CustomizedCognitionSkipsBootstrap(t *testing.T) {
 		}
 	}
 
+	coreIdx := strings.Index(got, "custom core")
 	identityIdx := strings.Index(got, "custom identity")
-	soulIdx := strings.Index(got, "custom soul")
 	agentsIdx := strings.Index(got, "custom agents")
 	userIdx := strings.Index(got, "custom user")
-	coreIdx := strings.Index(got, "custom core")
-	if !(identityIdx < soulIdx && soulIdx < agentsIdx && agentsIdx < userIdx && userIdx < coreIdx) {
-		t.Fatalf("expected IDENTITY -> SOUL -> AGENTS -> USER -> core order once all four files exist, got %q", got)
+	personalityIdx := strings.Index(got, "custom soul")
+	if !(coreIdx < identityIdx && identityIdx < agentsIdx && agentsIdx < userIdx && userIdx < personalityIdx) {
+		t.Fatalf("expected core -> IDENTITY -> AGENTS -> USER -> PERSONALITY order once all four files exist, got %q", got)
 	}
 }
 
@@ -175,10 +178,13 @@ func TestAssemblePrompt_DoesNotAppendBootstrapWhenOnlyAgentsOrSoulRemainTemplate
 		AgentCorePrompt:  "custom core",
 	}).SystemPrompt
 
-	for _, marker := range []string{"custom identity", "custom user", "# Collaboration", "# Soul"} {
+	for _, marker := range []string{"custom identity", "custom user", "# Collaboration Rules", "# Personality"} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("expected %q to be injected, got %q", marker, got)
 		}
+	}
+	if !strings.Contains(got, strings.TrimSpace(readWorkspaceTemplate(t, "AGENTS.md"))) {
+		t.Fatalf("expected raw AGENTS.md content to be injected, got %q", got)
 	}
 	for _, marker := range []string{"### BOOTSTRAP.md", "BOOTSTRAP.md - Hello, World"} {
 		if strings.Contains(got, marker) {
@@ -186,17 +192,17 @@ func TestAssemblePrompt_DoesNotAppendBootstrapWhenOnlyAgentsOrSoulRemainTemplate
 		}
 	}
 
-	identityIdx := strings.Index(got, "custom identity")
-	soulIdx := strings.Index(got, "# Soul")
-	agentsIdx := strings.Index(got, "# Collaboration")
-	userIdx := strings.Index(got, "custom user")
 	coreIdx := strings.Index(got, "custom core")
-	if !(identityIdx < soulIdx && soulIdx < agentsIdx && agentsIdx < userIdx && userIdx < coreIdx) {
-		t.Fatalf("expected IDENTITY -> SOUL -> AGENTS -> USER -> core order when all four files exist, got %q", got)
+	identityIdx := strings.Index(got, "custom identity")
+	agentsIdx := strings.Index(got, "# Collaboration Rules")
+	userIdx := strings.Index(got, "custom user")
+	personalityIdx := strings.Index(got, "# Personality")
+	if !(coreIdx < identityIdx && identityIdx < agentsIdx && agentsIdx < userIdx && userIdx < personalityIdx) {
+		t.Fatalf("expected core -> IDENTITY -> AGENTS -> USER -> PERSONALITY order when all four files exist, got %q", got)
 	}
 }
 
-func TestAssemblePrompt_MainOrdersCapabilitiesBeforeAgentsFile(t *testing.T) {
+func TestAssemblePrompt_MainPlacesAvailableAgentsBeforeTools(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
@@ -224,21 +230,21 @@ func TestAssemblePrompt_MainOrdersCapabilitiesBeforeAgentsFile(t *testing.T) {
 		Mode:                  PromptAssemblyModeMain,
 		BootstrapOwnerID:      "owner1",
 		AgentCorePrompt:       "custom core",
-		SpawnableAgentCatalog: "<available_agents>\n- agent_name: \"Coder\" | agent_id: \"coder\" — 单步实现\n</available_agents>",
+		SpawnableAgentCatalog: "## Available Agents\n\nReference only. Consult this directory only when selecting the next child agent for the current step.\nPrefer `agent_name`; add `agent_id` only when disambiguation is needed.\n\n- Coder (`coder`): 单步实现\n",
 		Tools:                 []Tool{&summaryOnlyTool{name: "read_file"}},
 	}).SystemPrompt
 
+	coreIdx := strings.Index(got, "custom core")
 	identityIdx := strings.Index(got, "custom identity")
-	soulIdx := strings.Index(got, "custom soul")
 	agentsFileIdx := strings.Index(got, "custom agents")
 	userIdx := strings.Index(got, "custom user")
-	coreIdx := strings.Index(got, "custom core")
+	personalityIdx := strings.Index(got, "custom soul")
 	agentsCatalogIdx := strings.Index(got, "<available_agents>")
 	toolsIdx := strings.Index(got, "<available_tools>")
 	runtimeIdx := strings.Index(got, "## Runtime Context")
 
-	if !(identityIdx < soulIdx && soulIdx < agentsFileIdx && agentsFileIdx < agentsCatalogIdx && agentsCatalogIdx < userIdx && userIdx < coreIdx && coreIdx < toolsIdx && toolsIdx < runtimeIdx) {
-		t.Fatalf("expected IDENTITY -> SOUL -> AGENTS -> available_agents -> USER -> core -> available_tools -> Runtime order, got %q", got)
+	if !(coreIdx < identityIdx && identityIdx < agentsFileIdx && agentsFileIdx < userIdx && userIdx < personalityIdx && personalityIdx < agentsCatalogIdx && agentsCatalogIdx < toolsIdx && toolsIdx < runtimeIdx) {
+		t.Fatalf("expected core -> IDENTITY -> AGENTS -> USER -> PERSONALITY -> available_agents -> available_tools -> Runtime order, got %q", got)
 	}
 }
 

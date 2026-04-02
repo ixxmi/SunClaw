@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/smallnest/goclaw/internal/core/agent/tools"
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 )
 
 // ToolRegistry wraps the existing tools.Registry and provides helper methods
@@ -103,6 +104,13 @@ func (a *toolAdapter) Parameters() map[string]any {
 	return result
 }
 
+func (a *toolAdapter) Spec() tooltypes.ToolSpec {
+	if provider, ok := a.tool.(tooltypes.ToolSpecProvider); ok {
+		return provider.Spec().Normalized(a.tool.Name())
+	}
+	return defaultToolSpec(a.tool.Name())
+}
+
 func (a *toolAdapter) Execute(ctx context.Context, params map[string]any, onUpdate func(ToolResult)) (ToolResult, error) {
 	// Convert params to existing format
 	existingParams := make(map[string]interface{})
@@ -169,6 +177,13 @@ func (a *reverseToolAdapter) Parameters() map[string]interface{} {
 		result[k] = v
 	}
 	return result
+}
+
+func (a *reverseToolAdapter) Spec() tooltypes.ToolSpec {
+	if provider, ok := a.tool.(tooltypes.ToolSpecProvider); ok {
+		return provider.Spec().Normalized(a.tool.Name())
+	}
+	return defaultToolSpec(a.tool.Name())
 }
 
 func (a *reverseToolAdapter) Execute(ctx context.Context, params map[string]interface{}) (string, error) {

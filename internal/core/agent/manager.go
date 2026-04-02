@@ -19,7 +19,9 @@ import (
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/channels"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
+	"github.com/smallnest/goclaw/internal/core/permissions"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -506,17 +508,18 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 
 	// 构建子 Agent 独立 LoopConfig（使用目标 Agent 的专属 provider 和 model）
 	subagentLoopConfig := &LoopConfig{
-		Model:          effectiveModel,
-		Temperature:    effectiveTemperature,
-		Provider:       targetAgent.orchestrator.config.Provider,
-		SessionMgr:     sessionMgr,
-		MaxIterations:  targetAgent.orchestrator.config.MaxIterations,
-		MaxTokens:      effectiveMaxTokens,
-		ContextWindow:  targetAgent.orchestrator.config.ContextWindow,
-		ConvertToLLM:   defaultConvertToLLM,
-		ContextBuilder: targetAgent.orchestrator.config.ContextBuilder,
-		Skills:         namespaceSkills,
-		ShrimpBrain:    m.shrimpBrain,
+		Model:            effectiveModel,
+		Temperature:      effectiveTemperature,
+		Provider:         targetAgent.orchestrator.config.Provider,
+		SessionMgr:       sessionMgr,
+		MaxIterations:    targetAgent.orchestrator.config.MaxIterations,
+		MaxTokens:        effectiveMaxTokens,
+		ContextWindow:    targetAgent.orchestrator.config.ContextWindow,
+		ConvertToLLM:     defaultConvertToLLM,
+		ContextBuilder:   targetAgent.orchestrator.config.ContextBuilder,
+		PermissionPolicy: targetAgent.orchestrator.config.PermissionPolicy,
+		Skills:           namespaceSkills,
+		ShrimpBrain:      m.shrimpBrain,
 	}
 
 	// 创建独立 Orchestrator 实例（与父 Agent 完全隔离，互不干扰）
@@ -544,13 +547,14 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) er
 			zap.String("child_session_key", result.ChildSessionKey),
 			zap.String("task_preview", truncateSubagentTask(result.Task, 100)))
 
-		runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
+		toolCtx := execution.ToolUseContext{WorkspaceRoot: workspaceRoot}
 		if identity, ok := namespaces.FromSessionKey(result.ChildSessionKey); ok {
-			runCtx = context.WithValue(runCtx, "tenant_id", identity.TenantID)
-			runCtx = context.WithValue(runCtx, "channel", identity.Channel)
-			runCtx = context.WithValue(runCtx, "account_id", identity.AccountID)
-			runCtx = context.WithValue(runCtx, "sender_id", identity.SenderID)
+			toolCtx.TenantID = identity.TenantID
+			toolCtx.Channel = identity.Channel
+			toolCtx.AccountID = identity.AccountID
+			toolCtx.SenderID = identity.SenderID
 		}
+		runCtx = execution.WithToolUseContext(runCtx, toolCtx)
 
 		finalMessages, err := subagentOrchestrator.Run(runCtx, []AgentMessage{taskMsg})
 		endedAt := time.Now().UnixMilli()
@@ -861,6 +865,7 @@ func (m *AgentManager) createAgent(cfg config.AgentConfig, contextBuilder *Conte
 		Temperature:         globalCfg.Agents.Defaults.Temperature,
 		ContextWindow:       guessContextWindow(model),
 		SkillsLoader:        m.skillsLoader,
+		PermissionPolicy:    permissions.CompilePolicy(globalCfg),
 		ShrimpBrain:         m.shrimpBrain,
 		DisableSkillsPrompt: cfg.DisableSkillsPrompt,
 	})
@@ -1578,8 +1583,10 @@ func (m *AgentManager) handleInboundMessage(ctx context.Context, msg *bus.Inboun
 		zap.Int("total_messages", len(allMessages)),
 	)
 	runCtx := withInboundToolContext(ctx, msg)
-	runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
-	runCtx = context.WithValue(runCtx, "tenant_id", namespaces.FromInboundMessage(msg).TenantID)
+	runCtx = execution.WithToolUseContext(runCtx, execution.ToolUseContext{
+		WorkspaceRoot: workspaceRoot,
+		TenantID:      namespaces.FromInboundMessage(msg).TenantID,
+	})
 	runCtx = context.WithValue(runCtx, SessionSummaryContextKey, runState.ContextSummary)
 	finalMessages, err := runOrchestrator.Run(runCtx, allMessages)
 	summaryAfterRun := strings.TrimSpace(runOrchestrator.state.ContextSummary)
@@ -2411,12 +2418,12 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 
 		// 拼接目录段落
 		var sb strings.Builder
-		sb.WriteString("<available_agents>\n")
-		sb.WriteString("调用 sessions_spawn 时可以传 `agent_name` 或 `agent_id`；如果省略 `agent_id`，会优先按名称解析目标 Agent。\n")
+		sb.WriteString("## Available Agents\n\n")
+		sb.WriteString("Reference only. Consult this directory only when selecting the next child agent for the current step.\n")
+		sb.WriteString("Prefer `agent_name`; add `agent_id` only when disambiguation is needed.\n\n")
 		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("\n- agent_name: \"%s\" | agent_id: \"%s\" — %s\n", e.name, e.id, e.description))
+			sb.WriteString(fmt.Sprintf("- %s (`%s`): %s\n", e.name, e.id, e.description))
 		}
-		sb.WriteString("\n</available_agents>")
 
 		// 保存到该 Agent 的独立动态层，由运行时统一装配。
 		agent.SetSpawnableAgentCatalog(strings.TrimSpace(sb.String()))

@@ -102,6 +102,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tools.shell.sandbox.remove", true)
 	v.SetDefault("tools.shell.sandbox.network", "none")
 	v.SetDefault("tools.shell.sandbox.privileged", false)
+	v.SetDefault("approvals.behavior", "manual")
 	v.SetDefault("tools.web.search_engine", "travily")
 	v.SetDefault("tools.web.timeout", 10)
 	v.SetDefault("tools.browser.enabled", false)

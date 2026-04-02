@@ -257,6 +257,14 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// 注册代码搜索工具
+	searchTool := tools.NewSearchTool(cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths, workspaceDir)
+	for _, tool := range searchTool.GetTools() {
+		if err := toolRegistry.RegisterExisting(tool); err != nil {
+			logger.Warn("Failed to register tool", zap.String("tool", tool.Name()))
+		}
+	}
+
 	// 注册 use_skill 工具（用于两阶段技能加载）
 	if err := toolRegistry.RegisterExisting(tools.NewUseSkillTool()); err != nil {
 		logger.Warn("Failed to register use_skill tool", zap.Error(err))

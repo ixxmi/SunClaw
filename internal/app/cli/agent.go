@@ -13,6 +13,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/agent/tools"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/permissions"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -129,6 +130,14 @@ func runAgent(cmd *cobra.Command, args []string) {
 	// Create tool registry
 	toolRegistry := agent.NewToolRegistry()
 
+	// Register search tools
+	searchTool := tools.NewSearchTool(cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths, workspace)
+	for _, tool := range searchTool.GetTools() {
+		if err := toolRegistry.RegisterExisting(tool); err != nil && agentVerbose {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to register tool %s: %v\n", tool.Name(), err)
+		}
+	}
+
 	// Register file system tool
 	fsTool := tools.NewFileSystemTool(cfg.Tools.FileSystem.AllowedPaths, cfg.Tools.FileSystem.DeniedPaths, workspace)
 	for _, tool := range fsTool.GetTools() {
@@ -222,14 +231,15 @@ func runAgent(cmd *cobra.Command, args []string) {
 
 	// Create new agent first
 	agentInstance, err := agent.NewAgent(&agent.NewAgentConfig{
-		Bus:          messageBus,
-		Provider:     provider,
-		SessionMgr:   sessionMgr,
-		Tools:        toolRegistry,
-		Context:      contextBuilder,
-		Workspace:    workspace,
-		MaxIteration: agentMaxIterations,
-		MaxTokens:    cfg.Agents.Defaults.MaxTokens,
+		Bus:              messageBus,
+		Provider:         provider,
+		SessionMgr:       sessionMgr,
+		Tools:            toolRegistry,
+		Context:          contextBuilder,
+		Workspace:        workspace,
+		MaxIteration:     agentMaxIterations,
+		MaxTokens:        cfg.Agents.Defaults.MaxTokens,
+		PermissionPolicy: permissions.CompilePolicy(cfg),
 		ContextWindow: agent.GuessContextWindowForModel(
 			cfg.Agents.Defaults.Model,
 		),

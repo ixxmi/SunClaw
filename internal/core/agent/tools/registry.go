@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -98,6 +99,13 @@ func (a *AgentToolAdapter) Description() string {
 
 func (a *AgentToolAdapter) Parameters() map[string]interface{} {
 	return a.tool.Parameters()
+}
+
+func (a *AgentToolAdapter) Spec() tooltypes.ToolSpec {
+	if provider, ok := a.tool.(tooltypes.ToolSpecProvider); ok {
+		return provider.Spec().Normalized(a.tool.Name())
+	}
+	return tooltypes.ToolSpec{Name: a.tool.Name()}.Normalized(a.tool.Name())
 }
 
 func (a *AgentToolAdapter) Execute(ctx context.Context, params map[string]interface{}) (string, error) {

@@ -129,14 +129,14 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
 		appendLayer("agent_core", 50, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
-		appendLayer("subagent_descriptor", 60, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
-		appendLayer("subagent_spawnable_catalog", 65, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
+		appendLayer("subagent_descriptor", 55, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
+		appendLayer("cognition_snapshot", 60, "IDENTITY.md+USER.md+AGENTS.md+SOUL.md", b.buildSubagentCognitionSnapshot(bundle))
 	default:
 		if includeBootstrapGuide {
 			appendLayer("bootstrap_guide", 20, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
 		}
-		appendLayer("cognition", 30, "IDENTITY.md+SOUL.md+AGENTS.md+dynamic_catalog+USER.md", b.buildCognitionLayer(bundle, true, strings.TrimSpace(params.SpawnableAgentCatalog)))
-		appendLayer("agent_core", 55, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("agent_core", 25, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("cognition", 30, "IDENTITY.md+USER.md+AGENTS.md+SOUL.md", b.buildCognitionLayer(bundle, true))
 	}
 
 	skillsLayer := ""
@@ -153,6 +153,9 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		}
 	}
 	appendLayer("skills", 60, "runtime_skills", skillsLayer)
+	if !isSubagent {
+		appendLayer("spawnable_catalog", 68, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
+	}
 	toolSummary := strings.TrimSpace(params.ToolSummary)
 	if toolSummary == "" {
 		toolSummary = b.BuildToolsSummary(params.Tools)
@@ -184,33 +187,58 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	return result
 }
 
-func (b *ContextBuilder) buildCognitionLayer(bundle bootstrapBundle, includeAgents bool, spawnableCatalog ...string) string {
-	catalog := ""
-	if len(spawnableCatalog) > 0 {
-		catalog = strings.TrimSpace(spawnableCatalog[0])
-	}
-	parts := []string{
-		buildTitledCognitionSection("Identity", strings.TrimSpace(bundle.Identity)),
-		buildTitledCognitionSection("Soul", strings.TrimSpace(bundle.Soul)),
-	}
-	if includeAgents {
-		collaborationParts := []string{strings.TrimSpace(bundle.Agents)}
-		if catalog != "" {
-			collaborationParts = append(collaborationParts, catalog)
-		}
-		parts = append(parts, buildTitledCognitionSection("Collaboration", joinNonEmpty(collaborationParts, "\n\n")))
-	}
-	parts = append(parts, buildTitledCognitionSection("User Context", strings.TrimSpace(bundle.User)))
-
-	return joinNonEmpty(parts, "\n\n")
+func (b *ContextBuilder) buildCognitionLayer(bundle bootstrapBundle, includeAgents bool) string {
+	return joinNonEmpty(b.buildCognitionSections(bundle, includeAgents, 1), "\n\n")
 }
 
-func buildTitledCognitionSection(title, content string) string {
+func (b *ContextBuilder) buildSubagentCognitionSnapshot(bundle bootstrapBundle) string {
+	sections := b.buildCognitionSections(bundle, true, 2)
+	if len(sections) == 0 {
+		return ""
+	}
+	return joinNonEmpty(append([]string{"# Cognition Snapshot"}, sections...), "\n\n")
+}
+
+func (b *ContextBuilder) buildCognitionSections(bundle bootstrapBundle, includeAgents bool, level int) []string {
+	sections := []string{
+		buildTitledCognitionSection("Identity", strings.TrimSpace(bundle.Identity), level),
+	}
+	if includeAgents {
+		sections = append(sections, buildTitledCognitionSection("Collaboration Rules", strings.TrimSpace(bundle.Agents), level))
+	}
+	sections = append(sections,
+		buildTitledCognitionSection("User Context", strings.TrimSpace(bundle.User), level),
+		buildTitledCognitionSection("Personality", strings.TrimSpace(bundle.Soul), level),
+	)
+	out := make([]string, 0, len(sections))
+	for _, section := range sections {
+		if strings.TrimSpace(section) != "" {
+			out = append(out, section)
+		}
+	}
+	return out
+}
+
+func buildTitledCognitionSection(title, content string, level int) string {
 	content = strings.TrimSpace(content)
 	if title == "" || content == "" {
 		return ""
 	}
-	return "# " + title + "\n\n" + shiftMarkdownHeadings(content, 1)
+	if level < 1 {
+		level = 1
+	}
+	return strings.Repeat("#", level) + " " + title + "\n\n" + shiftMarkdownHeadings(content, level)
+}
+
+func buildTitledRawCognitionSection(title, content string, level int) string {
+	content = strings.TrimSpace(content)
+	if title == "" || content == "" {
+		return ""
+	}
+	if level < 1 {
+		level = 1
+	}
+	return strings.Repeat("#", level) + " " + title + "\n\n" + content
 }
 
 func shiftMarkdownHeadings(content string, delta int) string {
@@ -308,7 +336,8 @@ func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 
 	return joinNonEmpty([]string{
 		b.buildCommonBoundary(),
-		b.buildSafety(),
+		//b.buildSafety(),
+		//b.buildExecutionNorms(),
 	}, "\n\n---\n\n")
 }
 

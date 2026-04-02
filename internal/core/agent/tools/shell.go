@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/core/config"
 	"go.uber.org/zap"
 )
@@ -335,7 +336,7 @@ func (t *ShellTool) GetTools() []Tool {
 	desc.WriteString("Available cron commands: 'add' (create), 'list/ls' (list), 'rm/remove' (delete), 'enable', 'disable', 'run' (execute immediately), 'status', 'runs' (history).")
 
 	return []Tool{
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"run_shell",
 			desc.String(),
 			map[string]interface{}{
@@ -347,6 +348,15 @@ func (t *ShellTool) GetTools() []Tool {
 					},
 				},
 				"required": []string{"command"},
+			},
+			tooltypes.ToolSpec{
+				Concurrency:      tooltypes.ConcurrencyExclusive,
+				Mutation:         tooltypes.MutationSideEffect,
+				Risk:             tooltypes.RiskHigh,
+				DefaultTimeout:   int(t.timeout / time.Second),
+				PrefersSandbox:   t.sandboxConfig.Enabled,
+				RequiresApproval: true,
+				Tags:             []string{"shell", "command", "workspace"},
 			},
 			t.Exec,
 		),

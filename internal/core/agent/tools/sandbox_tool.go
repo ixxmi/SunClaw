@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/client"
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/core/config"
 	"github.com/smallnest/goclaw/internal/core/sandbox"
 	"go.uber.org/zap"
@@ -30,7 +31,7 @@ func NewSandboxTool(orchestrator *sandbox.Orchestrator) Tool {
 	}
 
 	tool := &SandboxTool{orchestrator: orchestrator}
-	return NewBaseTool(
+	return NewBaseToolWithSpec(
 		"sandbox_execute",
 		"Run an inline code snippet or command through sandbox-aware execution. Use this only for short, self-contained code/command content that may need isolated execution or authorization checks. Do NOT use it for ordinary workspace shell tasks, file operations, package installs, or long command chains; use run_shell instead. The tool first checks whether the input actually looks executable. If not, it returns needs_sandbox=false. Actual execution also requires a configured sandbox executor; local fallback requires prior authorization.",
 		map[string]any{
@@ -69,6 +70,15 @@ func NewSandboxTool(orchestrator *sandbox.Orchestrator) Tool {
 				},
 			},
 			"required": []string{"code"},
+		},
+		tooltypes.ToolSpec{
+			Concurrency:      tooltypes.ConcurrencyExclusive,
+			Mutation:         tooltypes.MutationSideEffect,
+			Risk:             tooltypes.RiskHigh,
+			DefaultTimeout:   int(sandboxToolDefaultTimeout / time.Second),
+			PrefersSandbox:   true,
+			RequiresApproval: true,
+			Tags:             []string{"sandbox", "code", "command"},
 		},
 		tool.execute,
 	)

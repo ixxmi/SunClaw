@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/cron"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -396,7 +397,7 @@ func (t *CronTool) GetTools() []Tool {
 	}
 
 	return []Tool{
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"cron",
 			"Manage goclaw's built-in cron/scheduler service. This is the ONLY WAY to manage scheduled tasks in goclaw. DO NOT use system 'crontab' commands or any other scheduling methods. All scheduled task operations (create, list, view, edit, delete, enable, disable, run) MUST be done through this tool. Supported commands: add (create job), list/ls (list all jobs), rm/remove (delete job), enable (enable job), disable (disable job), run (execute job immediately), status (show service status), runs (show run history).",
 			map[string]interface{}{
@@ -408,6 +409,13 @@ func (t *CronTool) GetTools() []Tool {
 					},
 				},
 				"required": []string{"command"},
+			},
+			tooltypes.ToolSpec{
+				Concurrency:      tooltypes.ConcurrencyExclusive,
+				Mutation:         tooltypes.MutationOrchestration,
+				Risk:             tooltypes.RiskHigh,
+				RequiresApproval: true,
+				Tags:             []string{"cron", "scheduler"},
 			},
 			t.Exec,
 		),

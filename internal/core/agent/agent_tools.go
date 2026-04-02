@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 )
 
 // AgentTool is the unified tool interface for the agent
@@ -128,6 +130,13 @@ func (a *toolAgentAdapter) Parameters() map[string]any {
 	return a.tool.Parameters()
 }
 
+func (a *toolAgentAdapter) Spec() tooltypes.ToolSpec {
+	if provider, ok := a.tool.(tooltypes.ToolSpecProvider); ok {
+		return provider.Spec().Normalized(a.tool.Name())
+	}
+	return defaultToolSpec(a.tool.Name())
+}
+
 func (a *toolAgentAdapter) Execute(ctx context.Context, toolCallId string, params map[string]any, signal context.Context, onUpdate func(AgentToolResult)) (AgentToolResult, error) {
 	// Call the tool's Execute method
 	result, err := a.tool.Execute(ctx, params, func(tr ToolResult) {
@@ -202,6 +211,13 @@ func (a *agentToolAdapter) Description() string {
 
 func (a *agentToolAdapter) Parameters() map[string]any {
 	return a.tool.Parameters()
+}
+
+func (a *agentToolAdapter) Spec() tooltypes.ToolSpec {
+	if provider, ok := a.tool.(tooltypes.ToolSpecProvider); ok {
+		return provider.Spec().Normalized(a.tool.Name())
+	}
+	return defaultToolSpec(a.tool.Name())
 }
 
 func (a *agentToolAdapter) Execute(ctx context.Context, params map[string]any, onUpdate func(ToolResult)) (ToolResult, error) {

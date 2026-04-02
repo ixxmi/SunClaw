@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smallnest/goclaw/internal/core/permissions"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 )
@@ -249,12 +250,13 @@ type LoopConfig struct {
 	GetFollowUpMessages func() ([]AgentMessage, error)
 
 	// Skills support
-	Skills         []*Skill
-	LoadedSkills   []string
-	MaxTokens      int
-	ContextWindow  int
-	ContextBuilder *ContextBuilder
-	ShrimpBrain    *ShrimpBrainTracker
+	Skills           []*Skill
+	LoadedSkills     []string
+	MaxTokens        int
+	ContextWindow    int
+	ContextBuilder   *ContextBuilder
+	PermissionPolicy *permissions.Policy
+	ShrimpBrain      *ShrimpBrainTracker
 }
 
 // NewAgentState creates a new agent state

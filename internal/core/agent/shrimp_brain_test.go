@@ -87,3 +87,75 @@ func TestShrimpBrainDeleteRunPersists(t *testing.T) {
 		t.Fatalf("expected no runs after delete, got %d", len(snapshot.Runs))
 	}
 }
+
+func TestShrimpBrainPersistsNestedSubagentChain(t *testing.T) {
+	dir := t.TempDir()
+	tracker := NewShrimpBrainTracker(dir)
+
+	runID := tracker.StartMainTask("msg-3", "block-nested", "user-nested", "session-main", "planner", "cli", "chat-3", "做一次多级协作")
+	if runID == "" {
+		t.Fatalf("expected run id")
+	}
+
+	tracker.RecordLoopNode("session-main", "planner", false, 1, "tool_calls", "先派给 frontend", 1)
+	tracker.RecordSubagentDispatchAt("session-main", "session-frontend", "frontend", "frontend-polish", "优化页面", 1)
+
+	tracker.RecordPrompt("session-frontend", "frontend", true, "frontend prompt", []PromptLayerSnapshot{
+		{Name: "subagent_descriptor", Enabled: true, Source: "dynamic_subagent"},
+	})
+	tracker.RecordLoopNode("session-frontend", "frontend", true, 1, "tool_calls", "我再派给 qa 校验", 1)
+	tracker.RecordSubagentDispatchAt("session-frontend", "session-qa", "qa", "qa-check", "校验页面", 1)
+
+	tracker.RecordPrompt("session-qa", "qa", true, "qa prompt", []PromptLayerSnapshot{
+		{Name: "subagent_descriptor", Enabled: true, Source: "dynamic_subagent"},
+	})
+	tracker.RecordLoopNode("session-qa", "qa", true, 1, "tool_calls", "开始校验", 1)
+	tracker.RecordToolCall("session-qa", "qa", true, 1, "tool-qa-1", "check_ui", map[string]any{"path": "ui/src/App.vue"}, "checked ui", "")
+	tracker.RecordSubagentResult("session-qa", "qa", "completed", "QA 已完成", "")
+	tracker.RecordSubagentResult("session-frontend", "frontend", "completed", "Frontend 已完成", "")
+	tracker.RecordMainReply("session-main", "planner", "多级协作完成")
+
+	reloaded := NewShrimpBrainTracker(dir)
+	snapshot := reloaded.Snapshot()
+	if len(snapshot.Runs) != 1 {
+		t.Fatalf("expected 1 run, got %d", len(snapshot.Runs))
+	}
+
+	mainLoop := snapshot.Runs[0].MainLoops[0]
+	if len(mainLoop.ToolCalls) != 1 {
+		t.Fatalf("expected 1 main tool call, got %d", len(mainLoop.ToolCalls))
+	}
+
+	frontendDispatch := mainLoop.ToolCalls[0]
+	if len(frontendDispatch.ChildLoops) != 1 {
+		t.Fatalf("expected 1 frontend child loop, got %d", len(frontendDispatch.ChildLoops))
+	}
+
+	frontendLoop := frontendDispatch.ChildLoops[0]
+	if len(frontendLoop.ToolCalls) != 1 {
+		t.Fatalf("expected 1 nested dispatch on frontend loop, got %d", len(frontendLoop.ToolCalls))
+	}
+
+	qaDispatch := frontendLoop.ToolCalls[0]
+	if qaDispatch.ToolName != "sessions_spawn" {
+		t.Fatalf("expected nested sessions_spawn, got %q", qaDispatch.ToolName)
+	}
+	if qaDispatch.ChildAgentID != "qa" {
+		t.Fatalf("expected nested child agent qa, got %q", qaDispatch.ChildAgentID)
+	}
+	if qaDispatch.ChildPrompt != "qa prompt" {
+		t.Fatalf("expected nested child prompt persisted, got %q", qaDispatch.ChildPrompt)
+	}
+	if qaDispatch.ChildReply != "QA 已完成" {
+		t.Fatalf("expected nested child reply persisted, got %q", qaDispatch.ChildReply)
+	}
+	if len(qaDispatch.ChildLoops) != 1 {
+		t.Fatalf("expected 1 qa child loop, got %d", len(qaDispatch.ChildLoops))
+	}
+	if len(qaDispatch.ChildLoops[0].ToolCalls) != 1 {
+		t.Fatalf("expected qa tool call persisted, got %d", len(qaDispatch.ChildLoops[0].ToolCalls))
+	}
+	if qaDispatch.ChildLoops[0].ToolCalls[0].ToolName != "check_ui" {
+		t.Fatalf("expected qa tool check_ui, got %q", qaDispatch.ChildLoops[0].ToolCalls[0].ToolName)
+	}
+}

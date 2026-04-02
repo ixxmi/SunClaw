@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/session"
 )
@@ -61,9 +62,7 @@ func (t *SessionStatusTool) Execute(ctx context.Context, params map[string]inter
 		sessionKey = strings.TrimSpace(raw)
 	}
 	if sessionKey == "" {
-		if raw, ok := ctx.Value("session_key").(string); ok {
-			sessionKey = strings.TrimSpace(raw)
-		}
+		sessionKey = execution.SessionKey(ctx)
 	}
 	if sessionKey == "" {
 		sessionKey = "main"
@@ -71,10 +70,7 @@ func (t *SessionStatusTool) Execute(ctx context.Context, params map[string]inter
 
 	sessionMgr := t.sessionMgr
 	if sessionMgr == nil && t.managerPool != nil {
-		workspaceRoot := ""
-		if raw, ok := ctx.Value("workspace_root").(string); ok {
-			workspaceRoot = strings.TrimSpace(raw)
-		}
+		workspaceRoot := execution.WorkspaceRoot(ctx)
 		if workspaceRoot == "" {
 			if identity, ok := namespaces.FromSessionKey(sessionKey); ok {
 				workspaceRoot = identity.WorkspaceDir(t.baseWorkspace)

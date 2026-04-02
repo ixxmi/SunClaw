@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 	"github.com/smallnest/goclaw/internal/logger"
 )
 
@@ -18,7 +19,12 @@ type useSkillResult struct {
 // NewUseSkillTool 创建使用技能的工具
 // 这个工具用于让 LLM 选择要使用的技能，然后触发第二阶段的完整内容加载
 func NewUseSkillTool() *BaseTool {
-	return NewBaseTool(
+	return NewUseSkillToolWithSpec()
+}
+
+// NewUseSkillToolWithSpec creates the use_skill tool with structured metadata.
+func NewUseSkillToolWithSpec() *BaseTool {
+	return NewBaseToolWithSpec(
 		"use_skill",
 		"Select a skill to use for the current task. This loads the full skill content into the context.",
 		map[string]interface{}{
@@ -30,6 +36,12 @@ func NewUseSkillTool() *BaseTool {
 				},
 			},
 			"required": []string{"skill_name"},
+		},
+		tooltypes.ToolSpec{
+			Concurrency: tooltypes.ConcurrencyConcurrent,
+			Mutation:    tooltypes.MutationRead,
+			Risk:        tooltypes.RiskLow,
+			Tags:        []string{"skill", "context"},
 		},
 		func(ctx context.Context, params map[string]interface{}) (string, error) {
 			skillName, ok := params["skill_name"].(string)

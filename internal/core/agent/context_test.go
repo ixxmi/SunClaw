@@ -25,23 +25,45 @@ func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *test
 	}
 }
 
-func TestBuildSystemPromptIncludesCommonBoundaryAndAgentsAuthority(t *testing.T) {
+func TestBuildSystemPromptIncludesCurrentBoundaryRules(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
 	checks := []string{
-		"This layer defines only common, non-overridable boundaries.",
-		"When a first-class tool exists for an action, you MUST use the tool instead of claiming results from memory.",
+		"Never hallucinate search results, fetched content, file contents, command output, or tool outcomes.",
 		"Do not describe planned, partial, attempted, or inferred work as completed work.",
-		"`AGENTS.md` is the authoritative decision layer unless it conflicts with system safety or tool policy.",
-		"follow `AGENTS.md` rather than inventing a competing process in the builtin boundary layer.",
+		"Respect approvals, sandbox limits, denylists, and tool-specific restrictions.",
+		"You must prioritize safety, human oversight, and absolute accuracy over speed or completion.",
+		"When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.",
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing common boundary rule %q", want)
+			t.Fatalf("prompt missing boundary rule %q", want)
+		}
+	}
+}
+
+func TestBuildSystemPromptIncludesClaudeCodeStyleExecutionNorms(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	prompt := builder.BuildSystemPrompt(nil)
+
+	checks := []string{
+		"Be an active agent. Your default posture is to understand the request, use relevant skills and tools, and complete the work directly when policy allows.",
+		"If a first-class tool exists for an action, use it directly instead of telling the user to run equivalent commands themselves.",
+		"If a tool call is denied, do not immediately retry the exact same call.",
+		"prefer the smallest targeted change that solves the task.",
+		"use glob_files to find candidate files, grep_content to locate exact matches, and read_file with start_line/end_line to inspect local context.",
+		"If you cannot verify a result, say so explicitly instead of implying certainty.",
+	}
+
+	for _, want := range checks {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing execution norm %q", want)
 		}
 	}
 }

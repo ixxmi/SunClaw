@@ -18,6 +18,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/agent/tools"
 	"github.com/smallnest/goclaw/internal/core/bus"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/permissions"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -53,6 +54,12 @@ func NewTUIAgent(
 	// Register file system tool
 	fsTool := tools.NewFileSystemTool([]string{}, []string{}, workspace)
 	for _, tool := range fsTool.GetTools() {
+		_ = toolRegistry.RegisterExisting(tool)
+	}
+
+	// Register search tools
+	searchTool := tools.NewSearchTool([]string{}, []string{}, workspace)
+	for _, tool := range searchTool.GetTools() {
 		_ = toolRegistry.RegisterExisting(tool)
 	}
 
@@ -103,6 +110,14 @@ func NewTUIAgent(
 		Workspace:    workspace,
 		MaxIteration: maxIterations,
 		MaxTokens:    4096,
+		PermissionPolicy: permissions.CompilePolicy(&config.Config{
+			Approvals: approvals,
+			Tools: config.ToolsConfig{
+				Shell: config.ShellToolConfig{
+					Sandbox: sandboxConfig,
+				},
+			},
+		}),
 		ContextWindow: agent.GuessContextWindowForModel(
 			"",
 		),

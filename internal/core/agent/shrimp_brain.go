@@ -428,6 +428,7 @@ func (t *ShrimpBrainTracker) RecordSubagentDispatchAt(requesterSessionKey, child
 		return
 	}
 
+	requesterSessionKey = strings.TrimSpace(requesterSessionKey)
 	now := time.Now().UnixMilli()
 	t.mu.Lock()
 	run := t.lookupRunBySessionLocked(requesterSessionKey)
@@ -440,7 +441,12 @@ func (t *ShrimpBrainTracker) RecordSubagentDispatchAt(requesterSessionKey, child
 		t.sessionRun[strings.TrimSpace(childSessionKey)] = run.ID
 	}
 	run.Status = "running"
-	loop := t.upsertLoopNodeLocked(run, requesterSessionKey, run.MainAgentID, maxShrimpInt(iteration, 1), false)
+	requesterIsSubagent := strings.TrimSpace(run.SessionKey) != requesterSessionKey
+	requesterAgentID := t.agentIDForSessionLocked(run, requesterSessionKey)
+	if requesterAgentID == "" {
+		requesterAgentID = run.MainAgentID
+	}
+	loop := t.upsertLoopNodeLocked(run, requesterSessionKey, requesterAgentID, maxShrimpInt(iteration, 1), requesterIsSubagent)
 	call := t.upsertToolCallLocked(loop, childSessionKey, "sessions_spawn")
 	call.Status = "ok"
 	call.Label = strings.TrimSpace(label)
@@ -683,14 +689,7 @@ func (t *ShrimpBrainTracker) loopSliceForSessionLocked(run *ShrimpBrainRun, sess
 	if run.SessionKey == sessionKey {
 		return &run.MainLoops
 	}
-	for i := range run.MainLoops {
-		for j := range run.MainLoops[i].ToolCalls {
-			if strings.TrimSpace(run.MainLoops[i].ToolCalls[j].ChildSessionKey) == sessionKey {
-				return &run.MainLoops[i].ToolCalls[j].ChildLoops
-			}
-		}
-	}
-	return nil
+	return findLoopSliceBySessionLocked(&run.MainLoops, sessionKey)
 }
 
 func (t *ShrimpBrainTracker) lookupDispatchByChildSessionLocked(run *ShrimpBrainRun, childSessionKey string) *ShrimpBrainToolCall {
@@ -698,14 +697,7 @@ func (t *ShrimpBrainTracker) lookupDispatchByChildSessionLocked(run *ShrimpBrain
 	if run == nil || childSessionKey == "" {
 		return nil
 	}
-	for i := range run.MainLoops {
-		for j := range run.MainLoops[i].ToolCalls {
-			if strings.TrimSpace(run.MainLoops[i].ToolCalls[j].ChildSessionKey) == childSessionKey {
-				return &run.MainLoops[i].ToolCalls[j]
-			}
-		}
-	}
-	return nil
+	return findDispatchByChildSessionLocked(&run.MainLoops, childSessionKey)
 }
 
 func (t *ShrimpBrainTracker) updateMemberLocked(run *ShrimpBrainRun, agentID, role, sessionKey, status string, ts int64) {
@@ -745,6 +737,64 @@ func fallbackShrimpAgent(agentID string) string {
 		return "未命名 Agent"
 	}
 	return strings.TrimSpace(agentID)
+}
+
+func (t *ShrimpBrainTracker) agentIDForSessionLocked(run *ShrimpBrainRun, sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if run == nil || sessionKey == "" {
+		return ""
+	}
+	if strings.TrimSpace(run.SessionKey) == sessionKey {
+		return strings.TrimSpace(run.MainAgentID)
+	}
+	for i := range run.Members {
+		member := run.Members[i]
+		if strings.TrimSpace(member.SessionKey) == sessionKey && strings.TrimSpace(member.AgentID) != "" {
+			return strings.TrimSpace(member.AgentID)
+		}
+	}
+	if dispatch := t.lookupDispatchByChildSessionLocked(run, sessionKey); dispatch != nil {
+		return strings.TrimSpace(dispatch.ChildAgentID)
+	}
+	return ""
+}
+
+func findLoopSliceBySessionLocked(loops *[]ShrimpBrainLoopNode, sessionKey string) *[]ShrimpBrainLoopNode {
+	if loops == nil || strings.TrimSpace(sessionKey) == "" {
+		return nil
+	}
+	for i := range *loops {
+		loop := &(*loops)[i]
+		for j := range loop.ToolCalls {
+			call := &loop.ToolCalls[j]
+			if strings.TrimSpace(call.ChildSessionKey) == sessionKey {
+				return &call.ChildLoops
+			}
+			if nested := findLoopSliceBySessionLocked(&call.ChildLoops, sessionKey); nested != nil {
+				return nested
+			}
+		}
+	}
+	return nil
+}
+
+func findDispatchByChildSessionLocked(loops *[]ShrimpBrainLoopNode, childSessionKey string) *ShrimpBrainToolCall {
+	if loops == nil || strings.TrimSpace(childSessionKey) == "" {
+		return nil
+	}
+	for i := range *loops {
+		loop := &(*loops)[i]
+		for j := range loop.ToolCalls {
+			call := &loop.ToolCalls[j]
+			if strings.TrimSpace(call.ChildSessionKey) == childSessionKey {
+				return call
+			}
+			if nested := findDispatchByChildSessionLocked(&call.ChildLoops, childSessionKey); nested != nil {
+				return nested
+			}
+		}
+	}
+	return nil
 }
 
 func stringifyShrimpBrain(value any) string {

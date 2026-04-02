@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/smallnest/goclaw/internal/core/bus"
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
+	"github.com/smallnest/goclaw/internal/core/permissions"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/logger"
@@ -52,6 +54,7 @@ type NewAgentConfig struct {
 	Temperature         float64
 	ContextWindow       int
 	SkillsLoader        *SkillsLoader
+	PermissionPolicy    *permissions.Policy
 	ShrimpBrain         *ShrimpBrainTracker
 	DisableSkillsPrompt *bool // 仅显式 true 时跳过技能拼接；nil/false 均拼接
 }
@@ -103,6 +106,7 @@ func NewAgent(cfg *NewAgentConfig) (*Agent, error) {
 		MaxTokens:        cfg.MaxTokens,
 		ContextWindow:    cfg.ContextWindow,
 		ToolTimeout:      cfg.ToolTimeout,
+		PermissionPolicy: cfg.PermissionPolicy,
 		ConvertToLLM:     defaultConvertToLLM,
 		TransformContext: nil,
 		Skills:           skills,
@@ -286,8 +290,10 @@ func (a *Agent) handleInboundMessage(ctx context.Context, msg *bus.InboundMessag
 		zap.Int("total_messages", len(allMessages)),
 	)
 	runCtx := withInboundToolContext(ctx, msg)
-	runCtx = context.WithValue(runCtx, "workspace_root", workspaceRoot)
-	runCtx = context.WithValue(runCtx, "tenant_id", namespaces.FromInboundMessage(msg).TenantID)
+	runCtx = execution.WithToolUseContext(runCtx, execution.ToolUseContext{
+		WorkspaceRoot: workspaceRoot,
+		TenantID:      namespaces.FromInboundMessage(msg).TenantID,
+	})
 	runCtx = context.WithValue(runCtx, SessionSummaryContextKey, summary)
 	finalMessages, err := a.orchestrator.Run(runCtx, allMessages)
 	summaryAfterRun := strings.TrimSpace(a.orchestrator.state.ContextSummary)

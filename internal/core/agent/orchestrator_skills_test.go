@@ -175,8 +175,11 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "# Soul") {
+	if !strings.Contains(systemPrompt, "# Personality") {
 		t.Fatalf("expected cognition layer in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Custom orchestrator prompt") {
+		t.Fatalf("expected custom orchestrator prompt in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "### BOOTSTRAP.md") {
 		t.Fatalf("expected BOOTSTRAP.md marker in system prompt, got %q", systemPrompt)
@@ -187,8 +190,11 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	if !strings.Contains(systemPrompt, "vibecoding bootstrap soul") {
 		t.Fatalf("expected bootstrap content in system prompt, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "# Collaboration") {
-		t.Fatalf("expected collaboration section in system prompt, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "# Collaboration Rules") {
+		t.Fatalf("expected collaboration rules wrapper in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, strings.TrimSpace(agentsTemplate)) {
+		t.Fatalf("expected raw AGENTS.md content in system prompt, got %q", systemPrompt)
 	}
 }
 
@@ -243,9 +249,9 @@ func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.
 	checks := []string{
 		"### BOOTSTRAP.md",
 		"# Identity",
-		"# Soul",
+		"# Collaboration Rules",
 		"# User Context",
-		"# Collaboration",
+		"# Personality",
 		"BOOTSTRAP.md - Hello, World",
 	}
 	for _, want := range checks {
@@ -258,12 +264,13 @@ func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.
 	}
 
 	bootstrapIdx := strings.Index(systemPrompt, "### BOOTSTRAP.md")
+	coreIdx := strings.Index(systemPrompt, "你是 SunClaw 的 vibecoding 主编排 Agent。")
 	identityIdx := strings.Index(systemPrompt, "# Identity")
-	soulIdx := strings.Index(systemPrompt, "# Soul")
-	agentsIdx := strings.Index(systemPrompt, "# Collaboration")
+	agentsIdx := strings.Index(systemPrompt, "# Collaboration Rules")
 	userIdx := strings.Index(systemPrompt, "# User Context")
-	if !(bootstrapIdx < identityIdx && identityIdx < soulIdx && soulIdx < agentsIdx && agentsIdx < userIdx) {
-		t.Fatalf("expected BOOTSTRAP.md -> IDENTITY.md -> SOUL.md -> AGENTS.md -> USER.md order, got %q", systemPrompt)
+	personalityIdx := strings.Index(systemPrompt, "# Personality")
+	if !(bootstrapIdx < coreIdx && coreIdx < identityIdx && identityIdx < agentsIdx && agentsIdx < userIdx && userIdx < personalityIdx) {
+		t.Fatalf("expected BOOTSTRAP.md -> core -> IDENTITY.md -> AGENTS.md -> USER.md -> PERSONALITY order, got %q", systemPrompt)
 	}
 }
 
@@ -320,28 +327,48 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		"## Selected Skills (active)",
 		"## Bootstrap Mode",
 		"BOOTSTRAP.md - Hello, World",
-		"# Identity",
-		"# Soul",
-		"# Collaboration",
-		"# User Context",
 	} {
 		if strings.Contains(systemPrompt, marker) {
 			t.Fatalf("did not expect %q in subagent system prompt, got %q", marker, systemPrompt)
 		}
 	}
+	if strings.Contains(systemPrompt, "# Cognition Snapshot") {
+		t.Fatalf("did not expect cognition snapshot without subagent cognition files, got %q", systemPrompt)
+	}
 }
 
-func TestStreamAssistantResponse_SubagentIncludesSpawnableCatalogWhenPresent(t *testing.T) {
+func TestStreamAssistantResponse_SubagentIncludesCognitionSnapshotWhenAvailable(t *testing.T) {
 	workspaceDir := t.TempDir()
+	ownerBootstrapDir := filepath.Join(t.TempDir(), "agents", "vibecoding", "bootstrap")
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "vibecoding" {
+			return ownerBootstrapDir
+		}
+		return workspaceDir
+	})
 	provider := &promptCaptureProvider{}
+
+	files := map[string]string{
+		"IDENTITY.md": "# Identity\n\nsubagent identity",
+		"AGENTS.md":   "# AGENTS\n\nsubagent collaboration rules",
+		"USER.md":     "# User\n\nuser preference",
+		"SOUL.md":     "# Soul\n\nsubagent personality",
+	}
+	for name, content := range files {
+		if err := os.MkdirAll(ownerBootstrapDir, 0755); err != nil {
+			t.Fatalf("mkdir ownerBootstrapDir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ownerBootstrapDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
 
 	state := NewAgentState()
 	state.SystemPrompt = "Subagent target prompt"
 	state.IsSubagent = true
 	state.BootstrapOwnerID = "vibecoding"
 	state.SubagentDescriptor = "# Subagent Context\n\nFocus on the delegated task."
-	state.SpawnableAgentCatalog = "<available_agents>\n- agent_id: \"coder\" — Coder — 单步实现\n</available_agents>"
 	state.Messages = []AgentMessage{
 		{
 			Role:    RoleUser,
@@ -362,7 +389,55 @@ func TestStreamAssistantResponse_SubagentIncludesSpawnableCatalogWhenPresent(t *
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "<available_agents>") {
-		t.Fatalf("expected subagent system prompt to include spawnable catalog, got %q", systemPrompt)
+	for _, marker := range []string{
+		"# Cognition Snapshot",
+		"## Identity",
+		"## Collaboration Rules",
+		"## User Context",
+		"## Personality",
+		"### Identity",
+		"# AGENTS",
+		"### User",
+		"### Soul",
+	} {
+		if !strings.Contains(systemPrompt, marker) {
+			t.Fatalf("expected %q in subagent cognition snapshot, got %q", marker, systemPrompt)
+		}
+	}
+}
+
+func TestStreamAssistantResponse_SubagentDoesNotIncludeSpawnableCatalog(t *testing.T) {
+	workspaceDir := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+	provider := &promptCaptureProvider{}
+
+	state := NewAgentState()
+	state.SystemPrompt = "Subagent target prompt"
+	state.IsSubagent = true
+	state.BootstrapOwnerID = "vibecoding"
+	state.SubagentDescriptor = "# Subagent Context\n\nFocus on the delegated task."
+	state.SpawnableAgentCatalog = "## Available Agents\n\nReference only. Consult this directory only when selecting the next child agent for the current step.\nPrefer `agent_name`; add `agent_id` only when disambiguation is needed.\n\n- Coder (`coder`): 单步实现\n"
+	state.Messages = []AgentMessage{
+		{
+			Role:    RoleUser,
+			Content: []ContentBlock{TextContent{Text: "继续"}},
+		},
+	}
+
+	orchestrator := NewOrchestrator(&LoopConfig{
+		Provider:       provider,
+		ContextBuilder: builder,
+	}, state)
+
+	if _, err := orchestrator.streamAssistantResponse(context.Background(), state); err != nil {
+		t.Fatalf("streamAssistantResponse error: %v", err)
+	}
+	if len(provider.messages) == 0 {
+		t.Fatalf("expected provider to receive messages")
+	}
+
+	systemPrompt := provider.messages[0].Content
+	if strings.Contains(systemPrompt, "<available_agents>") {
+		t.Fatalf("did not expect subagent system prompt to include spawnable catalog, got %q", systemPrompt)
 	}
 }

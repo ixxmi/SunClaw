@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/smallnest/goclaw/internal/core/config"
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
@@ -385,20 +386,13 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	delegatedTask := buildDelegatedTask(spawnParams)
 
 	// Get requester session info from context
-	requesterSessionKey := "main" // default
-	if sk := ctx.Value("session_key"); sk != nil {
-		if key, ok := sk.(string); ok {
-			requesterSessionKey = key
-		}
+	requesterSessionKey := execution.SessionKey(ctx)
+	if requesterSessionKey == "" {
+		requesterSessionKey = "main"
 	}
 
 	// 优先从 context 直接取 agent_id（orchestrator 已注入）
-	requesterAgentID := ""
-	if aid := ctx.Value("agent_id"); aid != nil {
-		if id, ok := aid.(string); ok {
-			requesterAgentID = id
-		}
-	}
+	requesterAgentID := execution.AgentID(ctx)
 	// fallback: 通过 session key 查找
 	if requesterAgentID == "" && t.getAgentID != nil {
 		requesterAgentID = t.getAgentID(requesterSessionKey)
@@ -407,10 +401,8 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		requesterAgentID = "default"
 	}
 	bootstrapOwnerID := requesterAgentID
-	if bid := ctx.Value("bootstrap_owner_id"); bid != nil {
-		if id, ok := bid.(string); ok && strings.TrimSpace(id) != "" {
-			bootstrapOwnerID = id
-		}
+	if ownerID := execution.BootstrapOwnerID(ctx); strings.TrimSpace(ownerID) != "" {
+		bootstrapOwnerID = ownerID
 	}
 
 	logger.Info("sessions_spawn called",
@@ -455,16 +447,16 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		Channel:   "cli", // 默认值
 		AccountID: "default",
 	}
-	if ch, ok := ctx.Value("channel").(string); ok && strings.TrimSpace(ch) != "" {
+	if ch := execution.Channel(ctx); strings.TrimSpace(ch) != "" {
 		requesterOrigin.Channel = ch
 	}
-	if aid, ok := ctx.Value("account_id").(string); ok && strings.TrimSpace(aid) != "" {
+	if aid := execution.AccountID(ctx); strings.TrimSpace(aid) != "" {
 		requesterOrigin.AccountID = aid
 	}
-	if chatID, ok := ctx.Value("chat_id").(string); ok && strings.TrimSpace(chatID) != "" {
+	if chatID := execution.ChatID(ctx); strings.TrimSpace(chatID) != "" {
 		requesterOrigin.To = chatID
 	}
-	if tid, ok := ctx.Value("thread_id").(string); ok && strings.TrimSpace(tid) != "" {
+	if tid := execution.ThreadID(ctx); strings.TrimSpace(tid) != "" {
 		requesterOrigin.ThreadID = tid
 	}
 
@@ -515,17 +507,7 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 	}
 
 	// 调用生成回调，传递完整的子 Agent 启动参数（含 System Prompt 和 Task）
-	parentLoopIteration := 0
-	if raw := ctx.Value("loop_iteration"); raw != nil {
-		switch value := raw.(type) {
-		case int:
-			parentLoopIteration = value
-		case int64:
-			parentLoopIteration = int(value)
-		case float64:
-			parentLoopIteration = int(value)
-		}
-	}
+	parentLoopIteration := execution.LoopIteration(ctx)
 	if t.onSpawn != nil {
 		spawnResult := &SubagentSpawnResult{
 			Status:              "accepted",

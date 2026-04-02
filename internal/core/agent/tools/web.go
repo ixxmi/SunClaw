@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/smallnest/goclaw/internal/core/agent/tooltypes"
 )
 
 // WebTool Web 工具
@@ -271,7 +273,7 @@ func removeHTMLTags(html, tag string) string {
 // GetTools 获取所有 Web 工具
 func (t *WebTool) GetTools() []Tool {
 	return []Tool{
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"web_search",
 			"Search the web for information",
 			map[string]interface{}{
@@ -284,9 +286,16 @@ func (t *WebTool) GetTools() []Tool {
 				},
 				"required": []string{"query"},
 			},
+			tooltypes.ToolSpec{
+				Concurrency:    tooltypes.ConcurrencyConcurrent,
+				Mutation:       tooltypes.MutationExternal,
+				Risk:           tooltypes.RiskLow,
+				DefaultTimeout: int(t.timeout / time.Second),
+				Tags:           []string{"web", "search"},
+			},
 			t.WebSearch,
 		),
-		NewBaseTool(
+		NewBaseToolWithSpec(
 			"web_fetch",
 			"Fetch a web page and convert to markdown",
 			map[string]interface{}{
@@ -298,6 +307,13 @@ func (t *WebTool) GetTools() []Tool {
 					},
 				},
 				"required": []string{"url"},
+			},
+			tooltypes.ToolSpec{
+				Concurrency:    tooltypes.ConcurrencyConcurrent,
+				Mutation:       tooltypes.MutationExternal,
+				Risk:           tooltypes.RiskLow,
+				DefaultTimeout: int(t.timeout / time.Second),
+				Tags:           []string{"web", "fetch"},
 			},
 			t.WebFetch,
 		),

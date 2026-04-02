@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/memory"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 )
@@ -243,10 +244,10 @@ func (t *MemoryAddTool) resolveSearchManager(ctx context.Context) (memory.Memory
 
 func resolveMemoryWorkspace(ctx context.Context, baseWorkspace string) string {
 	if ctx != nil {
-		if raw, ok := ctx.Value("workspace_root").(string); ok && strings.TrimSpace(raw) != "" {
+		if raw := execution.WorkspaceRoot(ctx); strings.TrimSpace(raw) != "" {
 			return strings.TrimSpace(raw)
 		}
-		if raw, ok := ctx.Value("session_key").(string); ok {
+		if raw := execution.SessionKey(ctx); raw != "" {
 			if identity, found := namespaces.FromSessionKey(strings.TrimSpace(raw)); found {
 				if workspaceRoot := identity.WorkspaceDir(baseWorkspace); strings.TrimSpace(workspaceRoot) != "" {
 					return workspaceRoot

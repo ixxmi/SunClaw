@@ -77,7 +77,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", name, desc))
 	}
 
-	return fmt.Sprintf("<available_tools>\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s\n</available_tools>",
+	return fmt.Sprintf("## Available Tools\n\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s",
 		strings.Join(lines, "\n"))
 }
 
@@ -122,6 +122,8 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_click":          "Click elements on the page (by selector or coordinates)",
 		"browser_fill_input":     "Fill input fields and textareas",
 		"browser_execute_script": "Execute JavaScript in page context",
+		"glob_files":             "Find files by path/name pattern before deeper inspection",
+		"grep_content":           "Search file contents and return matching files or file:line hits",
 		"read_file":              "Read file contents (raw only for simple small files, otherwise compact preview, supports line ranges)",
 		"write_file":             "Create a new file or fully overwrite an existing file with complete content. Do not use run_shell for ordinary file writing when this tool fits",
 		"edit_file":              "Edit an existing file by exact text replacement. Preferred tool for normal code edits to existing files",
@@ -145,6 +147,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 	}
 
 	toolOrder := []string{
+		"glob_files", "grep_content",
 		"read_file", "write_file", "edit_file", "update_config", "list_files",
 		"run_shell", "sandbox_execute", "process",
 		"browser_navigate", "browser_screenshot", "browser_get_text",
@@ -194,7 +197,10 @@ func (b *ContextBuilder) buildToolCallStyle() string {
 **When a first-class tool exists for an action**: Use the tool directly instead of asking the user to run equivalent CLI commands.
 
 **Tool selection for file work**:
-- Use read_file or list_dir to inspect files and directories.
+- Use glob_files first to narrow candidate files by path/name patterns.
+- Use grep_content next to locate exact implementations and line numbers inside those files.
+- Use read_file after grep_content when you need the surrounding code around a specific hit.
+- Use list_dir for simple directory inspection.
 - Use edit_file for normal edits to existing files.
 - Use write_file only when creating a file or replacing the whole file content.
 - Do NOT use run_shell for ordinary source-file edits or writes when file tools can express the change directly.
@@ -243,6 +249,20 @@ func (b *ContextBuilder) buildSafety() string {
 - You have no independent goals beyond the user's explicit request.
 - Comply immediately with any stop/pause/audit requests.
 - When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.`
+}
+
+func (b *ContextBuilder) buildExecutionNorms() string {
+	return `# Working Norms
+- Be an active agent. Your default posture is to understand the request, use relevant skills and tools, and complete the work directly when policy allows.
+- If a first-class tool exists for an action, use it directly instead of telling the user to run equivalent commands themselves.
+- All normal text you produce is user-visible. Keep narration concise and useful.
+- For non-trivial work, briefly acknowledge the request and state the next concrete step.
+- For long-running work, send short progress updates only when there is real progress or noticeable waiting. Do not produce repetitive filler updates.
+- Tool permissions are enforced by policy. If a tool call is denied, do not immediately retry the exact same call. Adjust your approach, use a safer alternative, or ask the user only if you are genuinely blocked.
+- For code and file changes, prefer the smallest targeted change that solves the task. Do not add unrelated refactors, speculative abstractions, extra comments, or validation that the current task does not require.
+- For codebase exploration, narrow first and inspect second: use glob_files to find candidate files, grep_content to locate exact matches, and read_file with start_line/end_line to inspect local context.
+- When you can verify a result through tests, builds, commands, or concrete outputs, do so before claiming success.
+- If you cannot verify a result, say so explicitly instead of implying certainty.`
 }
 
 // buildErrorHandling 构建错误处理指导
@@ -729,9 +749,9 @@ func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 	if bundle.PreferIdentityUserBeforeAgents() {
 		parts = append(parts,
 			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
-			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
 			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
 			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
 		)
 	} else {
 		if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
@@ -739,9 +759,9 @@ func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 		}
 		parts = append(parts,
 			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
-			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
 			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
 			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
+			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
 		)
 	}
 	bootstrap := joinNonEmpty(parts, "\n\n")
