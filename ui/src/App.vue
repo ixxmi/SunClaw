@@ -1,36 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { fetchControlConfig, saveControlConfig } from "./api/controlConfig";
 import { fetchDashboardSnapshot } from "./api/dashboard";
-import { deleteShrimpBrainRun, fetchShrimpBrainSnapshot } from "./api/shrimpBrain";
 import IconGlyph from "./components/IconGlyph.vue";
 import SectionCard from "./components/SectionCard.vue";
 import ShrimpLoopTrace from "./components/ShrimpLoopTrace.vue";
 import StatusPill from "./components/StatusPill.vue";
+import { useShrimpBrainPanel, shouldShowShrimpReplyToggle, shrimpStatusBadgeClass, isFailureStatus, formatShrimpTimeShort, formatShrimpTime, truncateShrimpText, shrimpTurnTitle } from "./composables/useShrimpBrainPanel";
 import {
   type ControlChannelConfig,
   type ControlConfig,
   type DashboardSnapshot,
   type ShrimpBrainEvent,
-  type ShrimpBrainRun,
-  type ShrimpBrainSnapshot,
+  type ShrimpSessionGroup,
   navStructure,
   pageMeta,
   type PageId,
 } from "./data/dashboard";
-
-interface ShrimpSessionGroup {
-  blockKey: string;
-  userKey: string;
-  sessionKey: string;
-  channel: string;
-  chatId: string;
-  mainAgentId: string;
-  status: string;
-  startedAt: number;
-  updatedAt: number;
-  runs: ShrimpBrainRun[];
-}
 
 const isSidebarOpen = ref(true);
 const activePage = ref<PageId>("chat");
@@ -43,25 +29,40 @@ const controlLoading = ref(false);
 const controlSaving = ref(false);
 const controlIssues = ref<string[]>([]);
 const controlMessage = ref("");
-const shrimpBrain = ref<ShrimpBrainSnapshot | null>(null);
-const shrimpBrainLoading = ref(false);
-const shrimpBrainError = ref("");
-const shrimpBrainStreamState = ref("connecting");
-const selectedShrimpSessionKey = ref("");
-const deletingShrimpRunId = ref("");
-const expandedShrimpReplies = ref<Record<string, boolean>>({});
-const expandedShrimpTurns = ref<Record<string, boolean>>({});
-const shrimpEventStreamRef = ref<HTMLElement | null>(null);
-const isShrimpAutoFollowEnabled = ref(true);
-const showShrimpFollowButton = ref(false);
-const shrimpPendingUpdateCount = ref(0);
-const shrimpFollowNotice = ref("");
+const {
+  shrimpBrain,
+  shrimpBrainLoading,
+  shrimpBrainError,
+  shrimpBrainStreamState,
+  shrimpSessions,
+  shrimpBrainGeneratedAtLabel,
+  selectedShrimpSessionKey,
+  selectedShrimpSession,
+  selectedShrimpSessionLabel,
+  deletingShrimpRunId,
+  shrimpEventStreamRef,
+  isShrimpAutoFollowEnabled,
+  showShrimpFollowButton,
+  shrimpFollowNotice,
+  shrimpStreamStateText,
+  shrimpAutoFollowButtonText,
+  loadShrimpBrain,
+  handleDeleteShrimpRun,
+  connectShrimpBrainStream,
+  closeShrimpBrainStream,
+  setShrimpFromSnapshot,
+  selectShrimpSession,
+  shrimpFollowStatusLabel,
+  handleShrimpEventStreamScroll,
+  restoreShrimpAutoFollow,
+  isShrimpReplyExpanded,
+  toggleShrimpReply,
+  isShrimpTurnExpanded,
+  toggleShrimpTurn,
+} = useShrimpBrainPanel();
 const isUserInteracting = ref(false);
 let refreshTimer: number | undefined;
-let shrimpBrainStream: EventSource | null = null;
 let interactionTimer: number | undefined;
-let shrimpFollowNoticeTimer: number | undefined;
-let lastShrimpRunsSignature = "";
 
 const currentPage = computed(() => pageMeta[activePage.value]);
 
@@ -80,53 +81,6 @@ const configPreview = computed(() => snapshot.value?.config.preview ?? "");
 const debugRows = computed(() => snapshot.value?.debug ?? []);
 const logs = computed(() => snapshot.value?.logs ?? []);
 const docs = computed(() => snapshot.value?.docs ?? []);
-const shrimpRuns = computed(() => shrimpBrain.value?.runs ?? []);
-const shrimpSessions = computed<ShrimpSessionGroup[]>(() => {
-  const groups = new Map<string, ShrimpSessionGroup>();
-  for (const run of shrimpRuns.value) {
-    const key = run.blockKey || run.sessionKey || run.id;
-    const existing = groups.get(key);
-    if (!existing) {
-      groups.set(key, {
-        blockKey: key,
-        userKey: run.userKey,
-        sessionKey: run.sessionKey,
-        channel: run.channel,
-        chatId: run.chatId,
-        mainAgentId: run.mainAgentId,
-        status: run.status,
-        startedAt: run.startedAt,
-        updatedAt: run.updatedAt,
-        runs: [run],
-      });
-      continue;
-    }
-    existing.runs.push(run);
-    existing.startedAt = Math.min(existing.startedAt, run.startedAt);
-    existing.updatedAt = Math.max(existing.updatedAt, run.updatedAt);
-    existing.status = run.status === "completed" && existing.status === "completed" ? "completed" : run.status;
-  }
-
-  const sessions = Array.from(groups.values());
-  for (const session of sessions) {
-    session.runs.sort((a, b) => a.startedAt - b.startedAt);
-  }
-  sessions.sort((a, b) => b.updatedAt - a.updatedAt);
-  return sessions;
-});
-const shrimpBrainGeneratedAtLabel = computed(() => {
-  if (!shrimpBrain.value?.generatedAt) {
-    return "";
-  }
-  return new Date(shrimpBrain.value.generatedAt).toLocaleString("zh-CN");
-});
-const selectedShrimpSession = computed(() => {
-  const sessions = shrimpSessions.value;
-  if (!sessions.length) {
-    return null;
-  }
-  return sessions.find((session) => session.blockKey === selectedShrimpSessionKey.value) ?? sessions[0];
-});
 const gatewayControl = computed(() => controlDraft.value?.gateway ?? null);
 const controlChannels = computed(() => controlDraft.value?.channels ?? []);
 const controlBindings = computed(() => controlDraft.value?.bindings ?? []);
@@ -295,9 +249,8 @@ async function loadSnapshot(options: { silent?: boolean } = {}) {
 
   try {
     snapshot.value = await fetchDashboardSnapshot();
-    if (!shrimpBrain.value && snapshot.value?.shrimpBrain) {
-      shrimpBrain.value = snapshot.value.shrimpBrain;
-      syncSelectedShrimpRun();
+    if (activePage.value === "shrimpBrain") {
+      setShrimpFromSnapshot(snapshot.value?.shrimpBrain ?? null);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "failed to load dashboard";
@@ -306,60 +259,6 @@ async function loadSnapshot(options: { silent?: boolean } = {}) {
     if (!silent || !snapshot.value) {
       loading.value = false;
     }
-  }
-}
-
-function syncSelectedShrimpRun() {
-  const sessions = shrimpSessions.value;
-  if (!sessions.length) {
-    selectedShrimpSessionKey.value = "";
-    return;
-  }
-  if (!selectedShrimpSessionKey.value || !sessions.some((session) => session.blockKey === selectedShrimpSessionKey.value)) {
-    selectedShrimpSessionKey.value = sessions[0].blockKey;
-  }
-}
-
-async function loadShrimpBrain(options: { silent?: boolean } = {}) {
-  const silent = options.silent === true;
-  if (!silent || !shrimpBrain.value) {
-    shrimpBrainLoading.value = true;
-  }
-  if (!silent) {
-    shrimpBrainError.value = "";
-  }
-
-  try {
-    shrimpBrain.value = await fetchShrimpBrainSnapshot();
-    syncSelectedShrimpRun();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "failed to load shrimp brain";
-    shrimpBrainError.value = message;
-  } finally {
-    if (!silent || !shrimpBrain.value) {
-      shrimpBrainLoading.value = false;
-    }
-  }
-}
-
-async function handleDeleteShrimpRun(runId: string) {
-  if (!runId || deletingShrimpRunId.value) {
-    return;
-  }
-
-  const confirmed = window.confirm("删除后该条虾脑协作记录会从本地持久化中移除，是否继续？");
-  if (!confirmed) {
-    return;
-  }
-
-  deletingShrimpRunId.value = runId;
-  try {
-    await deleteShrimpBrainRun(runId);
-    await loadShrimpBrain({ silent: true });
-  } catch (err) {
-    shrimpBrainError.value = err instanceof Error ? err.message : "failed to delete shrimp brain run";
-  } finally {
-    deletingShrimpRunId.value = "";
   }
 }
 
@@ -384,40 +283,11 @@ async function loadControlState() {
 }
 
 async function handleHeaderAction(_action: string) {
-  await Promise.all([loadSnapshot(), loadShrimpBrain()]);
-}
-
-function connectShrimpBrainStream() {
-  if (shrimpBrainStream) {
-    shrimpBrainStream.close();
-    shrimpBrainStream = null;
-  }
-
-  if (typeof window === "undefined" || typeof window.EventSource === "undefined") {
-    shrimpBrainStreamState.value = "unsupported";
+  if (shrimpBrainStreamState.value !== "live") {
+    await Promise.all([loadSnapshot(), loadShrimpBrain()]);
     return;
   }
-
-  shrimpBrainStreamState.value = "connecting";
-  shrimpBrainStream = new EventSource("/api/shrimp-brain/stream");
-
-  shrimpBrainStream.onopen = () => {
-    shrimpBrainStreamState.value = "live";
-  };
-
-  shrimpBrainStream.onmessage = (event) => {
-    try {
-      shrimpBrain.value = JSON.parse(event.data) as ShrimpBrainSnapshot;
-      shrimpBrainError.value = "";
-      syncSelectedShrimpRun();
-    } catch (err) {
-      shrimpBrainError.value = err instanceof Error ? err.message : "failed to parse shrimp brain event";
-    }
-  };
-
-  shrimpBrainStream.onerror = () => {
-    shrimpBrainStreamState.value = "reconnecting";
-  };
+  await loadSnapshot();
 }
 
 function handleWindowPointerDown() {
@@ -461,219 +331,6 @@ function shrimpStateLabel(value: string) {
       return value || "Idle";
   }
 }
-
-function shrimpStatusBucket(status: string) {
-  switch (status.trim().toLowerCase()) {
-    case "completed":
-    case "ok":
-      return "completed";
-    case "live":
-    case "connecting":
-    case "reconnecting":
-    case "running":
-    case "assigned":
-    case "planning":
-    case "ready":
-      return "running";
-    case "failed":
-    case "error":
-    case "timeout":
-      return "failed";
-    default:
-      return "pending";
-  }
-}
-
-function shrimpStatusBadgeClass(status: string) {
-  return `shrimp-status-badge is-${shrimpStatusBucket(status)}`;
-}
-
-function isFailureStatus(status: string) {
-  return shrimpStatusBucket(status) === "failed";
-}
-
-function formatShrimpTimeShort(timestamp?: number) {
-  if (!timestamp) return "";
-  const d = new Date(timestamp);
-  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
-}
-
-function formatShrimpTime(timestamp?: number) {
-  if (!timestamp) {
-    return "";
-  }
-  return new Date(timestamp).toLocaleString("zh-CN");
-}
-
-const SHRIMP_REPLY_COLLAPSE_LINES = 8;
-const SHRIMP_REPLY_COLLAPSE_THRESHOLD = 240;
-
-function shouldShowShrimpReplyToggle(reply?: string) {
-  const content = reply?.trim() ?? "";
-  if (!content) {
-    return false;
-  }
-  const lineCount = content.split(/\r?\n/).length;
-  return lineCount > SHRIMP_REPLY_COLLAPSE_LINES || content.length > SHRIMP_REPLY_COLLAPSE_THRESHOLD;
-}
-
-function isShrimpReplyExpanded(runId: string) {
-  return Boolean(expandedShrimpReplies.value[runId]);
-}
-
-function toggleShrimpReply(runId: string) {
-  expandedShrimpReplies.value = {
-    ...expandedShrimpReplies.value,
-    [runId]: !expandedShrimpReplies.value[runId],
-  };
-}
-
-function isShrimpTurnExpanded(runId: string) {
-  const explicit = expandedShrimpTurns.value[runId];
-  if (typeof explicit === "boolean") {
-    return explicit;
-  }
-  const runs = selectedShrimpSession.value?.runs ?? [];
-  return runs.length > 0 && runs[runs.length - 1]?.id === runId;
-}
-
-function toggleShrimpTurn(runId: string) {
-  expandedShrimpTurns.value = {
-    ...expandedShrimpTurns.value,
-    [runId]: !expandedShrimpTurns.value[runId],
-  };
-}
-
-function isNearShrimpEventStreamBottom() {
-  const container = shrimpEventStreamRef.value;
-  if (!container) {
-    return true;
-  }
-  return container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
-}
-
-function setShrimpFollowNotice(message: string, duration = 2200) {
-  shrimpFollowNotice.value = message;
-  if (shrimpFollowNoticeTimer) {
-    window.clearTimeout(shrimpFollowNoticeTimer);
-  }
-  if (!message) {
-    return;
-  }
-  shrimpFollowNoticeTimer = window.setTimeout(() => {
-    shrimpFollowNotice.value = "";
-  }, duration);
-}
-
-function shrimpFollowStatusLabel() {
-  if (shrimpPendingUpdateCount.value > 0 && !isShrimpAutoFollowEnabled.value) {
-    return `已暂停自动跟随 · 有 ${shrimpPendingUpdateCount.value} 条新内容`;
-  }
-  return isShrimpAutoFollowEnabled.value ? "自动跟随中" : "已暂停自动跟随";
-}
-
-function scrollShrimpEventStreamToBottom(force = false) {
-  const container = shrimpEventStreamRef.value;
-  if (!container) {
-    return;
-  }
-  if (!force && !isShrimpAutoFollowEnabled.value) {
-    return;
-  }
-  container.scrollTop = container.scrollHeight;
-}
-
-function handleShrimpEventStreamScroll() {
-  const isAtBottom = isNearShrimpEventStreamBottom();
-  showShrimpFollowButton.value = !isAtBottom || shrimpPendingUpdateCount.value > 0;
-  if (isAtBottom) {
-    if (!isShrimpAutoFollowEnabled.value) {
-      setShrimpFollowNotice("已回到底部，恢复自动跟随");
-    }
-    isShrimpAutoFollowEnabled.value = true;
-    shrimpPendingUpdateCount.value = 0;
-    return;
-  }
-  if (shrimpEventStreamRef.value && isShrimpAutoFollowEnabled.value) {
-    setShrimpFollowNotice("你已离开底部，自动跟随已暂停");
-  }
-  if (shrimpEventStreamRef.value) {
-    isShrimpAutoFollowEnabled.value = false;
-  }
-}
-
-function restoreShrimpAutoFollow() {
-  isShrimpAutoFollowEnabled.value = true;
-  shrimpPendingUpdateCount.value = 0;
-  showShrimpFollowButton.value = false;
-  setShrimpFollowNotice("已恢复自动跟随");
-  void nextTick(() => {
-    scrollShrimpEventStreamToBottom(true);
-  });
-}
-
-function truncateShrimpText(value: string | undefined, limit = 20) {
-  const compact = value?.trim() ?? "";
-  if (!compact) {
-    return "-";
-  }
-  const chars = Array.from(compact);
-  if (chars.length <= limit) {
-    return compact;
-  }
-  return `${chars.slice(0, limit).join("")}...`;
-}
-
-function shrimpTurnTitle(index: number) {
-  return `Turn ${index + 1}`;
-}
-
-watch(selectedShrimpSessionKey, async () => {
-  isShrimpAutoFollowEnabled.value = true;
-  showShrimpFollowButton.value = false;
-  shrimpPendingUpdateCount.value = 0;
-  shrimpFollowNotice.value = "";
-  await nextTick();
-  scrollShrimpEventStreamToBottom(true);
-});
-
-watch(
-  () => selectedShrimpSession.value?.runs.map((run) => `${run.id}:${run.updatedAt ?? run.startedAt ?? 0}`).join("|") ?? "",
-  async (signature) => {
-    const runs = selectedShrimpSession.value?.runs ?? [];
-    const latestRunId = runs[runs.length - 1]?.id;
-    if (latestRunId) {
-      expandedShrimpTurns.value = Object.fromEntries(runs.slice(0, -1).map((run) => [run.id, false]));
-      expandedShrimpTurns.value[latestRunId] = true;
-    } else {
-      expandedShrimpTurns.value = {};
-    }
-
-    const previousSignature = lastShrimpRunsSignature;
-    const hadPreviousSnapshot = previousSignature !== "";
-    const signatureChanged = previousSignature !== signature;
-    lastShrimpRunsSignature = signature;
-
-    await nextTick();
-
-    if (signatureChanged && hadPreviousSnapshot && !isShrimpAutoFollowEnabled.value) {
-      shrimpPendingUpdateCount.value += 1;
-      showShrimpFollowButton.value = true;
-      setShrimpFollowNotice(`有 ${shrimpPendingUpdateCount.value} 条新内容，点击可恢复跟随`, 3200);
-      return;
-    }
-
-    if (isShrimpAutoFollowEnabled.value) {
-      shrimpPendingUpdateCount.value = 0;
-      scrollShrimpEventStreamToBottom();
-      showShrimpFollowButton.value = !isNearShrimpEventStreamBottom();
-      return;
-    }
-
-    showShrimpFollowButton.value = !isNearShrimpEventStreamBottom() || shrimpPendingUpdateCount.value > 0;
-  },
-  { immediate: true },
-);
 
 function shrimpSessionPreview(session: ShrimpSessionGroup) {
   return truncateShrimpText(session.runs[0]?.userRequest, 20);
@@ -993,10 +650,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("focusin", handleWindowFocusIn, true);
   window.removeEventListener("focusout", handleWindowFocusOut, true);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
-  if (shrimpBrainStream) {
-    shrimpBrainStream.close();
-    shrimpBrainStream = null;
-  }
+  closeShrimpBrainStream();
 });
 </script>
 
@@ -1051,40 +705,47 @@ onBeforeUnmount(() => {
     <main class="main-panel">
       <div class="main-body" :class="{ 'main-body-shrimp': activePage === 'shrimpBrain' }">
         <header class="page-header" :class="{ 'page-header-tight': activePage === 'shrimpBrain' }">
-          <div>
-            <h1>{{ currentPage.title }}</h1>
-            <p>{{ currentPage.subtitle }}</p>
-            <button
-              v-if="activePage === 'shrimpBrain'"
-              class="secondary-button shrimp-refresh-stamp"
-              type="button"
-              :disabled="loading || shrimpBrainLoading"
-              @click="handleHeaderAction('Refresh')"
-            >
-              <svg
-                class="shrimp-refresh-icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                aria-hidden="true"
+          <div class="shrimp-header-block">
+            <div class="shrimp-header-copy">
+              <h1>{{ currentPage.title }}</h1>
+              <p>{{ currentPage.subtitle }}</p>
+            </div>
+            <div v-if="activePage === 'shrimpBrain'" class="shrimp-header-controls">
+              <div class="shrimp-header-meta-row">
+                <small v-if="generatedAtLabel" class="page-meta shrimp-page-meta">Last updated {{ generatedAtLabel }}</small>
+                <span class="shrimp-stream-pill" :class="`is-${shrimpBrainStreamState}`">{{ shrimpStreamStateText }}</span>
+              </div>
+              <button
+                class="secondary-button shrimp-refresh-stamp"
+                type="button"
+                :disabled="loading || shrimpBrainLoading"
+                @click="handleHeaderAction('Refresh')"
               >
-                <path
-                  d="M20 4v6h-6"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-                <path
-                  d="M20 10a8 8 0 1 0 2 5.3"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-              <span>{{ generatedAtLabel ? `Last updated ${generatedAtLabel}` : "Refresh snapshot" }}</span>
-            </button>
+                <svg
+                  class="shrimp-refresh-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M20 4v6h-6"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M20 10a8 8 0 1 0 2 5.3"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+                <span>{{ generatedAtLabel ? `Refresh snapshot` : "Refresh snapshot" }}</span>
+              </button>
+            </div>
             <small v-else-if="generatedAtLabel" class="page-meta">Last updated {{ generatedAtLabel }}</small>
           </div>
 
@@ -1183,8 +844,9 @@ onBeforeUnmount(() => {
                     :key="session.blockKey"
                     class="shrimp-queue-card"
                     :class="{ active: selectedShrimpSession?.blockKey === session.blockKey }"
+                    :title="shrimpSessionPathFull(session)"
                     type="button"
-                    @click="selectedShrimpSessionKey = session.blockKey"
+                    @click="selectShrimpSession(session.blockKey)"
                   >
                     <div class="shrimp-queue-card-head">
                       <div class="shrimp-queue-agent-block">
@@ -1232,6 +894,29 @@ onBeforeUnmount(() => {
                 title="会话全链路"
               >
                 <div class="section-stack shrimp-section-stack">
+                  <div class="shrimp-session-inline shrimp-session-inline-top">
+                    <div class="shrimp-session-select-wrap">
+                      <div class="shrimp-session-select-head">
+                        <label class="shrimp-session-select-label" for="shrimp-session-select">当前会话</label>
+                        <small class="helper-text">{{ selectedShrimpSessionLabel }}</small>
+                      </div>
+                      <select
+                        id="shrimp-session-select"
+                        class="shrimp-session-select"
+                        :value="selectedShrimpSession?.blockKey"
+                        @change="selectShrimpSession(($event.target as HTMLSelectElement).value)"
+                      >
+                        <option
+                          v-for="session in shrimpSessions"
+                          :key="`select-${session.blockKey}`"
+                          :value="session.blockKey"
+                        >
+                          {{ `${session.mainAgentId || 'main'} · ${session.channel || 'cli'} · ${formatShrimpTimeShort(session.updatedAt)}` }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+
                   <div class="shrimp-session-inline">
                     <div class="shrimp-summary-card">
                       <span>主 Agent</span>
@@ -1266,6 +951,14 @@ onBeforeUnmount(() => {
                       <span class="shrimp-follow-status-dot" />
                       <strong>{{ shrimpFollowStatusLabel() }}</strong>
                       <span v-if="shrimpFollowNotice" class="shrimp-follow-notice">{{ shrimpFollowNotice }}</span>
+                      <button
+                        v-if="showShrimpFollowButton"
+                        class="secondary-button shrimp-follow-floating-button"
+                        type="button"
+                        @click="restoreShrimpAutoFollow"
+                      >
+                        {{ shrimpAutoFollowButtonText }}
+                      </button>
                     </div>
                     <div
                       ref="shrimpEventStreamRef"
@@ -1292,9 +985,10 @@ onBeforeUnmount(() => {
                                 class="danger-button shrimp-delete-button"
                                 type="button"
                                 :disabled="deletingShrimpRunId === run.id"
+                                :title="`删除 ${shrimpTurnTitle(runIndex)} 记录`"
                                 @click="handleDeleteShrimpRun(run.id)"
                               >
-                                {{ deletingShrimpRunId === run.id ? "Deleting..." : "删除此轮" }}
+                                {{ deletingShrimpRunId === run.id ? "Deleting..." : "删除" }}
                               </button>
                             </div>
                           </div>
@@ -1422,22 +1116,14 @@ onBeforeUnmount(() => {
                         v-if="runIndex < selectedShrimpSession.runs.length - 1"
                         class="shrimp-transition-card"
                       >
-                        <strong>中止等待用户确认</strong>
+                        <strong>已暂停，等待用户确认</strong>
                         <p>
-                          下一轮用户继续输入：
+                          待用户继续输入后，将进入下一轮：
                           {{ selectedShrimpSession.runs[runIndex + 1]?.userRequest }}
                         </p>
                       </div>
                       </template>
                     </div>
-                    <button
-                      v-if="showShrimpFollowButton"
-                      class="shrimp-follow-button"
-                      type="button"
-                      @click="restoreShrimpAutoFollow"
-                    >
-                      {{ shrimpPendingUpdateCount > 0 ? `查看 ${shrimpPendingUpdateCount} 条新内容并恢复跟随` : "回到底部 / 恢复跟随" }}
-                    </button>
                   </div>
                 </div>
               </SectionCard>
@@ -1630,12 +1316,45 @@ onBeforeUnmount(() => {
 }
 
 .page-header-tight {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+}
+
+.shrimp-header-block {
+  display: grid;
+  gap: 10px;
+}
+
+.shrimp-header-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.shrimp-header-copy h1 {
+  margin: 0;
+  font-size: clamp(1.5rem, 1.2rem + 0.9vw, 2rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.shrimp-header-copy p {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.shrimp-header-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  row-gap: 8px;
 }
 
 .shrimp-refresh-stamp {
   gap: 6px;
-  margin-top: 8px;
+  margin-top: 0;
   padding: 7px 10px;
   font-size: 12px;
 }
@@ -1646,8 +1365,62 @@ onBeforeUnmount(() => {
   flex: none;
 }
 
+.shrimp-header-meta-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shrimp-page-meta {
+  color: var(--muted-soft);
+}
+
+.shrimp-stream-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.shrimp-stream-pill.is-live,
+.shrimp-stream-pill.is-running {
+  border-color: rgba(16, 185, 129, 0.28);
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
+.shrimp-stream-pill.is-connecting,
+.shrimp-stream-pill.is-pending {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+
+.shrimp-stream-pill.is-error,
+.shrimp-stream-pill.is-failed {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.shrimp-stream-pill.is-closed,
+.shrimp-stream-pill.is-idle {
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--slate);
+}
+
 .shrimp-page {
-  gap: 10px;
+  gap: 12px;
 }
 
 .shrimp-page .runtime-banner {
@@ -1709,35 +1482,35 @@ onBeforeUnmount(() => {
 /* 会话队列面板优化 */
 .shrimp-queue-panel :deep(.section-head) {
   gap: 8px;
-  padding: 12px 14px 0;
+  padding: 14px 16px 0;
   flex-shrink: 0;
 }
 
 .shrimp-queue-panel :deep(.section-head h3) {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .shrimp-queue-panel :deep(.section-note) {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 /* 会话详情面板优化 */
 .shrimp-detail-panel :deep(.section-head) {
   gap: 8px;
-  padding: 12px 14px 0;
+  padding: 14px 16px 0;
   flex-shrink: 0;
 }
 
 .shrimp-detail-panel :deep(.section-head h3) {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .shrimp-detail-panel :deep(.section-note) {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .shrimp-detail-panel :deep(.section-body) {
-  padding: 12px 14px 14px;
+  padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1752,32 +1525,32 @@ onBeforeUnmount(() => {
 
 .shrimp-panel :deep(.section-head) {
   gap: 8px;
-  padding: 10px 12px 0;
+  padding: 14px 16px 0;
 }
 
 .shrimp-panel :deep(.section-head h3) {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .shrimp-panel :deep(.section-note) {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .shrimp-panel :deep(.section-body) {
-  padding: 10px 12px 12px;
+  padding: 14px 16px 16px;
 }
 
 .shrimp-queue-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .shrimp-queue-card {
   position: relative;
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--panel);
@@ -1813,10 +1586,41 @@ onBeforeUnmount(() => {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
+.shrimp-queue-card:focus-visible,
+.shrimp-session-select:focus-visible,
+.shrimp-turn-toggle:focus-visible,
+.shrimp-collapsible summary:focus-visible,
+.shrimp-inline-details summary:focus-visible,
+.shrimp-follow-floating-button:focus-visible,
+.shrimp-refresh-stamp:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.4);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+.shrimp-queue-card:focus-visible {
+  border-color: rgba(37, 99, 235, 0.32);
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.14),
+    0 10px 24px rgba(15, 23, 42, 0.1);
+}
+
 .shrimp-queue-card.active {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: var(--accent-soft);
-  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
+  border-color: rgba(37, 99, 235, 0.42);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.1), rgba(37, 99, 235, 0.04));
+  box-shadow:
+    0 14px 32px rgba(37, 99, 235, 0.16),
+    inset 0 0 0 1px rgba(37, 99, 235, 0.08);
+}
+
+.shrimp-queue-card.active:hover,
+.shrimp-queue-card.active:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(37, 99, 235, 0.48);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.12), rgba(37, 99, 235, 0.05));
+  box-shadow:
+    0 16px 36px rgba(37, 99, 235, 0.18),
+    inset 0 0 0 1px rgba(37, 99, 235, 0.1);
 }
 
 .shrimp-queue-card.active::before {
@@ -1886,7 +1690,56 @@ onBeforeUnmount(() => {
 }
 
 .shrimp-section-stack {
+  gap: 12px;
+}
+
+.shrimp-session-inline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shrimp-session-inline-top {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.shrimp-session-select-wrap {
+  display: grid;
   gap: 8px;
+  min-width: 0;
+}
+
+.shrimp-session-select-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.shrimp-session-select-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.shrimp-session-select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.shrimp-session-select-wrap .helper-text {
+  display: block;
+  margin-top: 0;
+  color: var(--muted-soft);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .shrimp-turn-list-wrap {
@@ -1905,35 +1758,36 @@ onBeforeUnmount(() => {
 .shrimp-tool-row,
 .shrimp-event-card {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--panel);
 }
 
 .shrimp-summary-card {
-  padding: 10px 12px;
+  padding: 12px 14px;
 }
 
 .shrimp-summary-card > span {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
   color: var(--muted);
   font-size: 11px;
 }
 
 .shrimp-summary-card strong {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .shrimp-turn-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .shrimp-turn-card {
   position: relative;
   display: grid;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 12px 14px;
   background: var(--panel);
 }
 
@@ -1964,13 +1818,15 @@ onBeforeUnmount(() => {
 }
 
 .shrimp-turn-meta strong {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .shrimp-turn-time,
 .shrimp-secondary-meta {
   color: var(--muted-soft);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.45;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2012,35 +1868,37 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin-bottom: 8px;
   padding: 8px 10px;
-  border: 1px solid rgba(37, 99, 235, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 10px;
-  background: rgba(37, 99, 235, 0.06);
-  color: var(--text);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.96) 0%, rgba(241, 245, 249, 0.9) 100%);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.08);
+  color: #475569;
   font-size: 11px;
 }
 
 .shrimp-follow-status-bar.paused {
-  border-color: rgba(245, 158, 11, 0.22);
-  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(161, 98, 7, 0.14);
+  background: linear-gradient(180deg, rgba(250, 248, 244, 0.96) 0%, rgba(245, 240, 231, 0.88) 100%);
+  box-shadow: inset 0 0 0 1px rgba(161, 98, 7, 0.06);
 }
 
 .shrimp-follow-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--emerald);
-  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.12);
+  background: #64748b;
+  box-shadow: 0 0 0 4px rgba(148, 163, 184, 0.12);
   flex: none;
 }
 
 .shrimp-follow-status-bar.paused .shrimp-follow-status-dot {
-  background: var(--amber);
-  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.14);
+  background: #a16207;
+  box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.1);
 }
 
 .shrimp-follow-notice {
   margin-left: auto;
-  color: var(--muted);
+  color: #64748b;
 }
 
 .shrimp-turn-actions {
@@ -2080,23 +1938,23 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.shrimp-follow-button {
+.shrimp-follow-floating-button {
   position: absolute;
   right: 12px;
   bottom: 12px;
   z-index: 2;
-  border: 1px solid rgba(37, 99, 235, 0.28);
+  border: 1px solid rgba(148, 163, 184, 0.24);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #fff;
+  background: rgba(248, 250, 252, 0.92);
+  color: #475569;
   padding: 8px 12px;
   font-size: 12px;
   font-weight: 700;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
+  box-shadow: 0 8px 18px rgba(148, 163, 184, 0.16);
 }
 
-.shrimp-follow-button:hover {
-  background: rgba(30, 41, 59, 0.96);
+.shrimp-follow-floating-button:hover {
+  background: rgba(241, 245, 249, 0.98);
 }
 
 .shrimp-reply-block {
@@ -2107,22 +1965,24 @@ onBeforeUnmount(() => {
 .shrimp-reply-block pre,
 .shrimp-collapsible pre,
 .shrimp-inline-details pre {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
+  overflow-x: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
-  line-height: 1.45;
-  font-size: 11px;
+  line-height: 1.6;
+  font-size: 12px;
   color: var(--text);
 }
 
 .shrimp-collapsible,
 .shrimp-inline-details {
-  padding: 0 10px;
+  padding: 0 12px;
 }
 
 .shrimp-collapsible[open],
 .shrimp-inline-details[open] {
-  padding-bottom: 10px;
+  padding-bottom: 12px;
 }
 
 .shrimp-collapsible summary,
@@ -2130,11 +1990,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
+  min-height: 36px;
   cursor: pointer;
   list-style: none;
   color: var(--text);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -2161,22 +2021,25 @@ onBeforeUnmount(() => {
 }
 
 .shrimp-inline-body {
-  padding-top: 2px;
+  padding-top: 4px;
 }
 
 .shrimp-inline-body code {
   display: block;
+  overflow-x: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .shrimp-collapsible .helper-text,
 .shrimp-inline-details .helper-text {
   display: block;
-  margin-top: 2px;
-  font-size: 10px;
+  margin-top: 4px;
+  font-size: 11px;
 }
 
 .shrimp-chip-row {
@@ -2265,19 +2128,21 @@ onBeforeUnmount(() => {
 
 .shrimp-transition-card {
   padding: 10px 12px;
-  border-left: 3px solid var(--amber);
-  border-radius: 0 10px 10px 0;
-  background: var(--amber-soft);
+  border-left: 3px solid rgba(148, 163, 184, 0.32);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(241, 245, 249, 0.92) 100%);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.1);
 }
 
 .shrimp-transition-card strong {
   display: block;
   font-size: 12px;
+  color: #475569;
 }
 
 .shrimp-transition-card p {
   margin: 4px 0 0;
-  color: var(--muted);
+  color: #64748b;
   line-height: 1.45;
   font-size: 11px;
 }
@@ -2286,33 +2151,38 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 18px;
-  padding: 0 7px;
+  min-height: 20px;
+  padding: 0 8px;
   border-radius: 999px;
-  font-size: 10px;
+  border: 1px solid transparent;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
 }
 
 .shrimp-status-badge.is-completed {
-  color: var(--emerald);
-  background: var(--emerald-soft);
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.22);
+  background: rgba(16, 185, 129, 0.12);
 }
 
 .shrimp-status-badge.is-running {
-  color: var(--sky);
-  background: var(--sky-soft);
+  color: #0369a1;
+  border-color: rgba(14, 165, 233, 0.22);
+  background: rgba(14, 165, 233, 0.12);
 }
 
 .shrimp-status-badge.is-failed {
-  color: #dc2626;
-  background: #fee2e2;
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.24);
+  background: rgba(239, 68, 68, 0.12);
 }
 
 .shrimp-status-badge.is-pending {
-  color: var(--slate);
-  background: var(--slate-soft);
+  color: #475569;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(148, 163, 184, 0.14);
 }
 
 @media (max-width: 1400px) {
@@ -2346,6 +2216,20 @@ onBeforeUnmount(() => {
     padding: 14px 14px 16px;
   }
 
+  .shrimp-header-controls {
+    width: 100%;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+
+  .shrimp-header-meta-row {
+    width: 100%;
+  }
+
+  .shrimp-refresh-stamp {
+    align-self: flex-start;
+  }
+
   .shrimp-session-inline {
     grid-template-columns: 1fr;
   }
@@ -2367,6 +2251,26 @@ onBeforeUnmount(() => {
 
   .shrimp-panel :deep(.section-head) {
     flex-direction: column;
+  }
+
+  .shrimp-header-controls,
+  .shrimp-session-select-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .shrimp-header-controls {
+    gap: 8px;
+  }
+
+  .shrimp-header-meta-row,
+  .shrimp-refresh-stamp,
+  .shrimp-session-select-wrap {
+    width: 100%;
+  }
+
+  .shrimp-refresh-stamp {
+    justify-content: center;
   }
 
   .shrimp-queue-cards {

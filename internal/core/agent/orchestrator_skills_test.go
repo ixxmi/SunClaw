@@ -66,7 +66,7 @@ func TestStreamAssistantResponse_AppendsSkillSummaryToCustomPrompt(t *testing.T)
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
 		"Custom orchestrator prompt",
-		"## Skills (mandatory)",
+		"# Skills (mandatory)",
 		"<skill name=\"weather\">",
 		"Use when the user asks about weather or forecast.",
 	}
@@ -115,7 +115,7 @@ func TestStreamAssistantResponse_AppendsSelectedSkillContentToCustomPrompt(t *te
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
 		"Custom orchestrator prompt",
-		"## Selected Skills (active)",
+		"# Selected Skills (active)",
 		"# Weather",
 		"Detailed instructions.",
 	}
@@ -124,7 +124,7 @@ func TestStreamAssistantResponse_AppendsSelectedSkillContentToCustomPrompt(t *te
 			t.Fatalf("system prompt missing %q", want)
 		}
 	}
-	if strings.Contains(systemPrompt, "## Skills (mandatory)") {
+	if strings.Contains(systemPrompt, "# Skills (mandatory)") {
 		t.Fatalf("selected skill phase should not include summary section")
 	}
 }
@@ -175,26 +175,24 @@ func TestStreamAssistantResponse_AppendsBootstrapToCustomPrompt(t *testing.T) {
 	}
 
 	systemPrompt := provider.messages[0].Content
-	if !strings.Contains(systemPrompt, "# Personality") {
-		t.Fatalf("expected cognition layer in system prompt, got %q", systemPrompt)
-	}
 	if !strings.Contains(systemPrompt, "Custom orchestrator prompt") {
 		t.Fatalf("expected custom orchestrator prompt in system prompt, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "### BOOTSTRAP.md") {
-		t.Fatalf("expected BOOTSTRAP.md marker in system prompt, got %q", systemPrompt)
+	for _, marker := range []string{
+		"### AGENTS.md",
+		"### AGENT.md",
+		"### SOUL.md",
+		"vibecoding bootstrap soul",
+		strings.TrimSpace(agentsTemplate),
+	} {
+		if !strings.Contains(systemPrompt, marker) {
+			t.Fatalf("expected %q in system prompt, got %q", marker, systemPrompt)
+		}
 	}
-	if !strings.Contains(systemPrompt, "## Soul") {
-		t.Fatalf("expected shifted soul heading in system prompt, got %q", systemPrompt)
-	}
-	if !strings.Contains(systemPrompt, "vibecoding bootstrap soul") {
-		t.Fatalf("expected bootstrap content in system prompt, got %q", systemPrompt)
-	}
-	if !strings.Contains(systemPrompt, "# Collaboration Rules") {
-		t.Fatalf("expected collaboration rules wrapper in system prompt, got %q", systemPrompt)
-	}
-	if !strings.Contains(systemPrompt, strings.TrimSpace(agentsTemplate)) {
-		t.Fatalf("expected raw AGENTS.md content in system prompt, got %q", systemPrompt)
+	for _, marker := range []string{"### BOOTSTRAP.md", "# Personality", "# Collaboration Rules"} {
+		if strings.Contains(systemPrompt, marker) {
+			t.Fatalf("did not expect legacy cognition/bootstrap marker %q, got %q", marker, systemPrompt)
+		}
 	}
 }
 
@@ -247,30 +245,35 @@ func TestStreamAssistantResponse_AppendsBootstrapAfterTemplateAgents(t *testing.
 
 	systemPrompt := provider.messages[0].Content
 	checks := []string{
-		"### BOOTSTRAP.md",
-		"# Identity",
-		"# Collaboration Rules",
-		"# User Context",
-		"# Personality",
-		"BOOTSTRAP.md - Hello, World",
+		"### IDENTITY.md",
+		"### AGENTS.md",
+		"### AGENT.md",
+		"### SOUL.md",
+		"### USER.md",
 	}
 	for _, want := range checks {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("system prompt missing %q, got %q", want, systemPrompt)
 		}
 	}
-	if strings.Contains(systemPrompt, "## Bootstrap Mode") {
-		t.Fatalf("did not expect legacy bootstrap mode notice, got %q", systemPrompt)
+	for _, marker := range []string{"### BOOTSTRAP.md", "BOOTSTRAP.md - Hello, World", "## Bootstrap Mode"} {
+		if strings.Contains(systemPrompt, marker) {
+			t.Fatalf("did not expect bootstrap marker %q, got %q", marker, systemPrompt)
+		}
 	}
 
-	bootstrapIdx := strings.Index(systemPrompt, "### BOOTSTRAP.md")
+	identityFileIdx := strings.Index(systemPrompt, "### IDENTITY.md")
+	workspaceIdx := strings.Index(systemPrompt, "## Workspace")
+	agentsFileIdx := strings.Index(systemPrompt, "### AGENTS.md")
 	coreIdx := strings.Index(systemPrompt, "你是 SunClaw 的 vibecoding 主编排 Agent。")
-	identityIdx := strings.Index(systemPrompt, "# Identity")
-	agentsIdx := strings.Index(systemPrompt, "# Collaboration Rules")
-	userIdx := strings.Index(systemPrompt, "# User Context")
-	personalityIdx := strings.Index(systemPrompt, "# Personality")
-	if !(bootstrapIdx < coreIdx && coreIdx < identityIdx && identityIdx < agentsIdx && agentsIdx < userIdx && userIdx < personalityIdx) {
-		t.Fatalf("expected BOOTSTRAP.md -> core -> IDENTITY.md -> AGENTS.md -> USER.md -> PERSONALITY order, got %q", systemPrompt)
+	soulFileIdx := strings.Index(systemPrompt, "### SOUL.md")
+	userFileIdx := strings.Index(systemPrompt, "### USER.md")
+	if !(identityFileIdx < workspaceIdx &&
+		workspaceIdx < agentsFileIdx &&
+		agentsFileIdx < coreIdx &&
+		coreIdx < soulFileIdx &&
+		soulFileIdx < userFileIdx) {
+		t.Fatalf("expected IDENTITY.md -> Workspace -> AGENTS.md -> core -> SOUL.md -> USER.md order, got %q", systemPrompt)
 	}
 }
 
@@ -323,21 +326,24 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		t.Fatalf("expected subagent descriptor in system prompt, got %q", systemPrompt)
 	}
 	for _, marker := range []string{
-		"## Skills (mandatory)",
-		"## Selected Skills (active)",
+		"# Skills (mandatory)",
+		"# Selected Skills (active)",
 		"## Bootstrap Mode",
 		"BOOTSTRAP.md - Hello, World",
+		"### IDENTITY.md",
+		"### SOUL.md",
+		"### USER.md",
 	} {
 		if strings.Contains(systemPrompt, marker) {
 			t.Fatalf("did not expect %q in subagent system prompt, got %q", marker, systemPrompt)
 		}
 	}
-	if strings.Contains(systemPrompt, "# Cognition Snapshot") {
-		t.Fatalf("did not expect cognition snapshot without subagent cognition files, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "# Subagent Runtime Context") {
+		t.Fatalf("expected subagent runtime context in system prompt, got %q", systemPrompt)
 	}
 }
 
-func TestStreamAssistantResponse_SubagentIncludesCognitionSnapshotWhenAvailable(t *testing.T) {
+func TestStreamAssistantResponse_SubagentDoesNotIncludeIdentitySoulUserEvenWhenAvailable(t *testing.T) {
 	workspaceDir := t.TempDir()
 	ownerBootstrapDir := filepath.Join(t.TempDir(), "agents", "vibecoding", "bootstrap")
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
@@ -390,18 +396,26 @@ func TestStreamAssistantResponse_SubagentIncludesCognitionSnapshotWhenAvailable(
 
 	systemPrompt := provider.messages[0].Content
 	for _, marker := range []string{
-		"# Cognition Snapshot",
-		"## Identity",
-		"## Collaboration Rules",
-		"## User Context",
-		"## Personality",
-		"### Identity",
-		"# AGENTS",
-		"### User",
-		"### Soul",
+		"# Subagent Runtime Context",
+		"# Runtime Context",
 	} {
 		if !strings.Contains(systemPrompt, marker) {
-			t.Fatalf("expected %q in subagent cognition snapshot, got %q", marker, systemPrompt)
+			t.Fatalf("expected %q in subagent runtime context, got %q", marker, systemPrompt)
+		}
+	}
+	for _, marker := range []string{
+		"# Cognition Snapshot",
+		"# AGENTS",
+		"subagent collaboration rules",
+		"### IDENTITY.md",
+		"subagent identity",
+		"### USER.md",
+		"user preference",
+		"### SOUL.md",
+		"subagent personality",
+	} {
+		if strings.Contains(systemPrompt, marker) {
+			t.Fatalf("did not expect legacy subagent cognition marker %q, got %q", marker, systemPrompt)
 		}
 	}
 }

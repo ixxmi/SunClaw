@@ -518,30 +518,6 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	state.IsStreaming = true
 	defer func() { state.IsStreaming = false }()
 
-	// Apply context transform if configured
-	messages := state.Messages
-	if o.config.TransformContext != nil {
-		transformed, err := o.config.TransformContext(messages)
-		if err == nil {
-			messages = transformed
-		} else {
-			logger.Warn("Context transform failed, using original", zap.Error(err))
-		}
-	}
-
-	// Convert to provider messages
-	var providerMsgs []providers.Message
-	if o.config.ConvertToLLM != nil {
-		converted, err := o.config.ConvertToLLM(messages)
-		if err != nil {
-			return AgentMessage{}, fmt.Errorf("convert to LLM failed: %w", err)
-		}
-		providerMsgs = converted
-	} else {
-		// Default conversion
-		providerMsgs = convertToProviderMessages(messages)
-	}
-
 	// Prepare tool definitions
 	toolDefs := convertToToolDefinitions(state.Tools)
 
@@ -549,64 +525,99 @@ func (o *Orchestrator) streamAssistantResponse(ctx context.Context, state *Agent
 	o.emit(NewEvent(EventMessageStart))
 
 	fullMessages := []providers.Message{}
-	systemPrompt := ""
-	if o.config.ContextBuilder != nil {
-		assemblyMode := PromptAssemblyModeMain
-		promptMode := PromptModeFull
-		if state.IsSubagent {
-			assemblyMode = PromptAssemblyModeSubagent
-			promptMode = PromptModeMinimal
+	for rebuildAttempt := 0; ; rebuildAttempt++ {
+		// Apply context transform if configured
+		messages := state.Messages
+		if o.config.TransformContext != nil {
+			transformed, err := o.config.TransformContext(messages)
+			if err == nil {
+				messages = transformed
+			} else {
+				logger.Warn("Context transform failed, using original", zap.Error(err))
+			}
 		}
-		assembled := o.config.ContextBuilder.AssemblePrompt(&PromptAssemblyParams{
-			Mode:                  assemblyMode,
-			PromptMode:            promptMode,
-			AgentCorePrompt:       state.SystemPrompt,
-			BootstrapOwnerID:      state.BootstrapOwnerID,
-			WorkspaceRoot:         state.WorkspaceRoot,
-			SpawnableAgentCatalog: state.SpawnableAgentCatalog,
-			SubagentDescriptor:    state.SubagentDescriptor,
-			Skills:                o.config.Skills,
-			LoadedSkills:          state.LoadedSkills,
-			DisableSkillsPrompt:   state.DisableSkillsPrompt,
-			SessionSummary:        state.ContextSummary,
-			Tools:                 state.Tools,
-		})
-		systemPrompt = assembled.SystemPrompt
-		if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" && strings.TrimSpace(systemPrompt) != "" {
-			o.config.ShrimpBrain.RecordPrompt(state.SessionKey, state.AgentID, state.IsSubagent, systemPrompt, assembled.Layers)
+
+		// Convert to provider messages
+		var providerMsgs []providers.Message
+		if o.config.ConvertToLLM != nil {
+			converted, err := o.config.ConvertToLLM(messages)
+			if err != nil {
+				return AgentMessage{}, fmt.Errorf("convert to LLM failed: %w", err)
+			}
+			providerMsgs = converted
+		} else {
+			// Default conversion
+			providerMsgs = convertToProviderMessages(messages)
 		}
-		logger.Info("System prompt assembled",
-			zap.Int("prompt_length", len(systemPrompt)),
-			zap.Int("layer_count", len(assembled.Layers)),
-			zap.Bool("is_subagent", state.IsSubagent),
-			zap.Int("loaded_skills", len(state.LoadedSkills)))
-	} else if state.SystemPrompt != "" {
-		systemPrompt = state.SystemPrompt
-		logger.Info("System prompt source: state.SystemPrompt",
-			zap.Int("prompt_length", len(systemPrompt)),
-			zap.Bool("is_subagent", state.IsSubagent),
-			zap.Int("loaded_skills", len(state.LoadedSkills)))
-	}
-	if systemPrompt != "" {
-		fullMessages = append(fullMessages, providers.Message{
-			Role:    "system",
-			Content: systemPrompt,
-		})
-	}
-	fullMessages = append(fullMessages, providerMsgs...)
 
-	logger.Info("=== Calling LLM ===",
-		zap.Int("messages_count", len(fullMessages)),
-		zap.Int("tools_count", len(toolDefs)),
-		zap.Bool("has_loaded_skills", len(state.LoadedSkills) > 0))
+		fullMessages = fullMessages[:0]
+		systemPrompt := ""
+		if o.config.ContextBuilder != nil {
+			assemblyMode := PromptAssemblyModeMain
+			promptMode := PromptModeFull
+			if state.IsSubagent {
+				assemblyMode = PromptAssemblyModeSubagent
+				promptMode = PromptModeMinimal
+			}
+			assembled := o.config.ContextBuilder.AssemblePrompt(&PromptAssemblyParams{
+				Mode:                  assemblyMode,
+				PromptMode:            promptMode,
+				AgentCorePrompt:       state.SystemPrompt,
+				BootstrapOwnerID:      state.BootstrapOwnerID,
+				WorkspaceRoot:         state.WorkspaceRoot,
+				SessionKey:            state.SessionKey,
+				SpawnableAgentCatalog: state.SpawnableAgentCatalog,
+				SubagentDescriptor:    state.SubagentDescriptor,
+				Skills:                o.config.Skills,
+				LoadedSkills:          state.LoadedSkills,
+				DisableSkillsPrompt:   state.DisableSkillsPrompt,
+				SessionSummary:        state.ContextSummary,
+				Tools:                 state.Tools,
+			})
+			systemPrompt = assembled.SystemPrompt
+			if o.config.ShrimpBrain != nil && strings.TrimSpace(state.SessionKey) != "" && strings.TrimSpace(systemPrompt) != "" {
+				o.config.ShrimpBrain.RecordPrompt(state.SessionKey, state.AgentID, state.IsSubagent, systemPrompt, assembled.Layers)
+			}
+			logger.Info("System prompt assembled",
+				zap.Int("prompt_length", len(systemPrompt)),
+				zap.Int("layer_count", len(assembled.Layers)),
+				zap.Bool("is_subagent", state.IsSubagent),
+				zap.Int("loaded_skills", len(state.LoadedSkills)))
+		} else if state.SystemPrompt != "" {
+			systemPrompt = state.SystemPrompt
+			logger.Info("System prompt source: state.SystemPrompt",
+				zap.Int("prompt_length", len(systemPrompt)),
+				zap.Bool("is_subagent", state.IsSubagent),
+				zap.Int("loaded_skills", len(state.LoadedSkills)))
+		}
+		if systemPrompt != "" {
+			fullMessages = append(fullMessages, providers.Message{
+				Role:    "system",
+				Content: systemPrompt,
+			})
+		}
+		fullMessages = append(fullMessages, providerMsgs...)
 
-	if isOverContextBudget(o.config.ContextWindow, fullMessages, toolDefs, o.config.MaxTokens) {
-		logger.Warn("Context budget exceeded before LLM call",
+		estimatedTokens := estimateContextUsageTokens(fullMessages, toolDefs, o.config.MaxTokens)
+		logger.Info("=== Calling LLM ===",
 			zap.Int("messages_count", len(fullMessages)),
 			zap.Int("tools_count", len(toolDefs)),
-			zap.Int("context_window", o.config.ContextWindow),
-			zap.Int("max_tokens", o.config.MaxTokens))
-		return AgentMessage{}, errContextOverflow
+			zap.Bool("has_loaded_skills", len(state.LoadedSkills) > 0),
+			zap.Int("estimated_tokens", estimatedTokens))
+
+		if estimatedTokens < o.config.ContextWindow && o.maybeMicroCompact(ctx, state, estimatedTokens) {
+			continue
+		}
+		if o.config.ContextWindow > 0 && estimatedTokens > o.config.ContextWindow {
+			logger.Warn("Context budget exceeded before LLM call",
+				zap.Int("messages_count", len(fullMessages)),
+				zap.Int("tools_count", len(toolDefs)),
+				zap.Int("context_window", o.config.ContextWindow),
+				zap.Int("max_tokens", o.config.MaxTokens),
+				zap.Int("estimated_tokens", estimatedTokens))
+			return AgentMessage{}, errContextOverflow
+		}
+		break
 	}
 
 	// Try streaming if provider supports it

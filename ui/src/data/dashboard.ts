@@ -237,6 +237,19 @@ export interface ShrimpBrainRun {
   events: ShrimpBrainEvent[];
 }
 
+export interface ShrimpSessionGroup {
+  blockKey: string;
+  userKey: string;
+  sessionKey: string;
+  channel: string;
+  chatId: string;
+  mainAgentId: string;
+  status: string;
+  startedAt: number;
+  updatedAt: number;
+  runs: ShrimpBrainRun[];
+}
+
 export interface ShrimpBrainLoopNode {
   id: string;
   iteration: number;

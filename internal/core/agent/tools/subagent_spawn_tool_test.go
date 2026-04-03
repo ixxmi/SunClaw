@@ -302,6 +302,11 @@ func TestSubagentSpawnTool_PassesRuntimeOverridesAndNestedSpawnHint(t *testing.T
 	if !strings.Contains(spawned.ChildSystemPrompt, "继续派发规则") || !strings.Contains(spawned.ChildSystemPrompt, "sessions_spawn") {
 		t.Fatalf("expected nested spawn guidance in child prompt, got %q", spawned.ChildSystemPrompt)
 	}
+	for _, marker := range []string{"`验证`", "## 上下文控制", "不要回传大段文件全文"} {
+		if !strings.Contains(spawned.ChildSystemPrompt, marker) {
+			t.Fatalf("expected child prompt marker %q, got %q", marker, spawned.ChildSystemPrompt)
+		}
+	}
 }
 
 func TestSubagentSpawnTool_TruncatesOversizedDelegationContext(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/logger"
 	"go.uber.org/zap"
 )
@@ -42,6 +43,7 @@ type PromptAssemblyParams struct {
 	SessionSummary        string
 	Tools                 []Tool
 	ToolSummary           string
+	SessionKey            string
 }
 
 // PromptAssemblyResult 是统一装配器的产物。
@@ -106,8 +108,6 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 			assemblyMode = PromptAssemblyModeMain
 		}
 	}
-	isSubagent := assemblyMode == PromptAssemblyModeSubagent
-
 	bundle := b.loadBootstrapBundleForOwner(params.BootstrapOwnerID, params.WorkspaceRoot)
 	layers := make([]PromptLayerSnapshot, 0, 10)
 
@@ -122,28 +122,20 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		})
 	}
 
-	includeBootstrapGuide := !isSubagent && bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != ""
-
-	appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
-
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("agent_core", 50, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
-		appendLayer("subagent_descriptor", 55, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
-		appendLayer("cognition_snapshot", 60, "IDENTITY.md+USER.md+AGENTS.md+SOUL.md", b.buildSubagentCognitionSnapshot(bundle))
+		appendLayer("core_prompt", 10, resolveAgentCoreSource(params.AgentCorePrompt), b.buildSubagentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("subagent_descriptor", 20, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
+		appendLayer("subagent_context", 30, "subagent_context", b.buildSubagentContext(params.SessionSummary, params.WorkspaceRoot, params.SessionKey, mode))
 	default:
-		if includeBootstrapGuide {
-			appendLayer("bootstrap_guide", 20, "BOOTSTRAP.md", wrapPromptFileLayer("## Bootstrap Guide", "BOOTSTRAP.md", bundle.BootstrapGuide))
-		}
-		appendLayer("agent_core", 25, resolveAgentCoreSource(params.AgentCorePrompt), b.resolveAgentCorePrompt(params.AgentCorePrompt, mode))
-		appendLayer("cognition", 30, "IDENTITY.md+USER.md+AGENTS.md+SOUL.md", b.buildCognitionLayer(bundle, true))
-	}
+		appendLayer("identity", 10, "IDENTITY.md", wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
+		appendLayer("workspace", 20, "workspace", b.buildWorkspace(params.WorkspaceRoot))
+		appendLayer("important_rules", 30, "AGENTS.md", wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)))
+		appendLayer("agent_prompt", 40, resolveAgentCoreSource(params.AgentCorePrompt), wrapPromptFileLayer("", "AGENT.md", b.resolveAgentCorePrompt(params.AgentCorePrompt, mode)))
+		appendLayer("soul", 50, "SOUL.md", wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)))
+		appendLayer("user_context", 60, "USER.md", wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)))
 
-	skillsLayer := ""
-	// 子 agent 任何情况下都不拼接技能。
-	// 主 agent 只有在 DisableSkillsPrompt 被显式设置为 true 时才跳过技能拼接；
-	// nil 或 false 都保持默认行为，继续拼接技能上下文。
-	if !isSubagent {
+		skillsLayer := ""
 		skipSkills := params.DisableSkillsPrompt != nil && *params.DisableSkillsPrompt
 		if !skipSkills {
 			skillsLayer = strings.TrimSpace(params.SkillsOverride)
@@ -151,18 +143,16 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 				skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
 			}
 		}
+		appendLayer("skills", 70, "runtime_skills", skillsLayer)
+
+		toolSummary := strings.TrimSpace(params.ToolSummary)
+		if toolSummary == "" {
+			toolSummary = b.BuildToolsSummary(params.Tools)
+		}
+		appendLayer("tools", 80, "runtime_tools", toolSummary)
+		appendLayer("context", 90, "runtime_context", b.buildMainContext(strings.TrimSpace(params.SpawnableAgentCatalog), params.SessionSummary, mode))
+		appendLayer("user_info", 100, "session_identity", b.buildUserInfo(params.SessionKey))
 	}
-	appendLayer("skills", 60, "runtime_skills", skillsLayer)
-	if !isSubagent {
-		appendLayer("spawnable_catalog", 68, "dynamic_catalog", strings.TrimSpace(params.SpawnableAgentCatalog))
-	}
-	toolSummary := strings.TrimSpace(params.ToolSummary)
-	if toolSummary == "" {
-		toolSummary = b.BuildToolsSummary(params.Tools)
-	}
-	appendLayer("tools", 70, "runtime_tools", toolSummary)
-	appendLayer("context_summary", 85, "session_summary", b.buildContextSummary(params.SessionSummary))
-	appendLayer("runtime_context", 90, "runtime_context", b.buildRuntimeContext(mode, params.WorkspaceRoot))
 
 	result := &PromptAssemblyResult{
 		SystemPrompt: renderPromptLayers(layers),
@@ -187,6 +177,91 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	return result
 }
 
+func (b *ContextBuilder) buildSubagentCorePrompt(agentCorePrompt string, mode PromptMode) string {
+	content := strings.TrimSpace(b.resolveAgentCorePrompt(agentCorePrompt, mode))
+	if content == "" {
+		return ""
+	}
+	return "# Core Prompt\n\n" + content
+}
+
+func (b *ContextBuilder) buildMainContext(spawnableAgentCatalog string, sessionSummary string, mode PromptMode) string {
+	parts := []string{
+		buildSpawnableAgentCatalogLayer(strings.TrimSpace(spawnableAgentCatalog)),
+		b.buildContextSummary(sessionSummary),
+		b.buildRuntimeSnapshot(mode),
+	}
+	return joinNonEmpty(parts, "\n\n---\n\n")
+}
+
+func (b *ContextBuilder) buildSubagentContext(
+	sessionSummary string,
+	workspaceRoot string,
+	sessionKey string,
+	mode PromptMode,
+) string {
+	parts := []string{
+		b.buildContextSummary(sessionSummary),
+		b.buildRuntimeContext(mode, workspaceRoot),
+		b.buildUserInfo(sessionKey),
+	}
+	content := joinNonEmpty(parts, "\n\n---\n\n")
+	if content == "" {
+		return ""
+	}
+	return "# Subagent Runtime Context\n\n" + content
+}
+
+func (b *ContextBuilder) buildUserInfo(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+
+	values := parseStructuredSessionKey(sessionKey)
+	identity, _ := namespaces.FromSessionKey(sessionKey)
+
+	lines := []string{}
+	appendLine := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "default" {
+			return
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s", label, value))
+	}
+
+	appendLine("Tenant", identity.TenantID)
+	appendLine("Channel", identity.Channel)
+	appendLine("Account", identity.AccountID)
+	appendLine("Sender", identity.SenderID)
+	appendLine("Chat", values["chat"])
+	appendLine("Thread", values["thread"])
+	appendLine("Agent", values["agent"])
+	appendLine("Subagent", values["subagent"])
+
+	if len(lines) == 0 {
+		lines = append(lines, fmt.Sprintf("- Session Key: %s", sessionKey))
+	}
+
+	return "# User Information\n\n" + strings.Join(lines, "\n")
+}
+
+func parseStructuredSessionKey(sessionKey string) map[string]string {
+	parts := strings.Split(strings.TrimSpace(sessionKey), ":")
+	values := make(map[string]string, len(parts)/2)
+	for i := 0; i+1 < len(parts); i += 2 {
+		key := strings.TrimSpace(parts[i])
+		value := strings.TrimSpace(parts[i+1])
+		switch key {
+		case "tenant", "channel", "account", "sender", "chat", "thread", "agent", "subagent", "session":
+			values[key] = value
+		default:
+			i = len(parts)
+		}
+	}
+	return values
+}
+
 func (b *ContextBuilder) buildCognitionLayer(bundle bootstrapBundle, includeAgents bool) string {
 	return joinNonEmpty(b.buildCognitionSections(bundle, includeAgents, 1), "\n\n")
 }
@@ -204,7 +279,7 @@ func (b *ContextBuilder) buildCognitionSections(bundle bootstrapBundle, includeA
 		buildTitledCognitionSection("Identity", strings.TrimSpace(bundle.Identity), level),
 	}
 	if includeAgents {
-		sections = append(sections, buildTitledCognitionSection("Collaboration Rules", strings.TrimSpace(bundle.Agents), level))
+		sections = append(sections, buildTitledRawCognitionSection("Collaboration Rules", strings.TrimSpace(bundle.Agents), level))
 	}
 	sections = append(sections,
 		buildTitledCognitionSection("User Context", strings.TrimSpace(bundle.User), level),
@@ -318,6 +393,18 @@ func renderPromptLayers(layers []PromptLayerSnapshot) string {
 	return joinNonEmpty(parts, "\n\n---\n\n")
 }
 
+func buildSpawnableAgentCatalogLayer(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if strings.Contains(content, "<available_agents>") {
+		return content
+	}
+	content = strings.Replace(content, "## Available Agents", "# Available Agents", 1)
+	return fmt.Sprintf("\n%s\n", content)
+}
+
 func resolveAgentCoreSource(agentCorePrompt string) string {
 	if strings.TrimSpace(agentCorePrompt) != "" {
 		return "agent_custom_prompt"
@@ -326,7 +413,14 @@ func resolveAgentCoreSource(agentCorePrompt string) string {
 }
 
 func (b *ContextBuilder) resolveAgentCorePrompt(agentCorePrompt string, mode PromptMode) string {
-	return strings.TrimSpace(agentCorePrompt)
+	content := strings.TrimSpace(agentCorePrompt)
+	if content == "" {
+		return ""
+	}
+	if strings.HasPrefix(content, "#") || strings.HasPrefix(content, "<") {
+		return content
+	}
+	return buildTitledRawCognitionSection("Agent Core Prompt", content, 1)
 }
 
 func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
@@ -336,8 +430,9 @@ func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
 
 	return joinNonEmpty([]string{
 		b.buildCommonBoundary(),
-		//b.buildSafety(),
-		//b.buildExecutionNorms(),
+		b.buildSafety(),
+		b.buildExecutionNorms(),
+		b.buildTaskOrchestrationNorms(),
 	}, "\n\n---\n\n")
 }
 
@@ -385,21 +480,6 @@ You are not a passive chat bot. Your default posture is to understand the reques
 - Before non-trivial work: briefly acknowledge the request and state the next concrete step`
 }
 
-func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot string) string {
-	if mode == PromptModeNone {
-		return ""
-	}
-
-	parts := []string{
-		fmt.Sprintf("## Runtime Context\n\n**Current Time**: %s", time.Now().Format("2006-01-02 15:04:05 MST")),
-		b.buildWorkspace(workspaceRoot),
-	}
-	if mode != PromptModeMinimal {
-		parts = append(parts, b.buildRuntime())
-	}
-	return joinNonEmpty(parts, "\n\n")
-}
-
 func (b *ContextBuilder) buildBootstrapModeNotice() string {
 	return `## Bootstrap Mode
 
@@ -427,6 +507,32 @@ func wrapPromptFileLayer(title, filename, content string) string {
 		return fmt.Sprintf("### %s\n\n%s", filename, content)
 	}
 	return fmt.Sprintf("%s\n\n### %s\n\n%s", title, filename, content)
+}
+
+func (b *ContextBuilder) buildRuntimeSnapshot(mode PromptMode) string {
+	if mode == PromptModeNone {
+		return ""
+	}
+
+	parts := []string{
+		fmt.Sprintf("# Runtime Context\n\n**Current Time**: %s", time.Now().Format("2006-01-02 15:04:05 MST")),
+	}
+	if mode != PromptModeMinimal {
+		parts = append(parts, b.buildRuntime())
+	}
+	return joinNonEmpty(parts, "\n\n")
+}
+
+func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot string) string {
+	if mode == PromptModeNone {
+		return ""
+	}
+
+	parts := []string{
+		b.buildWorkspace(workspaceRoot),
+		b.buildRuntimeSnapshot(mode),
+	}
+	return joinNonEmpty(parts, "\n\n---\n\n")
 }
 
 func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot string) bootstrapBundle {

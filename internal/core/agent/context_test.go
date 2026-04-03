@@ -9,61 +9,77 @@ import (
 	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
-func TestBuildSystemPromptKeepsBoundaryWithoutBuiltinGenericCoreFallback(t *testing.T) {
+func TestBuildSystemPromptDropsLegacyBuiltinBoundary(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
-	if !strings.Contains(prompt, "Builtin Boundary") {
-		t.Fatalf("expected builtin boundary in prompt, got %q", prompt)
-	}
-	for _, marker := range []string{"## Builtin Generic Core", "## Communication Style", "## Error Handling"} {
+	for _, marker := range []string{
+		"Builtin Boundary",
+		"Safety & Compliance",
+		"Working Norms",
+		"Task Orchestration",
+		"## Builtin Generic Core",
+		"## Communication Style",
+		"## Error Handling",
+	} {
 		if strings.Contains(prompt, marker) {
-			t.Fatalf("did not expect builtin generic core marker %q in prompt, got %q", marker, prompt)
+			t.Fatalf("did not expect legacy builtin marker %q in prompt, got %q", marker, prompt)
 		}
 	}
 }
 
-func TestBuildSystemPromptIncludesCurrentBoundaryRules(t *testing.T) {
+func TestBuildSystemPromptIncludesWorkspaceAndRuntimeContext(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
 	checks := []string{
-		"Never hallucinate search results, fetched content, file contents, command output, or tool outcomes.",
-		"Do not describe planned, partial, attempted, or inferred work as completed work.",
-		"Respect approvals, sandbox limits, denylists, and tool-specific restrictions.",
-		"You must prioritize safety, human oversight, and absolute accuracy over speed or completion.",
-		"When in doubt about irreversible operations, sending emails, or uncertain outcomes, STOP and ask the user for confirmation.",
+		"## Workspace",
+		"Your working directory is:",
+		"# Runtime Context",
+		"**Current Time**:",
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing boundary rule %q", want)
+			t.Fatalf("prompt missing runtime marker %q", want)
 		}
 	}
 }
 
-func TestBuildSystemPromptIncludesClaudeCodeStyleExecutionNorms(t *testing.T) {
+func TestBuildSystemPromptIncludesLegacyToolSummary(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
 	checks := []string{
-		"Be an active agent. Your default posture is to understand the request, use relevant skills and tools, and complete the work directly when policy allows.",
-		"If a first-class tool exists for an action, use it directly instead of telling the user to run equivalent commands themselves.",
-		"If a tool call is denied, do not immediately retry the exact same call.",
-		"prefer the smallest targeted change that solves the task.",
-		"use glob_files to find candidate files, grep_content to locate exact matches, and read_file with start_line/end_line to inspect local context.",
-		"If you cannot verify a result, say so explicitly instead of implying certainty.",
+		"# Available Tools",
+		"Tool names are case-sensitive.",
+		"- run_shell:",
+		"- sessions_spawn:",
+		"- send_message:",
 	}
 
 	for _, want := range checks {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing execution norm %q", want)
+			t.Fatalf("prompt missing tool summary %q", want)
+		}
+	}
+}
+
+func TestBuildSystemPromptIncludesNoBootstrapByDefault(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+
+	prompt := builder.BuildSystemPrompt(nil)
+
+	for _, marker := range []string{"BOOTSTRAP.md", "### IDENTITY.md", "### AGENTS.md", "### SOUL.md", "### USER.md"} {
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("did not expect bootstrap/cognition marker %q in default prompt, got %q", marker, prompt)
 		}
 	}
 }
@@ -104,7 +120,7 @@ func TestBuildSkillsContextUsesSummaryBeforeSelection(t *testing.T) {
 	got := builder.buildSkillsContext(skills, nil, PromptModeFull)
 
 	checks := []string{
-		"## Skills (mandatory)",
+		"# Skills (mandatory)",
 		"<skill name=\"weather\">",
 		"Use when the user asks about weather or forecast.",
 	}
@@ -113,7 +129,7 @@ func TestBuildSkillsContextUsesSummaryBeforeSelection(t *testing.T) {
 			t.Fatalf("skills context missing %q", want)
 		}
 	}
-	if strings.Contains(got, "## Selected Skills (active)") {
+	if strings.Contains(got, "# Selected Skills (active)") {
 		t.Fatalf("summary phase should not include selected skill section")
 	}
 }
@@ -132,7 +148,7 @@ func TestBuildSkillsContextUsesSelectedSkillContentAfterSelection(t *testing.T) 
 	got := builder.buildSkillsContext(skills, []string{"weather"}, PromptModeFull)
 
 	checks := []string{
-		"## Selected Skills (active)",
+		"# Selected Skills (active)",
 		"<skill name=\"weather\">",
 		"# Weather",
 		"Detailed instructions.",
@@ -142,7 +158,7 @@ func TestBuildSkillsContextUsesSelectedSkillContentAfterSelection(t *testing.T) 
 			t.Fatalf("selected skills context missing %q", want)
 		}
 	}
-	if strings.Contains(got, "## Skills (mandatory)") {
+	if strings.Contains(got, "# Skills (mandatory)") {
 		t.Fatalf("selected phase should not include summary section")
 	}
 }
@@ -238,13 +254,13 @@ func TestBuildMessagesWithRuntimeUsesRuntimeToolSummary(t *testing.T) {
 		t.Fatalf("expected messages to be built")
 	}
 	systemPrompt := msgs[0].Content
-	if !strings.Contains(systemPrompt, "<available_tools>") {
+	if !strings.Contains(systemPrompt, "# Available Tools") {
 		t.Fatalf("expected runtime tool layer in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "**read_file**") {
 		t.Fatalf("expected runtime tool summary to include read_file, got %q", systemPrompt)
 	}
-	if strings.Contains(systemPrompt, "Tool availability (legacy summary)") {
+	if strings.Contains(systemPrompt, "This section is a built-in summary because runtime tool metadata was not provided for this assembly path.") {
 		t.Fatalf("did not expect legacy tool summary when runtime tools are provided, got %q", systemPrompt)
 	}
 }
@@ -259,7 +275,7 @@ func TestBuildMessagesWithRuntimeIncludesSessionSummary(t *testing.T) {
 	}
 
 	systemPrompt := msgs[0].Content
-	if !strings.Contains(systemPrompt, "## Context Summary") {
+	if !strings.Contains(systemPrompt, "# Context Summary") {
 		t.Fatalf("expected context summary layer in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "Earlier work summary") {

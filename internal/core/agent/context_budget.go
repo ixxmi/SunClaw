@@ -133,14 +133,17 @@ func isOverContextBudget(contextWindow int, messages []providers.Message, toolDe
 		return false
 	}
 
+	return estimateContextUsageTokens(messages, toolDefs, maxTokens) > contextWindow
+}
+
+func estimateContextUsageTokens(messages []providers.Message, toolDefs []providers.ToolDefinition, maxTokens int) int {
 	total := 0
 	for _, msg := range messages {
 		total += estimateMessageTokens(msg)
 	}
 	total += estimateToolDefsTokens(toolDefs)
 	total += maxTokens
-
-	return total > contextWindow
+	return total
 }
 
 func guessContextWindow(model string) int {

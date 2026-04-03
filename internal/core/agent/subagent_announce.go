@@ -90,7 +90,7 @@ func (a *SubagentAnnouncer) RunAnnounceFlow(params *SubagentAnnounceParams) erro
 		findings = params.Outcome.Result
 	} else if params.Outcome != nil && params.Outcome.Status == "ok" {
 		findings = "该子任务已执行完毕，但没有返回任何输出。"
-		completionHint = "该子任务没有额外结果可汇总。如果还有其他子任务未完成，请继续等待；如果所有子任务都已完成且也没有额外结果，请直接向用户回复：执行完毕。"
+		completionHint = "该子任务没有额外结果可汇总。如果还有其他子任务未完成，请继续等待；如果所有子任务都已完成且也没有额外结果，请直接先检查一下你派发的任务是否完成，你可以继续派发agent去检查，检查结果最终给出回复。"
 	} else if strings.TrimSpace(params.Task) != "" {
 		findings = params.Task
 	}

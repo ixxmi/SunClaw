@@ -418,22 +418,24 @@ function loopSummary(loop: ShrimpBrainLoopNode) {
 }
 
 .trace-details pre {
-  margin: 6px 10px 0;
+  margin: 8px 10px 0;
+  overflow-x: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
-  line-height: 1.45;
-  font-size: 11px;
+  line-height: 1.6;
+  font-size: 12px;
   color: var(--text);
 }
 
 .trace-details.trace-payload pre {
-  margin: 4px 10px 0;
-  padding: 8px 10px;
+  margin: 6px 10px 0;
+  padding: 9px 10px;
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.72);
-  line-height: 1.35;
-  font-size: 10.5px;
+  line-height: 1.55;
+  font-size: 11.5px;
 }
 
 .trace-chip-row {

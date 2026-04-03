@@ -45,10 +45,14 @@ type SubagentRunParams struct {
 	RequesterSessionKey string
 	RequesterOrigin     *DeliveryContext
 	RequesterDisplayKey string
+	RequesterAgentID    string
+	TargetAgentID       string
+	BootstrapOwnerID    string
 	Task                string
 	Cleanup             string
 	Label               string
 	ArchiveAfterMinutes int
+	RunTimeoutSeconds   int
 }
 
 // SubagentSystemPromptParams 系统提示词参数
@@ -91,7 +95,12 @@ func BuildSubagentSystemPrompt(params *SubagentSystemPromptParams) string {
 		"- `状态`：`completed` / `partial` / `blocked`",
 		"- `结果`：当前步骤完成了什么，或卡在什么地方",
 		"- `关键产出`：关键改动、文件、命令、验证结果或核心结论",
+		"- `验证`：实际执行过的检查；没有就写 `未验证`",
 		"- `风险与下一步`：遗留风险、限制、建议后续步骤；没有就写 `无`",
+		"",
+		"## 上下文控制",
+		"- 不要回传大段文件全文、超长日志或无筛选的命令输出。",
+		"- 优先返回摘要、关键片段、文件路径、命令名和验证结论。",
 		"",
 		"## 不要这样做",
 		"- 不要和用户直接对话",
@@ -272,7 +281,7 @@ func (t *SubagentSpawnTool) Name() string {
 
 // Description 返回工具描述
 func (t *SubagentSpawnTool) Description() string {
-	return "Spawn a background sub-agent run in an isolated session and announce the result back to the requester chat."
+	return "Spawn one tracked background sub-agent task in an isolated session and announce the result back to the requester chat."
 }
 
 // Parameters 返回工具参数定义
@@ -494,10 +503,14 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		RequesterSessionKey: requesterSessionKey,
 		RequesterOrigin:     requesterOrigin,
 		RequesterDisplayKey: requesterSessionKey,
+		RequesterAgentID:    requesterAgentID,
+		TargetAgentID:       targetAgentID,
+		BootstrapOwnerID:    bootstrapOwnerID,
 		Task:                delegatedTask,
 		Cleanup:             spawnParams.Cleanup,
 		Label:               spawnParams.Label,
 		ArchiveAfterMinutes: archiveAfterMinutes,
+		RunTimeoutSeconds:   spawnParams.RunTimeoutSeconds,
 	}); err != nil {
 		result := &SubagentSpawnResult{
 			Status: "error",
@@ -736,13 +749,13 @@ func (t *SubagentSpawnTool) resolveTargetAgentID(requesterID string, params *Sub
 		return t.resolveAgentReference(requesterID, ref)
 	}
 
+	if t.requiresExplicitAgentID(requesterID) {
+		return "", fmt.Errorf("sessions_spawn requires a target agent selection for this agent; provide agent_name or mention a unique subagent name in the task")
+	}
+
 	inferred := t.inferTargetAgentFromTask(requesterID, params)
 	if strings.TrimSpace(inferred) != "" {
 		return inferred, nil
-	}
-
-	if t.requiresExplicitAgentID(requesterID) {
-		return "", fmt.Errorf("sessions_spawn requires a target agent selection for this agent; provide agent_name or mention a unique subagent name in the task")
 	}
 
 	return requesterID, nil

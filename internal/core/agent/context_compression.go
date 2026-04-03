@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
@@ -13,6 +14,13 @@ import (
 )
 
 var errContextOverflow = errors.New("context overflow")
+
+const (
+	maxCompressionAttempts   = 3
+	microCompactBudgetPct    = 85
+	summaryTextRuneLimit     = 240
+	summaryToolParamsPreview = 3
+)
 
 type compressionResult struct {
 	DroppedMessages   int
@@ -72,18 +80,108 @@ func mergeSummary(existing, incoming string) string {
 func providerMessagesForSummary(history []providers.Message) []providers.Message {
 	filtered := make([]providers.Message, 0, len(history))
 	for _, msg := range history {
-		if msg.Role != string(RoleUser) && msg.Role != string(RoleAssistant) {
+		normalized, ok := normalizeMessageForSummary(msg)
+		if !ok {
 			continue
 		}
-		if strings.TrimSpace(msg.Content) == "" {
-			continue
-		}
-		filtered = append(filtered, providers.Message{
-			Role:    msg.Role,
-			Content: strings.TrimSpace(msg.Content),
-		})
+		filtered = append(filtered, normalized)
 	}
 	return filtered
+}
+
+func normalizeMessageForSummary(msg providers.Message) (providers.Message, bool) {
+	switch msg.Role {
+	case string(RoleUser):
+		content := normalizeSummaryText(msg.Content)
+		if content == "" {
+			return providers.Message{}, false
+		}
+		return providers.Message{Role: msg.Role, Content: content}, true
+	case string(RoleAssistant):
+		parts := []string{}
+		if content := normalizeSummaryText(msg.Content); content != "" {
+			parts = append(parts, content)
+		}
+		if toolDigest := summarizeAssistantToolCalls(msg.ToolCalls); toolDigest != "" {
+			parts = append(parts, toolDigest)
+		}
+		if len(parts) == 0 {
+			return providers.Message{}, false
+		}
+		return providers.Message{Role: msg.Role, Content: strings.Join(parts, "\n")}, true
+	case string(RoleToolResult):
+		digest := summarizeToolResult(msg)
+		if digest == "" {
+			return providers.Message{}, false
+		}
+		return providers.Message{Role: msg.Role, Content: digest}, true
+	default:
+		return providers.Message{}, false
+	}
+}
+
+func summarizeAssistantToolCalls(calls []providers.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		name := strings.TrimSpace(tc.Name)
+		if name == "" {
+			continue
+		}
+		paramKeys := make([]string, 0, len(tc.Params))
+		for key := range tc.Params {
+			if strings.TrimSpace(key) != "" {
+				paramKeys = append(paramKeys, strings.TrimSpace(key))
+			}
+		}
+		if len(paramKeys) > summaryToolParamsPreview {
+			paramKeys = append(paramKeys[:summaryToolParamsPreview], "...")
+		}
+		if len(paramKeys) > 0 {
+			parts = append(parts, fmt.Sprintf("%s(%s)", name, strings.Join(paramKeys, ", ")))
+			continue
+		}
+		parts = append(parts, name)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Tool calls: " + strings.Join(parts, "; ")
+}
+
+func summarizeToolResult(msg providers.Message) string {
+	toolName := strings.TrimSpace(msg.ToolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+
+	content := normalizeSummaryText(msg.Content)
+	if content == "" {
+		return fmt.Sprintf("Tool result from %s.", toolName)
+	}
+	return fmt.Sprintf("Tool result from %s: %s", toolName, content)
+}
+
+func normalizeSummaryText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	lines := strings.Fields(strings.ReplaceAll(text, "\n", " "))
+	text = strings.Join(lines, " ")
+	if text == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= summaryTextRuneLimit {
+		return text
+	}
+
+	runes := []rune(text)
+	return strings.TrimSpace(string(runes[:summaryTextRuneLimit])) + "..."
 }
 
 func nearestUserBoundary(history []providers.Message, target int) int {
@@ -191,7 +289,7 @@ func (o *Orchestrator) forceCompression(ctx context.Context, state *AgentState) 
 	if state == nil || len(state.Messages) <= 2 {
 		return compressionResult{}, false
 	}
-	if state.CompressionCount >= 3 {
+	if state.CompressionCount >= maxCompressionAttempts {
 		return compressionResult{}, false
 	}
 
@@ -244,6 +342,65 @@ func (o *Orchestrator) forceCompression(ctx context.Context, state *AgentState) 
 		DroppedMessages:   len(dropped),
 		RemainingMessages: len(kept),
 	}, true
+}
+
+func (o *Orchestrator) maybeMicroCompact(ctx context.Context, state *AgentState, estimatedTokens int) bool {
+	if o == nil || o.config == nil || state == nil {
+		return false
+	}
+	if o.config.ContextWindow <= 0 {
+		return false
+	}
+	if state.CompressionCount >= maxCompressionAttempts {
+		return false
+	}
+	if estimatedTokens < o.config.ContextWindow*microCompactBudgetPct/100 {
+		return false
+	}
+	if len(state.Messages) < 4 {
+		return false
+	}
+
+	history := append([]AgentMessage(nil), state.Messages...)
+	turns := parseTurnBoundariesFor(len(history), func(index int) string {
+		return string(history[index].Role)
+	})
+	if len(turns) < 2 {
+		return false
+	}
+
+	cut := turns[1]
+	if cut <= 0 || cut >= len(history) {
+		return false
+	}
+
+	dropped := history[:cut]
+	kept := append([]AgentMessage(nil), history[cut:]...)
+	summary := summarizeMessages(
+		ctx,
+		o.config.Provider,
+		convertToProviderMessages(dropped),
+		state.ContextSummary,
+		o.config.MaxTokens,
+	)
+	if summary == "" {
+		summary = fmt.Sprintf("[Earlier turn was compacted proactively after dropping %d messages due to context pressure.]", len(dropped))
+		state.ContextSummary = mergeSummary(state.ContextSummary, summary)
+	} else {
+		state.ContextSummary = strings.TrimSpace(summary)
+	}
+	state.Messages = kept
+	state.CompressionCount++
+
+	logger.Info("Proactive micro compaction executed",
+		zap.String("session_key", state.SessionKey),
+		zap.Int("estimated_tokens", estimatedTokens),
+		zap.Int("context_window", o.config.ContextWindow),
+		zap.Int("dropped_messages", len(dropped)),
+		zap.Int("remaining_messages", len(kept)),
+		zap.Int("compression_count", state.CompressionCount))
+
+	return true
 }
 
 func maybeCompactSession(ctx context.Context, provider providers.Provider, sess *session.Session, preserveCount int, contextWindow int, maxTokens int) bool {

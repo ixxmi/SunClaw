@@ -77,7 +77,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", name, desc))
 	}
 
-	return fmt.Sprintf("## Available Tools\n\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s",
+	return fmt.Sprintf("# Available Tools\n\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s\n",
 		strings.Join(lines, "\n"))
 }
 
@@ -138,7 +138,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"send_message":           "Send a proactive text message to the current or specified chat. Use this for acknowledgement, progress updates, or intentional multi-message delivery",
 		"send_file":              "Send one image or file to the current or specified chat",
 		"message":                "Send messages and channel actions (polls, reactions, buttons)",
-		"sessions_spawn":         "Spawn a child agent to handle a longer or more specialized subtask; it will auto-announce when finished",
+		"sessions_spawn":         "Spawn one tracked child-agent task for the current delegated step; it will auto-announce the result back when finished",
 		"memory_search":          "Search stored memories and prior notes",
 		"memory_add":             "Save useful information into memory",
 		"cron":                   "Manage goclaw's built-in cron/scheduler service",
@@ -165,11 +165,14 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		}
 	}
 
-	return fmt.Sprintf(`<available_tools>
-Tool availability (legacy summary):
+	return fmt.Sprintf(`
+# Available Tools
+
 Tool names are case-sensitive. Call tools exactly as listed.
+This section is a built-in summary because runtime tool metadata was not provided for this assembly path.
+
 %s
-</available_tools>`, strings.Join(lines, "\n"))
+`, strings.Join(lines, "\n"))
 }
 
 // buildToolCallStyle 构建详细的工具调用风格指导
@@ -263,6 +266,25 @@ func (b *ContextBuilder) buildExecutionNorms() string {
 - For codebase exploration, narrow first and inspect second: use glob_files to find candidate files, grep_content to locate exact matches, and read_file with start_line/end_line to inspect local context.
 - When you can verify a result through tests, builds, commands, or concrete outputs, do so before claiming success.
 - If you cannot verify a result, say so explicitly instead of implying certainty.`
+}
+
+func (b *ContextBuilder) buildTaskOrchestrationNorms() string {
+	return `# Task Orchestration
+- Decide which mode applies before acting: direct answer, plan, or execute.
+- When the work needs delegation, delegate only the current smallest meaningful step. Do not bundle design, implementation, testing, and review into one child task.
+- Use ` + "`sessions_spawn`" + ` only when a background child agent will materially reduce complexity or unblock progress.
+- When calling ` + "`sessions_spawn`" + `, prefer a structured payload that includes:
+  - ` + "`label`" + `: short step label
+  - ` + "`task`" + `: one-sentence current-step goal
+  - ` + "`context`" + `: minimal background for this step only
+  - ` + "`relevant_files`" + `: shortlist of candidate files/directories
+  - ` + "`constraints`" + `: hard boundaries
+  - ` + "`deliverables`" + `: required outputs
+  - ` + "`done_when`" + `: concrete completion checks
+- Do not dump full project history, large file contents, or long logs into child-task context.
+- After delegating, do not claim the delegated work is complete until the child result actually returns through follow-up.
+- When a child result returns, summarize only confirmed outputs, validations, and blockers from that result.
+- If a child task fails or times out, treat that as a real result: report the blocker, decide the next step, and do not describe the task as completed.`
 }
 
 // buildErrorHandling 构建错误处理指导
@@ -425,7 +447,7 @@ func (b *ContextBuilder) buildContextSummary(summary string) string {
 		return ""
 	}
 
-	return fmt.Sprintf(`## Context Summary
+	return fmt.Sprintf(`# Context Summary
 
 The following is an approximate summary of earlier conversation for reference only.
 - It may be incomplete or outdated.
@@ -442,7 +464,7 @@ func (b *ContextBuilder) buildSkillsPrompt(skills []*Skill, mode PromptMode) str
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Skills (mandatory)\n\n")
+	sb.WriteString("# Skills (mandatory)\n\n")
 	sb.WriteString("Before replying: scan <available_skills> entries.\n")
 	sb.WriteString("- If exactly one skill clearly applies: output a tool call `use_skill` with the skill name as parameter.\n")
 	sb.WriteString("- If multiple could apply: choose the most specific one, then call `use_skill`.\n")
@@ -509,7 +531,7 @@ func (b *ContextBuilder) buildSelectedSkills(selectedSkillNames []string, skills
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Selected Skills (active)\n\n")
+	sb.WriteString("# Selected Skills (active)\n\n")
 
 	for _, skillName := range selectedSkillNames {
 		for _, skill := range skills {
