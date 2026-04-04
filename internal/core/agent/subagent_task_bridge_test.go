@@ -33,6 +33,8 @@ func TestSubagentRegistryAdapterRegisterRunCreatesTaskRecord(t *testing.T) {
 		RequesterAgentID:    "orchestrator",
 		TargetAgentID:       "coder",
 		BootstrapOwnerID:    "coder",
+		PlanID:              "plan-1",
+		StepID:              "step-2",
 		Task:                "implement current step",
 		Label:               "implement-api",
 		Cleanup:             "keep",
@@ -52,6 +54,9 @@ func TestSubagentRegistryAdapterRegisterRunCreatesTaskRecord(t *testing.T) {
 	}
 	if record.Subagent == nil || record.Subagent.TargetAgentID != "coder" {
 		t.Fatalf("unexpected subagent payload: %+v", record.Subagent)
+	}
+	if record.PlanID != "plan-1" || record.StepID != "step-2" {
+		t.Fatalf("unexpected plan binding: %+v", record)
 	}
 }
 
@@ -189,6 +194,8 @@ type toolsSubagentRunParamsAlias struct {
 	RequesterAgentID    string
 	TargetAgentID       string
 	BootstrapOwnerID    string
+	PlanID              string
+	StepID              string
 	Task                string
 	Label               string
 	Cleanup             string
@@ -204,6 +211,8 @@ func (p *toolsSubagentRunParamsAlias) toToolParams() *tools.SubagentRunParams {
 		RequesterAgentID:    p.RequesterAgentID,
 		TargetAgentID:       p.TargetAgentID,
 		BootstrapOwnerID:    p.BootstrapOwnerID,
+		PlanID:              p.PlanID,
+		StepID:              p.StepID,
 		Task:                p.Task,
 		Label:               p.Label,
 		Cleanup:             p.Cleanup,

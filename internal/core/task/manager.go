@@ -93,6 +93,29 @@ func (m *Manager) Get(id string) (*Record, bool) {
 	return cloneRecord(record), true
 }
 
+func (m *Manager) ListByPlan(planID string) []*Record {
+	if m == nil {
+		return nil
+	}
+
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*Record, 0)
+	for _, record := range m.records {
+		if strings.TrimSpace(record.PlanID) == planID {
+			result = append(result, cloneRecord(record))
+		}
+	}
+
+	return result
+}
+
 func (m *Manager) ListByRequester(sessionKey string) []*Record {
 	if m == nil {
 		return nil
@@ -114,6 +137,10 @@ func (m *Manager) ListByRequester(sessionKey string) []*Record {
 	}
 
 	return result
+}
+
+func (m *Manager) ListBySession(sessionKey string) []*Record {
+	return m.ListByRequester(sessionKey)
 }
 
 func (m *Manager) MarkRunning(id string, startedAt int64) error {
@@ -166,6 +193,53 @@ func (m *Manager) MarkFinished(id string, status Status, output string, errorTex
 	}
 
 	return m.saveLocked()
+}
+
+func (m *Manager) RecoverInterrupted(reason string, endedAt int64) ([]*Record, error) {
+	if m == nil {
+		return nil, fmt.Errorf("task manager is nil")
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Task was interrupted before completion."
+	}
+	if endedAt == 0 {
+		endedAt = time.Now().UnixMilli()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	recovered := make([]*Record, 0)
+	for _, record := range m.records {
+		if record == nil {
+			continue
+		}
+
+		switch record.Status {
+		case StatusAccepted, StatusRunning:
+			previousStatus := record.Status
+			record.Status = StatusInterrupted
+			record.EndedAt = &endedAt
+			if record.StartedAt == nil && previousStatus == StatusRunning {
+				record.StartedAt = &endedAt
+			}
+			record.Result = &Result{
+				Error: reason,
+			}
+			recovered = append(recovered, cloneRecord(record))
+		}
+	}
+
+	if len(recovered) == 0 {
+		return nil, nil
+	}
+	if err := m.saveLocked(); err != nil {
+		return nil, err
+	}
+
+	return recovered, nil
 }
 
 func (m *Manager) Count() int {

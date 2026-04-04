@@ -2,10 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { fetchControlConfig, saveControlConfig } from "./api/controlConfig";
 import { fetchDashboardSnapshot } from "./api/dashboard";
+import ChatComposer from "./components/ChatComposer.vue";
+import ChatMessageList from "./components/ChatMessageList.vue";
+import ChatQuickActions from "./components/ChatQuickActions.vue";
 import IconGlyph from "./components/IconGlyph.vue";
 import SectionCard from "./components/SectionCard.vue";
 import ShrimpLoopTrace from "./components/ShrimpLoopTrace.vue";
 import StatusPill from "./components/StatusPill.vue";
+import { useChatPanel } from "./composables/useChatPanel";
 import { useShrimpBrainPanel, shouldShowShrimpReplyToggle, shrimpStatusBadgeClass, isFailureStatus, formatShrimpTimeShort, formatShrimpTime, truncateShrimpText, shrimpTurnTitle } from "./composables/useShrimpBrainPanel";
 import {
   type ControlChannelConfig,
@@ -23,6 +27,18 @@ const activePage = ref<PageId>("chat");
 const snapshot = ref<DashboardSnapshot | null>(null);
 const loading = ref(false);
 const error = ref("");
+const {
+  messages: chatMessages,
+  input: chatInput,
+  sending: chatSending,
+  error: chatError,
+  mode: chatMode,
+  fallbackReason: chatFallbackReason,
+  canSend: canSendChat,
+  applyQuickAction: applyChatQuickAction,
+  clearMessages: clearChatMessages,
+  sendMessage: sendChatMessage,
+} = useChatPanel();
 const controlConfig = ref<ControlConfig | null>(null);
 const controlDraft = ref<ControlConfig | null>(null);
 const controlLoading = ref(false);
@@ -771,7 +787,7 @@ onBeforeUnmount(() => {
         </div>
 
         <template v-if="activePage === 'chat'">
-          <div class="page-stack">
+          <div class="page-stack chat-page">
             <div class="alert-stack">
               <div
                 v-for="alert in chatAlerts"
@@ -784,20 +800,42 @@ onBeforeUnmount(() => {
             </div>
 
             <SectionCard
+              eyebrow="Chat Session"
+              title="Gateway chat panel"
+              note="单会话最小实现：优先走 live chat API，不可用时自动 fallback 到 mock 回复"
+            >
+              <div class="chat-panel-stack">
+                <div class="chat-session-meta">
+                  <span class="chat-mode-pill" :class="`is-${chatMode}`">{{ chatMode }}</span>
+                  <small class="page-meta">{{ chatFallbackReason ? `Fallback: ${chatFallbackReason}` : "Live request available or not yet attempted." }}</small>
+                  <button class="secondary-button chat-reset-button" type="button" @click="clearChatMessages">
+                    Reset session
+                  </button>
+                </div>
+
+                <div v-if="chatError" class="runtime-banner tone-rose">
+                  <p>{{ chatError }}</p>
+                </div>
+
+                <div class="chat-message-shell">
+                  <ChatMessageList :messages="chatMessages" :sending="chatSending" />
+                </div>
+
+                <ChatComposer
+                  v-model="chatInput"
+                  :sending="chatSending"
+                  :can-send="canSendChat"
+                  @send="sendChatMessage()"
+                />
+              </div>
+            </SectionCard>
+
+            <SectionCard
               eyebrow="Quick Actions"
               title="Gateway interventions"
-              note="围绕 SunClaw 网关做轻量控制入口"
+              note="围绕 SunClaw 网关做轻量控制入口，点击后回填输入框，可继续编辑再发送"
             >
-              <div class="action-grid">
-                <article
-                  v-for="item in chatQuickActions"
-                  :key="item.label"
-                  class="action-card"
-                >
-                  <strong>{{ item.label }}</strong>
-                  <p>{{ item.note }}</p>
-                </article>
-              </div>
+              <ChatQuickActions :items="chatQuickActions" @select="applyChatQuickAction" />
             </SectionCard>
           </div>
         </template>
@@ -1309,6 +1347,76 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.main-body-shrimp {
+  padding: 18px 20px 20px;
+  width: 100%;
+  max-width: none;
+}
+
+.chat-page {
+  gap: 12px;
+}
+
+.chat-panel-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.chat-session-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chat-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-mode-pill.is-live {
+  border-color: rgba(16, 185, 129, 0.24);
+  color: var(--emerald);
+  background: var(--emerald-soft);
+}
+
+.chat-mode-pill.is-mock {
+  border-color: rgba(245, 158, 11, 0.24);
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.chat-reset-button {
+  margin-left: auto;
+}
+
+.chat-message-shell {
+  min-height: 320px;
+  max-height: 56vh;
+  overflow: auto;
+  padding: 4px 2px 4px 0;
+}
+
+@media (max-width: 720px) {
+  .chat-reset-button {
+    margin-left: 0;
+  }
+
+  .chat-message-shell {
+    max-height: none;
+  }
+}
+
 .main-body-shrimp {
   padding: 18px 20px 20px;
   width: 100%;

@@ -27,10 +27,16 @@ func TestManagerCreateRunAndFinish(t *testing.T) {
 	manager := NewManagerWithStore(store)
 
 	err := manager.Create(&Record{
-		ID:      "task-1",
-		Backend: BackendSubagent,
-		Status:  StatusAccepted,
-		Summary: "review current change",
+		ID:          "task-1",
+		Backend:     BackendSubagent,
+		Type:        "subagent",
+		Status:      StatusAccepted,
+		Summary:     "review current change",
+		SessionKey:  "session-main",
+		AgentID:     "vibecoding",
+		PlanID:      "plan-1",
+		StepID:      "step-1",
+		CanContinue: true,
 		Subagent: &SubagentPayload{
 			RequesterSessionKey: "session-main",
 			ChildSessionKey:     "agent:reviewer:subagent:1",
@@ -68,6 +74,11 @@ func TestManagerCreateRunAndFinish(t *testing.T) {
 	if record.Result == nil || record.Result.Output != "done" {
 		t.Fatalf("unexpected result: %+v", record.Result)
 	}
+
+	list := manager.ListByPlan("plan-1")
+	if len(list) != 1 {
+		t.Fatalf("expected 1 plan task, got %d", len(list))
+	}
 }
 
 func TestManagerLoadRestoresSavedRecords(t *testing.T) {
@@ -77,6 +88,7 @@ func TestManagerLoadRestoresSavedRecords(t *testing.T) {
 				ID:      "task-2",
 				Backend: BackendSubagent,
 				Status:  StatusFailed,
+				PlanID:  "plan-2",
 				Subagent: &SubagentPayload{
 					RequesterSessionKey: "session-main",
 				},
@@ -100,5 +112,85 @@ func TestManagerLoadRestoresSavedRecords(t *testing.T) {
 	list := manager.ListByRequester("session-main")
 	if len(list) != 1 {
 		t.Fatalf("expected 1 requester task, got %d", len(list))
+	}
+
+	planList := manager.ListByPlan("plan-2")
+	if len(planList) != 1 {
+		t.Fatalf("expected 1 plan task, got %d", len(planList))
+	}
+}
+
+func TestManagerRecoverInterruptedMarksAcceptedAndRunningTasksTerminal(t *testing.T) {
+	store := &memoryStore{
+		records: map[string]*Record{
+			"task-accepted": {
+				ID:      "task-accepted",
+				Backend: BackendSubagent,
+				Status:  StatusAccepted,
+			},
+			"task-running": {
+				ID:      "task-running",
+				Backend: BackendSubagent,
+				Status:  StatusRunning,
+				StartedAt: func() *int64 {
+					v := int64(1000)
+					return &v
+				}(),
+			},
+			"task-done": {
+				ID:      "task-done",
+				Backend: BackendSubagent,
+				Status:  StatusDone,
+			},
+		},
+	}
+	manager := NewManagerWithStore(store)
+
+	if err := manager.Load(); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+
+	recovered, err := manager.RecoverInterrupted("process restarted", 3000)
+	if err != nil {
+		t.Fatalf("RecoverInterrupted error: %v", err)
+	}
+	if len(recovered) != 2 {
+		t.Fatalf("expected 2 recovered tasks, got %d", len(recovered))
+	}
+
+	accepted, ok := manager.Get("task-accepted")
+	if !ok {
+		t.Fatalf("expected accepted task")
+	}
+	if accepted.Status != StatusInterrupted {
+		t.Fatalf("expected accepted task to become interrupted, got %s", accepted.Status)
+	}
+	if accepted.EndedAt == nil || *accepted.EndedAt != 3000 {
+		t.Fatalf("unexpected accepted endedAt: %+v", accepted.EndedAt)
+	}
+	if accepted.Result == nil || accepted.Result.Error != "process restarted" {
+		t.Fatalf("unexpected accepted result: %+v", accepted.Result)
+	}
+
+	running, ok := manager.Get("task-running")
+	if !ok {
+		t.Fatalf("expected running task")
+	}
+	if running.Status != StatusInterrupted {
+		t.Fatalf("expected running task to become interrupted, got %s", running.Status)
+	}
+	if running.StartedAt == nil || *running.StartedAt != 1000 {
+		t.Fatalf("unexpected running startedAt: %+v", running.StartedAt)
+	}
+	if running.EndedAt == nil || *running.EndedAt != 3000 {
+		t.Fatalf("unexpected running endedAt: %+v", running.EndedAt)
+	}
+
+	done, ok := manager.Get("task-done")
+	if !ok {
+		t.Fatalf("expected done task")
+	}
+	if done.Status != StatusDone {
+		t.Fatalf("expected done task to remain completed, got %s", done.Status)
 	}
 }

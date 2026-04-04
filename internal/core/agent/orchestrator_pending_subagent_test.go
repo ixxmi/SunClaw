@@ -21,10 +21,14 @@ func (s *scriptedTool) Execute(ctx context.Context, params map[string]any, onUpd
 
 func TestShouldTrackPendingSubagent(t *testing.T) {
 	success := ToolResult{Content: []ContentBlock{TextContent{Text: "Subagent spawned successfully. Agent: coder. Run ID: r1, Session: s1"}}}
+	continued := ToolResult{Content: []ContentBlock{TextContent{Text: "{\n  \"status\": \"continued\",\n  \"previous_task_id\": \"t1\",\n  \"task_id\": \"t2\"\n}"}}}
 	failed := ToolResult{Content: []ContentBlock{TextContent{Text: "Error: failed to start subagent run: boom"}}}
 
 	if !shouldTrackPendingSubagent("sessions_spawn", success, nil) {
 		t.Fatalf("expected accepted sessions_spawn result to track pending subagent")
+	}
+	if !shouldTrackPendingSubagent("task_continue", continued, nil) {
+		t.Fatalf("expected continued task to track pending subagent")
 	}
 	if shouldTrackPendingSubagent("sessions_spawn", failed, nil) {
 		t.Fatalf("did not expect failed sessions_spawn text result to track pending subagent")

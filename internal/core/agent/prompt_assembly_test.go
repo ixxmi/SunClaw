@@ -52,20 +52,11 @@ func TestAssemblePrompt_MainUsesRequestedLayerOrder(t *testing.T) {
 	}).SystemPrompt
 
 	for _, marker := range []string{
-		"### IDENTITY.md",
-		"custom identity",
-		"## Workspace",
-		"### AGENTS.md",
-		"custom rules",
-		"### AGENT.md",
+		"# Agent Core Prompt",
 		"custom core",
-		"### SOUL.md",
-		"custom soul",
-		"### USER.md",
-		"custom user",
 		"# Skills (mandatory)",
-		"# Available Tools",
 		"# Available Agents",
+		"# Available Tools",
 		"# Context Summary",
 		"# Runtime Context",
 		"# User Information",
@@ -76,38 +67,101 @@ func TestAssemblePrompt_MainUsesRequestedLayerOrder(t *testing.T) {
 			t.Fatalf("expected %q in prompt, got %q", marker, got)
 		}
 	}
-
-	if strings.Contains(got, "Builtin Boundary") || strings.Contains(got, "BOOTSTRAP.md") {
-		t.Fatalf("did not expect legacy builtin/bootstrap sections, got %q", got)
+	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Bootstrap Guide",
+		"custom identity",
+		"custom rules",
+		"custom soul",
+		"custom user",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q when custom agent prompt is present, got %q", marker, got)
+		}
 	}
 
-	identityIdx := strings.Index(got, "### IDENTITY.md")
-	workspaceIdx := strings.Index(got, "## Workspace")
-	rulesIdx := strings.Index(got, "### AGENTS.md")
-	agentIdx := strings.Index(got, "### AGENT.md")
-	soulIdx := strings.Index(got, "### SOUL.md")
-	userIdx := strings.Index(got, "### USER.md")
+	agentIdx := strings.Index(got, "# Agent Core Prompt")
 	skillsIdx := strings.Index(got, "# Skills (mandatory)")
-	toolsIdx := strings.Index(got, "# Available Tools")
 	agentsIdx := strings.Index(got, "# Available Agents")
+	toolsIdx := strings.Index(got, "# Available Tools")
 	contextIdx := strings.Index(got, "# Context Summary")
+	runtimeIdx := strings.Index(got, "# Runtime Context")
 	userInfoIdx := strings.Index(got, "# User Information")
 
-	if !(identityIdx < workspaceIdx &&
-		workspaceIdx < rulesIdx &&
-		rulesIdx < agentIdx &&
-		agentIdx < soulIdx &&
-		soulIdx < userIdx &&
-		userIdx < skillsIdx &&
-		skillsIdx < toolsIdx &&
-		toolsIdx < agentsIdx &&
-		agentsIdx < contextIdx &&
-		contextIdx < userInfoIdx) {
+	if !(agentIdx < skillsIdx &&
+		skillsIdx < agentsIdx &&
+		agentsIdx < toolsIdx &&
+		toolsIdx < contextIdx &&
+		contextIdx < runtimeIdx &&
+		runtimeIdx < userInfoIdx) {
 		t.Fatalf("unexpected main prompt order: %q", got)
 	}
 }
 
-func TestAssemblePrompt_MainDoesNotFallbackToBuiltinBoundary(t *testing.T) {
+func TestAssemblePrompt_CustomAgentPromptSkipsBuiltinBoundaryAndCognitionFiles(t *testing.T) {
+	workspaceDir := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+
+	ownerDir := t.TempDir()
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspaceDir
+	})
+
+	for name, content := range map[string]string{
+		"IDENTITY.md": "identity cognition",
+		"AGENTS.md":   "agents cognition",
+		"SOUL.md":     "soul cognition",
+		"USER.md":     "user cognition",
+	} {
+		if err := os.WriteFile(filepath.Join(ownerDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		PromptMode:       PromptModeFull,
+		BootstrapOwnerID: "owner1",
+		AgentCorePrompt:  "custom agent prompt only",
+	}).SystemPrompt
+
+	if !strings.Contains(got, "custom agent prompt only") {
+		t.Fatalf("expected custom agent prompt in system prompt, got %q", got)
+	}
+	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Bootstrap Guide",
+		"identity cognition",
+		"agents cognition",
+		"soul cognition",
+		"user cognition",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q when custom agent prompt is present, got %q", marker, got)
+		}
+	}
+}
+
+func TestAssemblePrompt_OmitsAvailableAgentsWhenCatalogIsEmpty(t *testing.T) {
+	workspaceDir := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:            PromptAssemblyModeMain,
+		PromptMode:      PromptModeFull,
+		AgentCorePrompt: "custom core",
+		Tools:           []Tool{&summaryOnlyTool{name: "read_file"}},
+	}).SystemPrompt
+
+	if strings.Contains(got, "# Available Agents") {
+		t.Fatalf("did not expect available agents section when catalog is empty, got %q", got)
+	}
+}
+
+func TestAssemblePrompt_MainIncludesBuiltinBoundary(t *testing.T) {
 	workspaceDir := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
 
@@ -117,14 +171,55 @@ func TestAssemblePrompt_MainDoesNotFallbackToBuiltinBoundary(t *testing.T) {
 	}).SystemPrompt
 
 	for _, marker := range []string{
-		"Builtin Boundary",
-		"Safety & Compliance",
-		"Working Norms",
-		"Task Orchestration",
-		"## Builtin Generic Core",
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
 	} {
-		if strings.Contains(got, marker) {
-			t.Fatalf("did not expect legacy builtin marker %q in prompt, got %q", marker, got)
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected builtin marker %q in prompt, got %q", marker, got)
+		}
+	}
+}
+
+func TestAssemblePrompt_EmptyAgentPromptStillIncludesCognitionFiles(t *testing.T) {
+	workspaceDir := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
+
+	ownerDir := t.TempDir()
+	builder.SetBootstrapDirResolver(func(ownerID string) string {
+		if ownerID == "owner1" {
+			return ownerDir
+		}
+		return workspaceDir
+	})
+
+	for name, content := range map[string]string{
+		"IDENTITY.md": "identity cognition",
+		"AGENTS.md":   "agents cognition",
+		"SOUL.md":     "soul cognition",
+		"USER.md":     "user cognition",
+	} {
+		if err := os.WriteFile(filepath.Join(ownerDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:             PromptAssemblyModeMain,
+		PromptMode:       PromptModeFull,
+		BootstrapOwnerID: "owner1",
+	}).SystemPrompt
+
+	for _, marker := range []string{
+		"# Builtin Boundary",
+		"identity cognition",
+		"agents cognition",
+		"soul cognition",
+		"user cognition",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected %q when agent prompt is empty, got %q", marker, got)
 		}
 	}
 }
@@ -150,13 +245,15 @@ func TestAssemblePrompt_SubagentUsesCoreDescriptorAndRuntimeContext(t *testing.T
 	}).SystemPrompt
 
 	for _, marker := range []string{
-		"# Core Prompt",
+		"# Builtin Boundary",
+		"# Agent Core Prompt",
 		"subagent core",
 		"# Subagent Context",
+		"# Available Tools",
 		"# Subagent Runtime Context",
-		"# Context Summary",
-		"# Runtime Context",
-		"# User Information",
+		"## Context Summary",
+		"## Runtime Context",
+		"## User Information",
 		"- Agent: coder",
 		"- Subagent: run-1",
 	} {
@@ -166,24 +263,21 @@ func TestAssemblePrompt_SubagentUsesCoreDescriptorAndRuntimeContext(t *testing.T
 	}
 
 	for _, marker := range []string{
-		"### IDENTITY.md",
-		"### SOUL.md",
-		"### USER.md",
-		"# Available Tools",
 		"# Available Agents",
 		"# Skills (mandatory)",
 		"# Selected Skills (active)",
-		"Builtin Boundary",
 	} {
 		if strings.Contains(got, marker) {
 			t.Fatalf("did not expect %q in subagent prompt, got %q", marker, got)
 		}
 	}
 
-	coreIdx := strings.Index(got, "# Core Prompt")
+	boundaryIdx := strings.Index(got, "# Builtin Boundary")
+	coreIdx := strings.Index(got, "# Agent Core Prompt")
 	descriptorIdx := strings.Index(got, "# Subagent Context")
+	toolsIdx := strings.Index(got, "# Available Tools")
 	contextIdx := strings.Index(got, "# Subagent Runtime Context")
-	if !(coreIdx < descriptorIdx && descriptorIdx < contextIdx) {
+	if !(boundaryIdx < coreIdx && coreIdx < descriptorIdx && descriptorIdx < toolsIdx && toolsIdx < contextIdx) {
 		t.Fatalf("unexpected subagent prompt order: %q", got)
 	}
 }

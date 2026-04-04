@@ -9,23 +9,20 @@ import (
 	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
-func TestBuildSystemPromptDropsLegacyBuiltinBoundary(t *testing.T) {
+func TestBuildSystemPromptIncludesBuiltinBoundaryAndNorms(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
 	for _, marker := range []string{
-		"Builtin Boundary",
-		"Safety & Compliance",
-		"Working Norms",
-		"Task Orchestration",
-		"## Builtin Generic Core",
-		"## Communication Style",
-		"## Error Handling",
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
 	} {
-		if strings.Contains(prompt, marker) {
-			t.Fatalf("did not expect legacy builtin marker %q in prompt, got %q", marker, prompt)
+		if !strings.Contains(prompt, marker) {
+			t.Fatalf("expected builtin marker %q in prompt, got %q", marker, prompt)
 		}
 	}
 }
@@ -71,15 +68,15 @@ func TestBuildSystemPromptIncludesLegacyToolSummary(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPromptIncludesNoBootstrapByDefault(t *testing.T) {
+func TestBuildSystemPromptIncludesBootstrapGuideByDefault(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
 	prompt := builder.BuildSystemPrompt(nil)
 
-	for _, marker := range []string{"BOOTSTRAP.md", "### IDENTITY.md", "### AGENTS.md", "### SOUL.md", "### USER.md"} {
-		if strings.Contains(prompt, marker) {
-			t.Fatalf("did not expect bootstrap/cognition marker %q in default prompt, got %q", marker, prompt)
+	for _, marker := range []string{"# Bootstrap Guide", "BOOTSTRAP.md"} {
+		if !strings.Contains(prompt, marker) {
+			t.Fatalf("expected bootstrap marker %q in default prompt, got %q", marker, prompt)
 		}
 	}
 }

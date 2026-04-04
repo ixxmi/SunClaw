@@ -59,6 +59,8 @@ func (a *SubagentAnnouncer) RunAnnounceFlow(params *SubagentAnnounceParams) erro
 			statusLabel = "completed successfully"
 		case "timeout":
 			statusLabel = "timed out"
+		case "canceled":
+			statusLabel = "was canceled"
 		case "error":
 			statusLabel = fmt.Sprintf("failed: %s", params.Outcome.Error)
 		}
@@ -72,6 +74,8 @@ func (a *SubagentAnnouncer) RunAnnounceFlow(params *SubagentAnnounceParams) erro
 			statusEmoji = "✅"
 		case "timeout":
 			statusEmoji = "⏱️"
+		case "canceled":
+			statusEmoji = "🛑"
 		case "error":
 			statusEmoji = "❌"
 		}

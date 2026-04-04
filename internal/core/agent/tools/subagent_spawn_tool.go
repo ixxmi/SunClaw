@@ -48,6 +48,9 @@ type SubagentRunParams struct {
 	RequesterAgentID    string
 	TargetAgentID       string
 	BootstrapOwnerID    string
+	PlanID              string
+	StepID              string
+	ContinueOf          string
 	Task                string
 	Cleanup             string
 	Label               string
@@ -195,6 +198,8 @@ type SubagentSpawnToolParams struct {
 	Label             string   `json:"label,omitempty"`               // 可选标签
 	AgentID           string   `json:"agent_id,omitempty"`            // 目标 Agent ID
 	AgentName         string   `json:"agent_name,omitempty"`          // 目标 Agent 名称/别名
+	PlanID            string   `json:"plan_id,omitempty"`             // 关联计划 ID
+	StepID            string   `json:"step_id,omitempty"`             // 关联步骤 ID
 	Model             string   `json:"model,omitempty"`               // 模型覆盖
 	Thinking          string   `json:"thinking,omitempty"`            // 思考级别
 	MaxTokens         int      `json:"max_tokens,omitempty"`          // 最大输出 token
@@ -225,6 +230,9 @@ type SubagentSpawnResult struct {
 	Task                string  `json:"task,omitempty"`                // 子 Agent 要执行的任务描述
 	BootstrapOwnerID    string  `json:"bootstrap_owner_id,omitempty"`  // 子 Agent 继承的主 agent 认知 owner
 	ParentLoopIteration int     `json:"parent_loop_iteration,omitempty"`
+	PlanID              string  `json:"plan_id,omitempty"`
+	StepID              string  `json:"step_id,omitempty"`
+	ContinueOf          string  `json:"continue_of,omitempty"`
 }
 
 // SubagentRegistryInterface 分身注册表接口
@@ -304,6 +312,14 @@ func (t *SubagentSpawnTool) Parameters() map[string]interface{} {
 			"agent_name": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional target agent display name, identity name, or role alias such as Reviewer, Coder, inspector, reviewer.",
+			},
+			"plan_id": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional plan ID that this delegated step belongs to.",
+			},
+			"step_id": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional plan step ID that this delegated step belongs to.",
 			},
 			"model": map[string]interface{}{
 				"type":        "string",
@@ -506,6 +522,8 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		RequesterAgentID:    requesterAgentID,
 		TargetAgentID:       targetAgentID,
 		BootstrapOwnerID:    bootstrapOwnerID,
+		PlanID:              strings.TrimSpace(spawnParams.PlanID),
+		StepID:              strings.TrimSpace(spawnParams.StepID),
 		Task:                delegatedTask,
 		Cleanup:             spawnParams.Cleanup,
 		Label:               spawnParams.Label,
@@ -536,6 +554,8 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 			Task:                delegatedTask,
 			BootstrapOwnerID:    bootstrapOwnerID,
 			ParentLoopIteration: parentLoopIteration,
+			PlanID:              strings.TrimSpace(spawnParams.PlanID),
+			StepID:              strings.TrimSpace(spawnParams.StepID),
 		}
 		if err := t.onSpawn(spawnResult); err != nil {
 			logger.Error("Failed to handle subagent spawn",
@@ -560,6 +580,8 @@ func (t *SubagentSpawnTool) Execute(ctx context.Context, params map[string]inter
 		Task:                delegatedTask,
 		BootstrapOwnerID:    bootstrapOwnerID,
 		ParentLoopIteration: parentLoopIteration,
+		PlanID:              strings.TrimSpace(spawnParams.PlanID),
+		StepID:              strings.TrimSpace(spawnParams.StepID),
 	}
 
 	logger.Debug("Subagent spawned",
@@ -602,6 +624,20 @@ func (t *SubagentSpawnTool) parseParams(params map[string]interface{}) (*Subagen
 	if val, ok := params["agent_name"]; ok {
 		if str, ok := val.(string); ok {
 			result.AgentName = str
+		}
+	}
+
+	// 解析 plan_id
+	if val, ok := params["plan_id"]; ok {
+		if str, ok := val.(string); ok {
+			result.PlanID = str
+		}
+	}
+
+	// 解析 step_id
+	if val, ok := params["step_id"]; ok {
+		if str, ok := val.(string); ok {
+			result.StepID = str
 		}
 	}
 
@@ -749,13 +785,13 @@ func (t *SubagentSpawnTool) resolveTargetAgentID(requesterID string, params *Sub
 		return t.resolveAgentReference(requesterID, ref)
 	}
 
-	if t.requiresExplicitAgentID(requesterID) {
-		return "", fmt.Errorf("sessions_spawn requires a target agent selection for this agent; provide agent_name or mention a unique subagent name in the task")
-	}
-
 	inferred := t.inferTargetAgentFromTask(requesterID, params)
 	if strings.TrimSpace(inferred) != "" {
 		return inferred, nil
+	}
+
+	if t.requiresExplicitAgentID(requesterID) {
+		return "", fmt.Errorf("sessions_spawn requires a target agent selection for this agent; provide agent_name or mention a unique subagent name in the task")
 	}
 
 	return requesterID, nil

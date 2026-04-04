@@ -22,6 +22,7 @@ import (
 	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/namespaces"
 	"github.com/smallnest/goclaw/internal/core/permissions"
+	"github.com/smallnest/goclaw/internal/core/plan"
 	"github.com/smallnest/goclaw/internal/core/providers"
 	"github.com/smallnest/goclaw/internal/core/session"
 	"github.com/smallnest/goclaw/internal/core/task"
@@ -52,6 +53,7 @@ type AgentManager struct {
 	channelMgr     *channels.Manager
 	acpManager     *acp.Manager
 	taskManager    *task.Manager
+	planManager    *plan.Manager
 	baseWorkspace  string
 	manualCronMu   sync.Mutex
 	manualCronLast map[string]time.Time
@@ -76,6 +78,13 @@ type AgentManager struct {
 
 	workspacePrepMu sync.Mutex
 	preparedRoots   map[string]error
+
+	subagentTaskControlsMu sync.Mutex
+	subagentTaskControls   map[string]*subagentTaskControl
+}
+
+type subagentTaskControl struct {
+	cancel context.CancelFunc
 }
 
 // BindingEntry Agent 绑定条目
@@ -135,6 +144,7 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 		channelMgr:           cfg.ChannelMgr,
 		acpManager:           cfg.AcpManager,
 		taskManager:          task.NewManager(cfg.DataDir),
+		planManager:          plan.NewManager(cfg.DataDir),
 		baseWorkspace:        cfg.DataDir,
 		manualCronLast:       make(map[string]time.Time),
 		shrimpBrain:          NewShrimpBrainTracker(cfg.DataDir),
@@ -143,6 +153,7 @@ func NewAgentManager(cfg *NewAgentManagerConfig) *AgentManager {
 		followUpQueues:       make(map[string][]AgentMessage),
 		acpThreadRuns:        make(map[string]*acpThreadSessionControl),
 		preparedRoots:        make(map[string]error),
+		subagentTaskControls: make(map[string]*subagentTaskControl),
 	}
 }
 
@@ -283,6 +294,12 @@ func (m *AgentManager) setupSubagentSupport(cfg *config.Config, _ *ContextBuilde
 			logger.Warn("Failed to load task manager", zap.Error(err))
 		}
 	}
+	if m.planManager != nil {
+		if err := m.planManager.Load(); err != nil {
+			logger.Warn("Failed to load plan manager", zap.Error(err))
+		}
+	}
+	m.recoverInterruptedSubagentTasks()
 
 	// 设置分身运行完成回调
 	m.subagentRegistry.SetOnRunComplete(func(runID string, record *SubagentRunRecord) {
@@ -370,10 +387,40 @@ func (m *AgentManager) setupSubagentSupport(cfg *config.Config, _ *ContextBuilde
 	spawnTool.SetOnSpawn(func(result *tools.SubagentSpawnResult) error {
 		return m.handleSubagentSpawn(result)
 	})
+	planUpdateTool := tools.NewPlanUpdateTool(m.planManager)
+	planGetTool := tools.NewPlanGetTool(m.planManager)
+	taskGetTool := tools.NewTaskGetTool(m.taskManager)
+	taskListTool := tools.NewTaskListTool(m.taskManager)
+	taskContinueTool := tools.NewTaskContinueTool(m.taskManager)
+	taskContinueTool.SetContinueHandler(func(ctx context.Context, taskID, message string) (*tools.TaskContinueResult, error) {
+		return m.continueSubagentTask(ctx, taskID, message)
+	})
+	taskStopTool := tools.NewTaskStopTool(m.taskManager)
+	taskStopTool.SetStopHandler(func(ctx context.Context, taskID string) (*tools.TaskStopResult, error) {
+		return m.stopSubagentTask(ctx, taskID)
+	})
 
 	// 注册工具
 	if err := m.tools.RegisterExisting(spawnTool); err != nil {
 		logger.Error("Failed to register sessions_spawn tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(planUpdateTool); err != nil {
+		logger.Error("Failed to register plan_update tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(planGetTool); err != nil {
+		logger.Error("Failed to register plan_get tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(taskGetTool); err != nil {
+		logger.Error("Failed to register task_get tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(taskListTool); err != nil {
+		logger.Error("Failed to register task_list tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(taskContinueTool); err != nil {
+		logger.Error("Failed to register task_continue tool", zap.Error(err))
+	}
+	if err := m.tools.RegisterExisting(taskStopTool); err != nil {
+		logger.Error("Failed to register task_stop tool", zap.Error(err))
 	}
 
 	logger.Info("Subagent support configured")
@@ -404,11 +451,18 @@ func (a *subagentRegistryAdapter) RegisterRun(params *tools.SubagentRunParams) e
 
 	if a.tasks != nil {
 		record := &task.Record{
-			ID:        params.RunID,
-			Backend:   task.BackendSubagent,
-			Status:    task.StatusAccepted,
-			Summary:   buildSubagentTaskSummary(params.Label, params.Task),
-			CreatedAt: now,
+			ID:          params.RunID,
+			Backend:     task.BackendSubagent,
+			Type:        "subagent",
+			Status:      task.StatusAccepted,
+			Summary:     buildSubagentTaskSummary(params.Label, params.Task),
+			SessionKey:  params.RequesterSessionKey,
+			AgentID:     params.RequesterAgentID,
+			PlanID:      strings.TrimSpace(params.PlanID),
+			StepID:      strings.TrimSpace(params.StepID),
+			ContinueOf:  strings.TrimSpace(params.ContinueOf),
+			CanContinue: true,
+			CreatedAt:   now,
 			Subagent: &task.SubagentPayload{
 				RequesterSessionKey: params.RequesterSessionKey,
 				RequesterDisplayKey: params.RequesterDisplayKey,
@@ -441,10 +495,16 @@ func (a *subagentRegistryAdapter) RegisterRun(params *tools.SubagentRunParams) e
 		RequesterSessionKey: params.RequesterSessionKey,
 		RequesterOrigin:     requesterOrigin,
 		RequesterDisplayKey: params.RequesterDisplayKey,
+		RequesterAgentID:    params.RequesterAgentID,
+		TargetAgentID:       params.TargetAgentID,
+		BootstrapOwnerID:    params.BootstrapOwnerID,
 		Task:                params.Task,
 		Cleanup:             params.Cleanup,
 		Label:               params.Label,
 		ArchiveAfterMinutes: params.ArchiveAfterMinutes,
+		PlanID:              params.PlanID,
+		StepID:              params.StepID,
+		ContinueOf:          params.ContinueOf,
 	})
 	if err != nil && a.tasks != nil {
 		_ = a.tasks.MarkFinished(params.RunID, task.StatusFailed, "", err.Error(), now)
@@ -454,6 +514,10 @@ func (a *subagentRegistryAdapter) RegisterRun(params *tools.SubagentRunParams) e
 
 // handleSubagentSpawn 处理分身生成：为子 Agent 创建独立 Orchestrator 并在后台异步执行
 func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) (retErr error) {
+	return m.runSubagentTask(result, nil)
+}
+
+func (m *AgentManager) runSubagentTask(result *tools.SubagentSpawnResult, historyAgentMsgs []AgentMessage) (retErr error) {
 	spawned := false
 	defer func() {
 		if retErr == nil || spawned {
@@ -595,12 +659,16 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) (r
 		Content:   []ContentBlock{TextContent{Text: result.Task}},
 		Timestamp: time.Now().UnixMilli(),
 	}
+	initialMessages := append(append([]AgentMessage{}, historyAgentMsgs...), taskMsg)
+	existingMessageCount := len(historyAgentMsgs)
 
 	// 在独立 goroutine 中异步执行，不阻塞主 Agent 的响应
 	spawned = true
 	go func() {
 		runCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
+		m.registerSubagentTaskControl(result.RunID, &subagentTaskControl{cancel: cancel})
+		defer m.releaseSubagentTaskControl(result.RunID)
 
 		now := time.Now().UnixMilli()
 		outcome := &SubagentRunOutcome{}
@@ -622,7 +690,7 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) (r
 		}
 		runCtx = execution.WithToolUseContext(runCtx, toolCtx)
 
-		finalMessages, err := subagentOrchestrator.Run(runCtx, []AgentMessage{taskMsg})
+		finalMessages, err := subagentOrchestrator.Run(runCtx, initialMessages)
 		endedAt := time.Now().UnixMilli()
 
 		if err != nil {
@@ -635,6 +703,11 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) (r
 				logger.Warn("Subagent timed out",
 					zap.String("run_id", result.RunID),
 					zap.Int("timeout_seconds", timeoutSeconds))
+			} else if runCtx.Err() == context.Canceled {
+				outcome.Status = "canceled"
+				outcome.Error = "subagent was canceled"
+				logger.Warn("Subagent canceled",
+					zap.String("run_id", result.RunID))
 			} else {
 				outcome.Status = "error"
 				outcome.Error = err.Error()
@@ -675,11 +748,15 @@ func (m *AgentManager) handleSubagentSpawn(result *tools.SubagentSpawnResult) (r
 		// 保存子 Agent 会话记录（便于后续查看历史）
 		if sess, sessErr := sessionMgr.GetOrCreate(result.ChildSessionKey); sessErr == nil {
 			newMsgs := finalMessages
-			if len(finalMessages) > 1 {
-				newMsgs = finalMessages[1:] // 跳过第一条 taskMsg（已在 Registry 中记录）
+			if existingMessageCount < len(finalMessages) {
+				newMsgs = finalMessages[existingMessageCount:]
+			} else {
+				newMsgs = nil
 			}
 			helper := NewAgentHelper(sessionMgr)
-			_ = helper.UpdateSession(sess, newMsgs, &UpdateSessionOptions{SaveImmediately: true})
+			if len(newMsgs) > 0 {
+				_ = helper.UpdateSession(sess, newMsgs, &UpdateSessionOptions{SaveImmediately: true})
+			}
 		}
 
 		_ = now // 已通过 &endedAt 传递
@@ -2436,34 +2513,31 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 			continue
 		}
 
-		var candidates []config.AgentConfig
+		if agentCfg.Subagents == nil || len(agentCfg.Subagents.AllowAgents) == 0 {
+			agent.SetSpawnableAgentCatalog("")
+			logger.Info("Skipped spawnable agent descriptions because allow_agents is empty",
+				zap.String("agent_id", agentCfg.ID))
+			continue
+		}
 
-		if agentCfg.Subagents != nil && len(agentCfg.Subagents.AllowAgents) > 0 {
-			// 明确配置了 allow_agents：只收集白名单内的 agent
-			for _, allowedID := range agentCfg.Subagents.AllowAgents {
-				allowedID = strings.TrimSpace(allowedID)
-				if allowedID == "*" {
-					// 通配符：收集所有有描述的非自身 agent
-					for _, a := range cfg.Agents.List {
-						if a.ID != agentCfg.ID && a.Description != "" {
-							candidates = append(candidates, a)
-						}
+		var candidates []config.AgentConfig
+		// 明确配置了 allow_agents：只收集白名单内的 agent
+		for _, allowedID := range agentCfg.Subagents.AllowAgents {
+			allowedID = strings.TrimSpace(allowedID)
+			if allowedID == "*" {
+				// 通配符：收集所有有描述的非自身 agent
+				for _, a := range cfg.Agents.List {
+					if a.ID != agentCfg.ID && a.Description != "" {
+						candidates = append(candidates, a)
 					}
-					break
 				}
-				if allowedID == agentCfg.ID {
-					continue
-				}
-				if target, ok := agentCfgMap[allowedID]; ok {
-					candidates = append(candidates, target)
-				}
+				break
 			}
-		} else {
-			// 未配置 allow_agents：自动收集所有有描述的非自身、非默认 agent
-			for _, a := range cfg.Agents.List {
-				if a.ID != agentCfg.ID && !a.Default && a.Description != "" {
-					candidates = append(candidates, a)
-				}
+			if allowedID == agentCfg.ID {
+				continue
+			}
+			if target, ok := agentCfgMap[allowedID]; ok {
+				candidates = append(candidates, target)
 			}
 		}
 
@@ -2493,25 +2567,13 @@ func (m *AgentManager) injectSpawnableAgentDescriptions(cfg *config.Config) {
 			sb.WriteString(fmt.Sprintf("- %s (`%s`): %s\n", e.name, e.id, e.description))
 		}
 
-		// 动态生成任务类型 → agent_id 映射表，从每个 agent 的 description 中提取"适合..."部分。
-		// 该表随 allow_agents 配置变化，禁止在 AGENTS.md 中硬编码。
-		sb.WriteString("\n## 任务派发参考（严格按此表选择 agent_id）\n\n")
-		sb.WriteString("| 适用场景 | agent_id |\n")
-		sb.WriteString("|---------|----------|\n")
-		for _, e := range entries {
-			if hint := spawnableCatalogTaskHint(e.description); hint != "" {
-				sb.WriteString(fmt.Sprintf("| %s | `%s` |\n", hint, e.id))
-			}
-		}
-		sb.WriteString("\n**禁止将实现、修复、测试类任务分配给 reviewer；reviewer 只处理纯代码审查任务。**\n")
-
 		// 保存到该 Agent 的独立动态层，由运行时统一装配。
 		agent.SetSpawnableAgentCatalog(strings.TrimSpace(sb.String()))
 
 		logger.Info("Injected spawnable agent descriptions",
 			zap.String("agent_id", agentCfg.ID),
 			zap.Int("spawnable_count", len(entries)),
-			zap.Bool("auto_discover", agentCfg.Subagents == nil || len(agentCfg.Subagents.AllowAgents) == 0))
+			zap.Bool("auto_discover", false))
 	}
 }
 

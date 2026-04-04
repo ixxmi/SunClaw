@@ -110,6 +110,8 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 	}
 	bundle := b.loadBootstrapBundleForOwner(params.BootstrapOwnerID, params.WorkspaceRoot)
 	layers := make([]PromptLayerSnapshot, 0, 10)
+	includeBootstrapGuide := bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != ""
+	hasConfiguredAgentPrompt := strings.TrimSpace(params.AgentCorePrompt) != ""
 
 	appendLayer := func(name string, priority int, source string, content string) {
 		content = strings.TrimSpace(content)
@@ -124,16 +126,30 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("core_prompt", 10, resolveAgentCoreSource(params.AgentCorePrompt), b.buildSubagentCorePrompt(params.AgentCorePrompt, mode))
-		appendLayer("subagent_descriptor", 20, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
-		appendLayer("subagent_context", 30, "subagent_context", b.buildSubagentContext(params.SessionSummary, params.WorkspaceRoot, params.SessionKey, mode))
+		appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
+		appendLayer("core_prompt", 20, resolveAgentCoreSource(params.AgentCorePrompt), b.buildSubagentCorePrompt(params.AgentCorePrompt, mode))
+		appendLayer("subagent_descriptor", 30, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
+
+		toolSummary := strings.TrimSpace(params.ToolSummary)
+		if toolSummary == "" {
+			toolSummary = b.BuildToolsSummary(params.Tools)
+		}
+		if toolSummary == "" {
+			toolSummary = b.buildLegacyBuiltinToolLayer(mode)
+		}
+		appendLayer("tools", 40, "runtime_tools", toolSummary)
+		appendLayer("subagent_context", 50, "subagent_context", b.buildSubagentContext(params.SessionSummary, params.WorkspaceRoot, params.SessionKey, mode))
 	default:
-		appendLayer("identity", 10, "IDENTITY.md", wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)))
-		appendLayer("workspace", 20, "workspace", b.buildWorkspace(params.WorkspaceRoot))
-		appendLayer("important_rules", 30, "AGENTS.md", wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)))
-		appendLayer("agent_prompt", 40, resolveAgentCoreSource(params.AgentCorePrompt), wrapPromptFileLayer("", "AGENT.md", b.resolveAgentCorePrompt(params.AgentCorePrompt, mode)))
-		appendLayer("soul", 50, "SOUL.md", wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)))
-		appendLayer("user_context", 60, "USER.md", wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)))
+		if !hasConfiguredAgentPrompt {
+			appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
+		}
+		if !hasConfiguredAgentPrompt && includeBootstrapGuide {
+			appendLayer("bootstrap_guide", 20, "BOOTSTRAP.md", b.buildBootstrapGuideLayer(bundle.BootstrapGuide))
+		}
+		appendLayer("agent_prompt", 30, resolveAgentCoreSource(params.AgentCorePrompt), wrapPromptFileLayer(b.resolveAgentCorePrompt(params.AgentCorePrompt, mode)))
+		if !hasConfiguredAgentPrompt {
+			appendLayer("cognition", 40, "IDENTITY.md+USER.md+AGENTS.md+SOUL.md", b.buildCognitionLayer(bundle, true))
+		}
 
 		skillsLayer := ""
 		skipSkills := params.DisableSkillsPrompt != nil && *params.DisableSkillsPrompt
@@ -143,14 +159,20 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 				skillsLayer = b.buildSkillsContext(params.Skills, params.LoadedSkills, mode)
 			}
 		}
-		appendLayer("skills", 70, "runtime_skills", skillsLayer)
+		appendLayer("skills", 50, "runtime_skills", skillsLayer)
+
+		appendLayer("spawnable_catalog", 60, "dynamic_catalog", buildSpawnableAgentCatalogLayer(strings.TrimSpace(params.SpawnableAgentCatalog)))
 
 		toolSummary := strings.TrimSpace(params.ToolSummary)
 		if toolSummary == "" {
 			toolSummary = b.BuildToolsSummary(params.Tools)
 		}
-		appendLayer("tools", 80, "runtime_tools", toolSummary)
-		appendLayer("context", 90, "runtime_context", b.buildMainContext(strings.TrimSpace(params.SpawnableAgentCatalog), params.SessionSummary, mode))
+		if toolSummary == "" {
+			toolSummary = b.buildLegacyBuiltinToolLayer(mode)
+		}
+		appendLayer("tools", 70, "runtime_tools", toolSummary)
+		appendLayer("context_summary", 80, "session_summary", b.buildContextSummary(params.SessionSummary))
+		appendLayer("runtime_context", 90, "runtime_context", b.buildRuntimeContext(mode, params.WorkspaceRoot))
 		appendLayer("user_info", 100, "session_identity", b.buildUserInfo(params.SessionKey))
 	}
 
@@ -182,13 +204,17 @@ func (b *ContextBuilder) buildSubagentCorePrompt(agentCorePrompt string, mode Pr
 	if content == "" {
 		return ""
 	}
+	if strings.HasPrefix(content, "# Agent Core Prompt") {
+		return content
+	}
 	return "# Core Prompt\n\n" + content
 }
 
-func (b *ContextBuilder) buildMainContext(spawnableAgentCatalog string, sessionSummary string, mode PromptMode) string {
+func (b *ContextBuilder) buildMainContext(spawnableAgentCatalog string, sessionSummary string, workspaceRoot string, mode PromptMode) string {
 	parts := []string{
 		buildSpawnableAgentCatalogLayer(strings.TrimSpace(spawnableAgentCatalog)),
 		b.buildContextSummary(sessionSummary),
+		b.buildWorkspace(workspaceRoot),
 		b.buildRuntimeSnapshot(mode),
 	}
 	return joinNonEmpty(parts, "\n\n---\n\n")
@@ -200,16 +226,12 @@ func (b *ContextBuilder) buildSubagentContext(
 	sessionKey string,
 	mode PromptMode,
 ) string {
-	parts := []string{
+	return nestPromptSection(
+		"# Subagent Runtime Context",
 		b.buildContextSummary(sessionSummary),
 		b.buildRuntimeContext(mode, workspaceRoot),
 		b.buildUserInfo(sessionKey),
-	}
-	content := joinNonEmpty(parts, "\n\n---\n\n")
-	if content == "" {
-		return ""
-	}
-	return "# Subagent Runtime Context\n\n" + content
+	)
 }
 
 func (b *ContextBuilder) buildUserInfo(sessionKey string) string {
@@ -275,45 +297,42 @@ func (b *ContextBuilder) buildSubagentCognitionSnapshot(bundle bootstrapBundle) 
 }
 
 func (b *ContextBuilder) buildCognitionSections(bundle bootstrapBundle, includeAgents bool, level int) []string {
-	sections := []string{
-		buildTitledCognitionSection("Identity", strings.TrimSpace(bundle.Identity), level),
+	sections := make([]string, 0, 4)
+	appendRaw := func(content string) {
+		content = strings.TrimSpace(content)
+		if content == "" {
+			return
+		}
+		sections = append(sections, content)
 	}
-	if includeAgents {
-		sections = append(sections, buildTitledRawCognitionSection("Collaboration Rules", strings.TrimSpace(bundle.Agents), level))
+
+	if bundle.PreferIdentityUserBeforeAgents() {
+		appendRaw(bundle.Identity)
+		appendRaw(bundle.User)
+		if includeAgents {
+			appendRaw(bundle.Agents)
+		}
+		appendRaw(bundle.Soul)
+	} else {
+		appendRaw(bundle.Identity)
+		if includeAgents {
+			appendRaw(bundle.Agents)
+		}
+		appendRaw(bundle.User)
+		appendRaw(bundle.Soul)
 	}
-	sections = append(sections,
-		buildTitledCognitionSection("User Context", strings.TrimSpace(bundle.User), level),
-		buildTitledCognitionSection("Personality", strings.TrimSpace(bundle.Soul), level),
-	)
+
 	out := make([]string, 0, len(sections))
 	for _, section := range sections {
 		if strings.TrimSpace(section) != "" {
-			out = append(out, section)
+			if level > 1 {
+				out = append(out, section)
+			} else {
+				out = append(out, section)
+			}
 		}
 	}
 	return out
-}
-
-func buildTitledCognitionSection(title, content string, level int) string {
-	content = strings.TrimSpace(content)
-	if title == "" || content == "" {
-		return ""
-	}
-	if level < 1 {
-		level = 1
-	}
-	return strings.Repeat("#", level) + " " + title + "\n\n" + shiftMarkdownHeadings(content, level)
-}
-
-func buildTitledRawCognitionSection(title, content string, level int) string {
-	content = strings.TrimSpace(content)
-	if title == "" || content == "" {
-		return ""
-	}
-	if level < 1 {
-		level = 1
-	}
-	return strings.Repeat("#", level) + " " + title + "\n\n" + content
 }
 
 func shiftMarkdownHeadings(content string, delta int) string {
@@ -393,13 +412,26 @@ func renderPromptLayers(layers []PromptLayerSnapshot) string {
 	return joinNonEmpty(parts, "\n\n---\n\n")
 }
 
+func nestPromptSection(title string, sections ...string) string {
+	title = strings.TrimSpace(title)
+	parts := make([]string, 0, len(sections)+1)
+	if title != "" {
+		parts = append(parts, title)
+	}
+	for _, section := range sections {
+		section = strings.TrimSpace(section)
+		if section == "" {
+			continue
+		}
+		parts = append(parts, shiftMarkdownHeadings(section, 1))
+	}
+	return joinNonEmpty(parts, "\n\n")
+}
+
 func buildSpawnableAgentCatalogLayer(content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ""
-	}
-	if strings.Contains(content, "<available_agents>") {
-		return content
 	}
 	content = strings.Replace(content, "## Available Agents", "# Available Agents", 1)
 	return fmt.Sprintf("\n%s\n", content)
@@ -417,10 +449,10 @@ func (b *ContextBuilder) resolveAgentCorePrompt(agentCorePrompt string, mode Pro
 	if content == "" {
 		return ""
 	}
-	if strings.HasPrefix(content, "#") || strings.HasPrefix(content, "<") {
+	if strings.HasPrefix(content, "#") {
 		return content
 	}
-	return buildTitledRawCognitionSection("Agent Core Prompt", content, 1)
+	return "# Agent Core Prompt\n\n" + content
 }
 
 func (b *ContextBuilder) buildBuiltinBoundary(mode PromptMode) string {
@@ -491,22 +523,23 @@ Any fixed identity or role wording elsewhere in this system prompt is only tempo
 
 Bootstrap behavior rules:
 - During bootstrap, ` + "`BOOTSTRAP.md`" + ` overrides agent-core role wording for first-run onboarding, greetings, and identity questions.
-- If the user says "你好", "hi", "hello", asks "你是谁", "你叫什么", or asks what you are, do not give a generic assistant introduction.
-- Do not reply with generic introductions like "I am an AI assistant", "我是一个 AI 助手", "I am SunClaw", or any other fixed self-description that is not already written in ` + "`IDENTITY.md`" + `.
+- If the user says "hi", "hello", asks "who are you", "what are you called", or asks what you are, do not give a generic assistant introduction.
+- Do not reply with generic introductions like "I am an AI assistant", "I am SunClaw", or any other fixed self-description that is not already written in ` + "`IDENTITY.md`" + `.
 - Your first job is to say that you have not been initialized yet, then guide the user to define your identity, role, vibe, and the user profile.
 
 If the user asks who you are, do not answer with a fixed identity unless that identity has already been explicitly written into ` + "`IDENTITY.md`" + `.`
 }
 
-func wrapPromptFileLayer(title, filename, content string) string {
+func wrapPromptFileLayer(content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ""
 	}
-	if strings.TrimSpace(title) == "" {
-		return fmt.Sprintf("### %s\n\n%s", filename, content)
-	}
-	return fmt.Sprintf("%s\n\n### %s\n\n%s", title, filename, content)
+	return fmt.Sprintf("%s", content)
+}
+
+func (b *ContextBuilder) buildBootstrapGuideLayer(content string) string {
+	return nestPromptSection("# Bootstrap Guide", content)
 }
 
 func (b *ContextBuilder) buildRuntimeSnapshot(mode PromptMode) string {
@@ -515,7 +548,7 @@ func (b *ContextBuilder) buildRuntimeSnapshot(mode PromptMode) string {
 	}
 
 	parts := []string{
-		fmt.Sprintf("# Runtime Context\n\n**Current Time**: %s", time.Now().Format("2006-01-02 15:04:05 MST")),
+		fmt.Sprintf("# Clock\n\n**Current Time**: %s", time.Now().Format("2006-01-02 15:04:05 MST")),
 	}
 	if mode != PromptModeMinimal {
 		parts = append(parts, b.buildRuntime())
@@ -528,11 +561,11 @@ func (b *ContextBuilder) buildRuntimeContext(mode PromptMode, workspaceRoot stri
 		return ""
 	}
 
-	parts := []string{
+	return nestPromptSection(
+		"# Runtime Context",
 		b.buildWorkspace(workspaceRoot),
 		b.buildRuntimeSnapshot(mode),
-	}
-	return joinNonEmpty(parts, "\n\n---\n\n")
+	)
 }
 
 func (b *ContextBuilder) loadBootstrapBundleForOwner(ownerID, workspaceRoot string) bootstrapBundle {

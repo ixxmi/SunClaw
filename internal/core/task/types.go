@@ -9,16 +9,18 @@ const (
 type Status string
 
 const (
-	StatusAccepted Status = "accepted"
-	StatusRunning  Status = "running"
-	StatusDone     Status = "completed"
-	StatusFailed   Status = "failed"
-	StatusTimedOut Status = "timed_out"
+	StatusAccepted    Status = "accepted"
+	StatusRunning     Status = "running"
+	StatusDone        Status = "completed"
+	StatusFailed      Status = "failed"
+	StatusTimedOut    Status = "timed_out"
+	StatusCanceled    Status = "canceled"
+	StatusInterrupted Status = "interrupted"
 )
 
 func (s Status) IsTerminal() bool {
 	switch s {
-	case StatusDone, StatusFailed, StatusTimedOut:
+	case StatusDone, StatusFailed, StatusTimedOut, StatusCanceled, StatusInterrupted:
 		return true
 	default:
 		return false
@@ -52,15 +54,23 @@ type SubagentPayload struct {
 }
 
 type Record struct {
-	ID        string           `json:"id"`
-	Backend   Backend          `json:"backend"`
-	Status    Status           `json:"status"`
-	Summary   string           `json:"summary,omitempty"`
-	CreatedAt int64            `json:"created_at"`
-	StartedAt *int64           `json:"started_at,omitempty"`
-	EndedAt   *int64           `json:"ended_at,omitempty"`
-	Result    *Result          `json:"result,omitempty"`
-	Subagent  *SubagentPayload `json:"subagent,omitempty"`
+	ID           string           `json:"id"`
+	Backend      Backend          `json:"backend"`
+	Type         string           `json:"type,omitempty"`
+	Status       Status           `json:"status"`
+	Summary      string           `json:"summary,omitempty"`
+	SessionKey   string           `json:"session_key,omitempty"`
+	AgentID      string           `json:"agent_id,omitempty"`
+	PlanID       string           `json:"plan_id,omitempty"`
+	StepID       string           `json:"step_id,omitempty"`
+	ParentTaskID string           `json:"parent_task_id,omitempty"`
+	ContinueOf   string           `json:"continue_of,omitempty"`
+	CanContinue  bool             `json:"can_continue"`
+	CreatedAt    int64            `json:"created_at"`
+	StartedAt    *int64           `json:"started_at,omitempty"`
+	EndedAt      *int64           `json:"ended_at,omitempty"`
+	Result       *Result          `json:"result,omitempty"`
+	Subagent     *SubagentPayload `json:"subagent,omitempty"`
 }
 
 func cloneRecord(record *Record) *Record {

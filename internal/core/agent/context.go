@@ -77,7 +77,7 @@ func (b *ContextBuilder) BuildToolsSummary(tools []Tool) string {
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", name, desc))
 	}
 
-	return fmt.Sprintf("# Available Tools\n\n工具名称区分大小写，调用时请严格按列出的名称使用。\n结构化工具定义与当前运行时策略始终高于此摘要。\n\n%s\n",
+	return fmt.Sprintf("# Available Tools\n\nTool names are case-sensitive. Use them exactly as listed.\nStructured tool definitions and current runtime policy always override this summary.\n\n%s\n",
 		strings.Join(lines, "\n"))
 }
 
@@ -138,7 +138,13 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"send_message":           "Send a proactive text message to the current or specified chat. Use this for acknowledgement, progress updates, or intentional multi-message delivery",
 		"send_file":              "Send one image or file to the current or specified chat",
 		"message":                "Send messages and channel actions (polls, reactions, buttons)",
+		"plan_update":            "Create or replace the active execution plan for the current session with structured steps",
+		"plan_get":               "Read the current active execution plan for the session",
 		"sessions_spawn":         "Spawn one tracked child-agent task for the current delegated step; it will auto-announce the result back when finished",
+		"task_get":               "Read a tracked task by ID, including status, bindings, and result",
+		"task_list":              "List tracked tasks for the current session or plan",
+		"task_continue":          "Continue a finished subagent task by reusing its child session context as a new tracked run",
+		"task_stop":              "Request cancellation of a running tracked task",
 		"memory_search":          "Search stored memories and prior notes",
 		"memory_add":             "Save useful information into memory",
 		"cron":                   "Manage goclaw's built-in cron/scheduler service",
@@ -154,7 +160,7 @@ func (b *ContextBuilder) buildLegacyBuiltinToolLayer(mode PromptMode) string {
 		"browser_click", "browser_fill_input", "browser_execute_script",
 		"web_search", "web_fetch",
 		"use_skill", "send_message", "send_file", "message",
-		"sessions_spawn", "memory_search", "memory_add",
+		"plan_update", "plan_get", "sessions_spawn", "task_get", "task_list", "task_continue", "task_stop", "memory_search", "memory_add",
 		"cron", "reminder", "session_status",
 	}
 
@@ -189,7 +195,7 @@ func (b *ContextBuilder) buildToolCallStyle() string {
 
 **Before non-trivial work**:
 - Briefly acknowledge the request in natural language and say what you are doing next
-- Example: "收到，我先帮你看一下相关代码。"
+- Example: "I got it. I'll inspect the relevant code first."
 
 **For long or multi-step work**:
 - Use send_message for meaningful progress updates so the user is not left wondering whether work is still happening
@@ -340,14 +346,14 @@ Be human, clear, and reassuring. Sound like a capable assistant working alongsid
 ### Start -> progress -> result
 
 - For non-trivial requests, begin with a short acknowledgement that confirms you received the request and what you will do next.
-- For trivial questions or instant answers, reply directly. Do not fake a process with "我先看下" when no real waiting or tool work is needed.
+- For trivial questions or instant answers, reply directly. Do not fake a process with "I'll go check" when no real waiting or tool work is needed.
 - Good examples:
-  - "收到，我先帮你看下这个问题。"
-  - "明白，我先检查相关配置和代码。"
+  - "Understood. I'll inspect the relevant code first."
+  - "I'll check the relevant config and code now."
 - If work may take noticeable time, proactively send a short progress update instead of going silent.
 - Good examples:
-  - "我在帮你处理，您稍等一下。"
-  - "我已经定位到关键文件了，继续整理中。"
+  - "I'm working on it now. Give me a moment."
+  - "I've found the key files and I'm organizing the findings."
 - Only send a progress update when there is actual waiting or real new progress. Avoid repetitive filler updates.
 - When finished, give the result first, then only the necessary detail.
 
@@ -362,8 +368,8 @@ Be human, clear, and reassuring. Sound like a capable assistant working alongsid
 - Do not fragment a normal answer into many small messages just because you can.
 - In caring or casual one-to-one chats, when the user is sharing feelings or feeling low, default to two short messages instead of one overly complete block unless the context clearly calls for a single reply.
 - Example:
-  - "哎，心情不好的时候真的很难受。"
-  - "发生什么事了？想说就说，我听着。"
+  - "That sounds really hard."
+  - "What happened? If you want to talk, I'm here."
 
 ### Tone matching
 
@@ -413,7 +419,7 @@ func (b *ContextBuilder) buildMessagingSection() string {
 - Prefer 'send_message' when you want deliberate acknowledgement, progress reporting, or exact control over whether the user sees one message or several
 - Use 'send_file' to send an image or file to the current chat; it supports local file paths, remote URLs, or base64 data
 - 'message' is a legacy alias for 'send_message'
-- For long-running work, do not disappear silently. Send a short status such as "我在帮你处理，您稍等一下。"
+- For long-running work, do not disappear silently. Send a short status such as "I'm working on it now. Give me a moment."
 - For emotional support or casual one-to-one chat, prefer two short messages instead of one full paragraph when that feels warmer and more natural
 - Example two-message cadence:
 - first: acknowledge emotion
@@ -427,7 +433,7 @@ func (b *ContextBuilder) buildWorkspace(workspaceRoot string) string {
 	if strings.TrimSpace(workspaceRoot) == "" {
 		workspaceRoot = b.workspace
 	}
-	return fmt.Sprintf(`## Workspace
+	return fmt.Sprintf(`# Workspace
 
 Your working directory is: %s
 Treat this directory as the isolated workspace for the current user/session unless explicitly instructed otherwise.`, workspaceRoot)
@@ -436,7 +442,7 @@ Treat this directory as the isolated workspace for the current user/session unle
 // buildRuntime 构建运行时信息
 func (b *ContextBuilder) buildRuntime() string {
 	host, _ := os.Hostname()
-	return fmt.Sprintf(`## Runtime
+	return fmt.Sprintf(`# Runtime
 
 Runtime: host=%s os=%s (%s) arch=%s`, host, runtime.GOOS, runtime.GOARCH, runtime.GOARCH)
 }
@@ -770,20 +776,20 @@ func (b *ContextBuilder) buildBootstrapSectionForOwner(ownerID string) string {
 	parts := []string{}
 	if bundle.PreferIdentityUserBeforeAgents() {
 		parts = append(parts,
-			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
-			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
-			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
-			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Agents)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Soul)),
 		)
 	} else {
 		if bundle.NeedsBootstrapGuide() && strings.TrimSpace(bundle.BootstrapGuide) != "" {
-			parts = append(parts, wrapPromptFileLayer("", "BOOTSTRAP.md", bundle.BootstrapGuide))
+			parts = append(parts, wrapPromptFileLayer(bundle.BootstrapGuide))
 		}
 		parts = append(parts,
-			wrapPromptFileLayer("", "IDENTITY.md", strings.TrimSpace(bundle.Identity)),
-			wrapPromptFileLayer("", "USER.md", strings.TrimSpace(bundle.User)),
-			wrapPromptFileLayer("", "AGENTS.md", strings.TrimSpace(bundle.Agents)),
-			wrapPromptFileLayer("", "SOUL.md", strings.TrimSpace(bundle.Soul)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Identity)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.User)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Agents)),
+			wrapPromptFileLayer(strings.TrimSpace(bundle.Soul)),
 		)
 	}
 	bootstrap := joinNonEmpty(parts, "\n\n")

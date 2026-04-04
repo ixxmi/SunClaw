@@ -125,6 +125,12 @@ type SubagentRunParams struct {
 	RequesterSessionKey string
 	RequesterOrigin     *DeliveryContext
 	RequesterDisplayKey string
+	RequesterAgentID    string
+	TargetAgentID       string
+	BootstrapOwnerID    string
+	PlanID              string
+	StepID              string
+	ContinueOf          string
 	Task                string
 	Cleanup             string
 	Label               string

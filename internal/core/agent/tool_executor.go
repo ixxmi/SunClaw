@@ -240,10 +240,10 @@ func (o *Orchestrator) executeToolCalls(ctx context.Context, toolCalls []ToolCal
 }
 
 func shouldTrackPendingSubagent(toolName string, result ToolResult, err error) bool {
-	if toolName != "sessions_spawn" || err != nil {
+	if (toolName != "sessions_spawn" && toolName != "task_continue") || err != nil {
 		return false
 	}
 
 	text := strings.TrimSpace(extractToolResultContent(result.Content))
-	return strings.HasPrefix(text, "Subagent spawned successfully.")
+	return strings.HasPrefix(text, "Subagent spawned successfully.") || strings.Contains(text, `"status": "continued"`) || strings.Contains(text, `"status":"continued"`)
 }
