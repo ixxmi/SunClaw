@@ -4,18 +4,21 @@ import (
 	"context"
 	"testing"
 
+	"github.com/smallnest/goclaw/internal/core/execution"
 	"github.com/smallnest/goclaw/internal/core/task"
 )
 
 func TestStopSubagentTaskCancelsRunningTask(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
 	if err := taskMgr.Create(&task.Record{
-		ID:      "task-1",
-		Backend: task.BackendSubagent,
-		Type:    "subagent",
-		Status:  task.StatusRunning,
+		ID:         "task-1",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusRunning,
+		SessionKey: "session-main",
 		Subagent: &task.SubagentPayload{
-			ChildSessionKey: "agent:coder:subagent:1",
+			RequesterSessionKey: "session-main",
+			ChildSessionKey:     "agent:coder:subagent:1",
 		},
 	}); err != nil {
 		t.Fatalf("Create error: %v", err)
@@ -32,7 +35,8 @@ func TestStopSubagentTaskCancelsRunningTask(t *testing.T) {
 		},
 	})
 
-	result, err := manager.stopSubagentTask(context.Background(), "task-1")
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	result, err := manager.stopSubagentTask(ctx, "task-1")
 	if err != nil {
 		t.Fatalf("stopSubagentTask error: %v", err)
 	}
@@ -47,12 +51,14 @@ func TestStopSubagentTaskCancelsRunningTask(t *testing.T) {
 func TestStopSubagentTaskRejectsNonRunningTask(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
 	if err := taskMgr.Create(&task.Record{
-		ID:      "task-2",
-		Backend: task.BackendSubagent,
-		Type:    "subagent",
-		Status:  task.StatusDone,
+		ID:         "task-2",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusDone,
+		SessionKey: "session-main",
 		Subagent: &task.SubagentPayload{
-			ChildSessionKey: "agent:coder:subagent:2",
+			RequesterSessionKey: "session-main",
+			ChildSessionKey:     "agent:coder:subagent:2",
 		},
 	}); err != nil {
 		t.Fatalf("Create error: %v", err)
@@ -63,7 +69,8 @@ func TestStopSubagentTaskRejectsNonRunningTask(t *testing.T) {
 		subagentTaskControls: map[string]*subagentTaskControl{},
 	}
 
-	if _, err := manager.stopSubagentTask(context.Background(), "task-2"); err == nil {
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	if _, err := manager.stopSubagentTask(ctx, "task-2"); err == nil {
 		t.Fatalf("expected error for non-running task")
 	}
 }

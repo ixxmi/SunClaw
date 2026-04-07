@@ -33,6 +33,14 @@ func (s StepStatus) IsTerminal() bool {
 	}
 }
 
+func BelongsToSession(record *Record, sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || record == nil {
+		return false
+	}
+	return strings.TrimSpace(record.SessionKey) == sessionKey
+}
+
 type StepKind string
 
 const (

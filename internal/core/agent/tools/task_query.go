@@ -51,7 +51,7 @@ func (t *TaskGetTool) Execute(ctx context.Context, params map[string]interface{}
 	}
 
 	record, ok := t.taskManager.Get(taskID)
-	if !ok || record == nil {
+	if !ok || record == nil || !task.BelongsToSession(record, taskSessionKeyFromContext(ctx)) {
 		return `{"status":"not_found"}`, nil
 	}
 
@@ -109,18 +109,30 @@ func (t *TaskListTool) Execute(ctx context.Context, params map[string]interface{
 	planID = strings.TrimSpace(planID)
 	sessionKey = strings.TrimSpace(sessionKey)
 	statusFilter = strings.TrimSpace(statusFilter)
+	currentSessionKey := taskSessionKeyFromContext(ctx)
+
+	if sessionKey != "" && sessionKey != currentSessionKey {
+		return "", fmt.Errorf("session_key must match the current session")
+	}
+	if sessionKey == "" {
+		sessionKey = currentSessionKey
+	}
 
 	var records []*task.Record
 	if planID != "" {
 		records = t.taskManager.ListByPlan(planID)
 	} else {
-		if sessionKey == "" {
-			sessionKey = strings.TrimSpace(execution.SessionKey(ctx))
-		}
-		if sessionKey == "" {
-			sessionKey = "main"
-		}
 		records = t.taskManager.ListBySession(sessionKey)
+	}
+
+	if planID != "" {
+		filteredBySession := make([]*task.Record, 0, len(records))
+		for _, record := range records {
+			if task.BelongsToSession(record, currentSessionKey) {
+				filteredBySession = append(filteredBySession, record)
+			}
+		}
+		records = filteredBySession
 	}
 
 	if statusFilter != "" {
@@ -138,6 +150,14 @@ func (t *TaskListTool) Execute(ctx context.Context, params map[string]interface{
 		return "", err
 	}
 	return string(data), nil
+}
+
+func taskSessionKeyFromContext(ctx context.Context) string {
+	sessionKey := strings.TrimSpace(execution.SessionKey(ctx))
+	if sessionKey == "" {
+		return "main"
+	}
+	return sessionKey
 }
 
 type TaskStopResult struct {
@@ -193,6 +213,11 @@ func (t *TaskStopTool) Execute(ctx context.Context, params map[string]interface{
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return "", fmt.Errorf("task_id is required")
+	}
+
+	record, ok := t.taskManager.Get(taskID)
+	if !ok || record == nil || !task.BelongsToSession(record, taskSessionKeyFromContext(ctx)) {
+		return "", fmt.Errorf("task not found: %s", taskID)
 	}
 
 	result, err := t.stopFunc(ctx, taskID)

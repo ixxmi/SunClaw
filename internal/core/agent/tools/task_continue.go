@@ -72,7 +72,7 @@ func (t *TaskContinueTool) Execute(ctx context.Context, params map[string]interf
 	}
 
 	record, ok := t.taskManager.Get(taskID)
-	if !ok || record == nil {
+	if !ok || record == nil || !task.BelongsToSession(record, taskSessionKeyFromContext(ctx)) {
 		return "", fmt.Errorf("task not found: %s", taskID)
 	}
 	if record.Backend != task.BackendSubagent || record.Subagent == nil {

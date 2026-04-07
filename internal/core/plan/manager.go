@@ -61,6 +61,10 @@ func (m *Manager) UpsertActive(record *Record) (*Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if existing, ok := m.records[normalized.ID]; ok && existing != nil && existing.SessionKey != normalized.SessionKey {
+		return nil, fmt.Errorf("plan %s does not belong to session %s", normalized.ID, normalized.SessionKey)
+	}
+
 	for id, existing := range m.records {
 		if existing == nil || existing.SessionKey != normalized.SessionKey || id == normalized.ID {
 			continue

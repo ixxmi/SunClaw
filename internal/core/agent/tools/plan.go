@@ -102,6 +102,10 @@ func (t *PlanUpdateTool) Execute(ctx context.Context, params map[string]interfac
 		} else {
 			planID = uuid.NewString()
 		}
+	} else {
+		if existing, ok := t.manager.Get(planID); ok && existing != nil && !plan.BelongsToSession(existing, sessionKey) {
+			return "", fmt.Errorf("plan not found: %s", planID)
+		}
 	}
 
 	currentStepID, _ := params["current_step_id"].(string)
@@ -201,11 +205,12 @@ func (t *PlanGetTool) Execute(ctx context.Context, params map[string]interface{}
 	var ok bool
 	if planID != "" {
 		record, ok = t.manager.Get(planID)
-	} else {
-		sessionKey := strings.TrimSpace(execution.SessionKey(ctx))
-		if sessionKey == "" {
-			sessionKey = "main"
+		if ok && record != nil && !plan.BelongsToSession(record, sessionKeyFromContext(ctx)) {
+			record = nil
+			ok = false
 		}
+	} else {
+		sessionKey := sessionKeyFromContext(ctx)
 		record, ok = t.manager.GetActiveBySession(sessionKey)
 	}
 	if !ok || record == nil {
@@ -217,6 +222,14 @@ func (t *PlanGetTool) Execute(ctx context.Context, params map[string]interface{}
 		return "", err
 	}
 	return string(data), nil
+}
+
+func sessionKeyFromContext(ctx context.Context) string {
+	sessionKey := strings.TrimSpace(execution.SessionKey(ctx))
+	if sessionKey == "" {
+		return "main"
+	}
+	return sessionKey
 }
 
 func stringValue(value interface{}) string {

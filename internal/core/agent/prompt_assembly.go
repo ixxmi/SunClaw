@@ -126,7 +126,6 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 
 	switch assemblyMode {
 	case PromptAssemblyModeSubagent:
-		appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
 		appendLayer("core_prompt", 20, resolveAgentCoreSource(params.AgentCorePrompt), b.buildSubagentCorePrompt(params.AgentCorePrompt, mode))
 		appendLayer("subagent_descriptor", 30, "dynamic_subagent", strings.TrimSpace(params.SubagentDescriptor))
 
@@ -140,9 +139,6 @@ func (b *ContextBuilder) AssemblePrompt(params *PromptAssemblyParams) *PromptAss
 		appendLayer("tools", 40, "runtime_tools", toolSummary)
 		appendLayer("subagent_context", 50, "subagent_context", b.buildSubagentContext(params.SessionSummary, params.WorkspaceRoot, params.SessionKey, mode))
 	default:
-		if !hasConfiguredAgentPrompt {
-			appendLayer("builtin_boundary", 10, "builtin_boundary", b.buildBuiltinBoundary(mode))
-		}
 		if !hasConfiguredAgentPrompt && includeBootstrapGuide {
 			appendLayer("bootstrap_guide", 20, "BOOTSTRAP.md", b.buildBootstrapGuideLayer(bundle.BootstrapGuide))
 		}

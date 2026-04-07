@@ -333,6 +333,10 @@ func TestStreamAssistantResponse_SubagentSkipsBootstrapGuideAndSkills(t *testing
 		t.Fatalf("expected subagent tools layer in system prompt, got %q", systemPrompt)
 	}
 	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
 		"# Skills (mandatory)",
 		"# Selected Skills (active)",
 		"## Bootstrap Mode",
@@ -412,6 +416,10 @@ func TestStreamAssistantResponse_SubagentDoesNotIncludeIdentitySoulUserEvenWhenA
 		}
 	}
 	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
 		"# Cognition Snapshot",
 		"# AGENTS",
 		"subagent collaboration rules",

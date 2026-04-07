@@ -22,7 +22,11 @@ func (m *AgentManager) continueSubagentTask(ctx context.Context, taskID, message
 	}
 
 	record, ok := m.taskManager.Get(taskID)
-	if !ok || record == nil {
+	currentSessionKey := strings.TrimSpace(execution.SessionKey(ctx))
+	if currentSessionKey == "" {
+		currentSessionKey = "main"
+	}
+	if !ok || record == nil || !task.BelongsToSession(record, currentSessionKey) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 	if record.Backend != task.BackendSubagent || record.Subagent == nil {
@@ -207,7 +211,11 @@ func (m *AgentManager) stopSubagentTask(ctx context.Context, taskID string) (*to
 	}
 
 	record, ok := m.taskManager.Get(taskID)
-	if !ok || record == nil {
+	currentSessionKey := strings.TrimSpace(execution.SessionKey(ctx))
+	if currentSessionKey == "" {
+		currentSessionKey = "main"
+	}
+	if !ok || record == nil || !task.BelongsToSession(record, currentSessionKey) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 	if record.Backend != task.BackendSubagent || record.Subagent == nil {

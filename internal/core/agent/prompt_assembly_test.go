@@ -161,7 +161,7 @@ func TestAssemblePrompt_OmitsAvailableAgentsWhenCatalogIsEmpty(t *testing.T) {
 	}
 }
 
-func TestAssemblePrompt_MainIncludesBuiltinBoundary(t *testing.T) {
+func TestAssemblePrompt_EmptyAgentPromptDoesNotIncludeBuiltinBoundary(t *testing.T) {
 	workspaceDir := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspaceDir), workspaceDir)
 
@@ -176,8 +176,8 @@ func TestAssemblePrompt_MainIncludesBuiltinBoundary(t *testing.T) {
 		"# Working Norms",
 		"# Task Orchestration",
 	} {
-		if !strings.Contains(got, marker) {
-			t.Fatalf("expected builtin marker %q in prompt, got %q", marker, got)
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect builtin marker %q in empty agent prompt path, got %q", marker, got)
 		}
 	}
 }
@@ -212,7 +212,6 @@ func TestAssemblePrompt_EmptyAgentPromptStillIncludesCognitionFiles(t *testing.T
 	}).SystemPrompt
 
 	for _, marker := range []string{
-		"# Builtin Boundary",
 		"identity cognition",
 		"agents cognition",
 		"soul cognition",
@@ -220,6 +219,16 @@ func TestAssemblePrompt_EmptyAgentPromptStillIncludesCognitionFiles(t *testing.T
 	} {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("expected %q when agent prompt is empty, got %q", marker, got)
+		}
+	}
+	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect builtin marker %q when agent prompt is empty, got %q", marker, got)
 		}
 	}
 }
@@ -245,7 +254,6 @@ func TestAssemblePrompt_SubagentUsesCoreDescriptorAndRuntimeContext(t *testing.T
 	}).SystemPrompt
 
 	for _, marker := range []string{
-		"# Builtin Boundary",
 		"# Agent Core Prompt",
 		"subagent core",
 		"# Subagent Context",
@@ -263,6 +271,10 @@ func TestAssemblePrompt_SubagentUsesCoreDescriptorAndRuntimeContext(t *testing.T
 	}
 
 	for _, marker := range []string{
+		"# Builtin Boundary",
+		"# Safety & Compliance",
+		"# Working Norms",
+		"# Task Orchestration",
 		"# Available Agents",
 		"# Skills (mandatory)",
 		"# Selected Skills (active)",
@@ -272,12 +284,11 @@ func TestAssemblePrompt_SubagentUsesCoreDescriptorAndRuntimeContext(t *testing.T
 		}
 	}
 
-	boundaryIdx := strings.Index(got, "# Builtin Boundary")
 	coreIdx := strings.Index(got, "# Agent Core Prompt")
 	descriptorIdx := strings.Index(got, "# Subagent Context")
 	toolsIdx := strings.Index(got, "# Available Tools")
 	contextIdx := strings.Index(got, "# Subagent Runtime Context")
-	if !(boundaryIdx < coreIdx && coreIdx < descriptorIdx && descriptorIdx < toolsIdx && toolsIdx < contextIdx) {
+	if !(coreIdx < descriptorIdx && descriptorIdx < toolsIdx && toolsIdx < contextIdx) {
 		t.Fatalf("unexpected subagent prompt order: %q", got)
 	}
 }
@@ -338,6 +349,31 @@ func TestAssemblePrompt_SkillsAreSkippedOnlyWhenFlagIsExplicitlyTrue(t *testing.
 	for _, marker := range []string{"# Skills (mandatory)", "<skill name=\"weather\">", "# Selected Skills (active)"} {
 		if strings.Contains(got, marker) {
 			t.Fatalf("did not expect %q in prompt when skills are explicitly skipped, got %q", marker, got)
+		}
+	}
+}
+
+func TestAssemblePrompt_EmptyAgentPromptStillHonorsDisableSkillsPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
+	skills := []*Skill{
+		{
+			Name:        "weather",
+			Description: "Use when the user asks about weather or forecast.",
+			Content:     "# Weather\n\nDetailed instructions.",
+		},
+	}
+
+	got := builder.AssemblePrompt(&PromptAssemblyParams{
+		Mode:                PromptAssemblyModeMain,
+		PromptMode:          PromptModeFull,
+		Skills:              skills,
+		DisableSkillsPrompt: boolPtr(true),
+	}).SystemPrompt
+
+	for _, marker := range []string{"# Skills (mandatory)", "<skill name=\"weather\">", "# Selected Skills (active)"} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect %q in prompt when skills are disabled, got %q", marker, got)
 		}
 	}
 }

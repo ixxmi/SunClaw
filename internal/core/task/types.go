@@ -1,5 +1,7 @@
 package task
 
+import "strings"
+
 type Backend string
 
 const (
@@ -25,6 +27,27 @@ func (s Status) IsTerminal() bool {
 	default:
 		return false
 	}
+}
+
+func OwnerSessionKey(record *Record) string {
+	if record == nil {
+		return ""
+	}
+	if trimmed := strings.TrimSpace(record.SessionKey); trimmed != "" {
+		return trimmed
+	}
+	if record.Subagent != nil {
+		return strings.TrimSpace(record.Subagent.RequesterSessionKey)
+	}
+	return ""
+}
+
+func BelongsToSession(record *Record, sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || record == nil {
+		return false
+	}
+	return OwnerSessionKey(record) == sessionKey
 }
 
 type DeliveryContext struct {

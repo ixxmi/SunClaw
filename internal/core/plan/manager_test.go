@@ -94,3 +94,31 @@ func TestManagerGetActiveBySessionReturnsLatestActive(t *testing.T) {
 		t.Fatalf("expected latest active plan, got %s", record.ID)
 	}
 }
+
+func TestManagerUpsertActiveRejectsCrossSessionPlanIDReuse(t *testing.T) {
+	store := &memoryStore{
+		records: map[string]*Record{
+			"plan-1": {
+				ID:         "plan-1",
+				SessionKey: "session-a",
+				Status:     StatusActive,
+			},
+		},
+	}
+	manager := NewManagerWithStore(store)
+	if err := manager.Load(); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+
+	if _, err := manager.UpsertActive(&Record{
+		ID:         "plan-1",
+		SessionKey: "session-b",
+		AgentID:    "vibecoding",
+		Goal:       "other session overwrite attempt",
+		Steps: []Step{
+			{Title: "step", Goal: "goal", Kind: StepKindTask},
+		},
+	}); err == nil {
+		t.Fatalf("expected cross-session overwrite to be rejected")
+	}
+}

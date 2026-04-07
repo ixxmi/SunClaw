@@ -158,6 +158,65 @@ func TestPlanGetToolReturnsActivePlan(t *testing.T) {
 	}
 }
 
+func TestPlanGetToolRejectsCrossSessionPlanID(t *testing.T) {
+	manager := plan.NewManagerWithStore(&planMemoryStore{})
+	if _, err := manager.UpsertActive(&plan.Record{
+		ID:         "plan-foreign",
+		SessionKey: "session-foreign",
+		AgentID:    "vibecoding",
+		Goal:       "foreign",
+		Steps: []plan.Step{
+			{ID: "step-1", Title: "步骤1", Goal: "做事", Kind: plan.StepKindTask},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertActive error: %v", err)
+	}
+
+	tool := NewPlanGetTool(manager)
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{"plan_id": "plan-foreign"})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if strings.TrimSpace(out) != `{"status":"not_found"}` {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestPlanUpdateToolRejectsCrossSessionPlanID(t *testing.T) {
+	manager := plan.NewManagerWithStore(&planMemoryStore{})
+	if _, err := manager.UpsertActive(&plan.Record{
+		ID:         "plan-foreign",
+		SessionKey: "session-foreign",
+		AgentID:    "vibecoding",
+		Goal:       "foreign",
+		Steps: []plan.Step{
+			{ID: "step-1", Title: "步骤1", Goal: "做事", Kind: plan.StepKindTask},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertActive error: %v", err)
+	}
+
+	tool := NewPlanUpdateTool(manager)
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{
+		SessionKey: "session-main",
+		AgentID:    "vibecoding",
+	})
+	_, err := tool.Execute(ctx, map[string]interface{}{
+		"plan_id": "plan-foreign",
+		"goal":    "attempt overwrite",
+		"steps": []interface{}{
+			map[string]interface{}{
+				"title": "理解代码",
+				"goal":  "梳理现状",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected cross-session update to be rejected")
+	}
+}
+
 func TestTaskContinueToolInvokesHandler(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
 	if err := taskMgr.Create(&task.Record{
@@ -166,8 +225,10 @@ func TestTaskContinueToolInvokesHandler(t *testing.T) {
 		Type:        "subagent",
 		Status:      task.StatusDone,
 		CanContinue: true,
+		SessionKey:  "session-main",
 		Subagent: &task.SubagentPayload{
-			ChildSessionKey: "agent:coder:subagent:1",
+			RequesterSessionKey: "session-main",
+			ChildSessionKey:     "agent:coder:subagent:1",
 		},
 	}); err != nil {
 		t.Fatalf("Create error: %v", err)
@@ -183,7 +244,8 @@ func TestTaskContinueToolInvokesHandler(t *testing.T) {
 		}, nil
 	})
 
-	out, err := tool.Execute(context.Background(), map[string]interface{}{
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{
 		"task_id": "task-1",
 		"message": "继续处理当前步骤",
 	})
@@ -195,20 +257,57 @@ func TestTaskContinueToolInvokesHandler(t *testing.T) {
 	}
 }
 
+func TestTaskContinueToolRejectsCrossSessionTask(t *testing.T) {
+	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
+	if err := taskMgr.Create(&task.Record{
+		ID:          "task-1",
+		Backend:     task.BackendSubagent,
+		Type:        "subagent",
+		Status:      task.StatusDone,
+		CanContinue: true,
+		SessionKey:  "session-foreign",
+		Subagent: &task.SubagentPayload{
+			RequesterSessionKey: "session-foreign",
+			ChildSessionKey:     "agent:coder:subagent:1",
+		},
+	}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+
+	tool := NewTaskContinueTool(taskMgr)
+	tool.SetContinueHandler(func(ctx context.Context, taskID, message string) (*TaskContinueResult, error) {
+		t.Fatalf("continue handler should not be called for foreign task")
+		return nil, nil
+	})
+
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	if _, err := tool.Execute(ctx, map[string]interface{}{
+		"task_id": "task-1",
+		"message": "继续处理当前步骤",
+	}); err == nil {
+		t.Fatalf("expected foreign task continuation to be rejected")
+	}
+}
+
 func TestTaskGetToolReturnsTask(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
 	if err := taskMgr.Create(&task.Record{
-		ID:      "task-1",
-		Backend: task.BackendSubagent,
-		Type:    "subagent",
-		Status:  task.StatusDone,
-		Summary: "done",
+		ID:         "task-1",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusDone,
+		Summary:    "done",
+		SessionKey: "session-main",
+		Subagent: &task.SubagentPayload{
+			RequesterSessionKey: "session-main",
+		},
 	}); err != nil {
 		t.Fatalf("Create error: %v", err)
 	}
 
 	tool := NewTaskGetTool(taskMgr)
-	out, err := tool.Execute(context.Background(), map[string]interface{}{"task_id": "task-1"})
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{"task_id": "task-1"})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
@@ -217,11 +316,38 @@ func TestTaskGetToolReturnsTask(t *testing.T) {
 	}
 }
 
+func TestTaskGetToolReturnsNotFoundForCrossSessionTask(t *testing.T) {
+	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
+	if err := taskMgr.Create(&task.Record{
+		ID:         "task-1",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusDone,
+		SessionKey: "session-foreign",
+		Subagent: &task.SubagentPayload{
+			RequesterSessionKey: "session-foreign",
+		},
+	}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+
+	tool := NewTaskGetTool(taskMgr)
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{"task_id": "task-1"})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if strings.TrimSpace(out) != `{"status":"not_found"}` {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
 func TestTaskListToolFiltersByPlan(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
 	for _, record := range []*task.Record{
-		{ID: "task-1", Backend: task.BackendSubagent, Type: "subagent", Status: task.StatusRunning, PlanID: "plan-1"},
-		{ID: "task-2", Backend: task.BackendSubagent, Type: "subagent", Status: task.StatusDone, PlanID: "plan-2"},
+		{ID: "task-1", Backend: task.BackendSubagent, Type: "subagent", Status: task.StatusRunning, PlanID: "plan-1", SessionKey: "session-main", Subagent: &task.SubagentPayload{RequesterSessionKey: "session-main"}},
+		{ID: "task-2", Backend: task.BackendSubagent, Type: "subagent", Status: task.StatusDone, PlanID: "plan-2", SessionKey: "session-main", Subagent: &task.SubagentPayload{RequesterSessionKey: "session-main"}},
+		{ID: "task-3", Backend: task.BackendSubagent, Type: "subagent", Status: task.StatusDone, PlanID: "plan-1", SessionKey: "session-foreign", Subagent: &task.SubagentPayload{RequesterSessionKey: "session-foreign"}},
 	} {
 		if err := taskMgr.Create(record); err != nil {
 			t.Fatalf("Create error: %v", err)
@@ -229,17 +355,39 @@ func TestTaskListToolFiltersByPlan(t *testing.T) {
 	}
 
 	tool := NewTaskListTool(taskMgr)
-	out, err := tool.Execute(context.Background(), map[string]interface{}{"plan_id": "plan-1"})
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{"plan_id": "plan-1"})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if !strings.Contains(out, `"id": "task-1"`) || strings.Contains(out, `"id": "task-2"`) {
+	if !strings.Contains(out, `"id": "task-1"`) || strings.Contains(out, `"id": "task-2"`) || strings.Contains(out, `"id": "task-3"`) {
 		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestTaskListToolRejectsForeignSessionKeyParam(t *testing.T) {
+	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
+	tool := NewTaskListTool(taskMgr)
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	if _, err := tool.Execute(ctx, map[string]interface{}{"session_key": "session-foreign"}); err == nil {
+		t.Fatalf("expected foreign session_key param to be rejected")
 	}
 }
 
 func TestTaskStopToolInvokesHandler(t *testing.T) {
 	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
+	if err := taskMgr.Create(&task.Record{
+		ID:         "task-1",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusRunning,
+		SessionKey: "session-main",
+		Subagent: &task.SubagentPayload{
+			RequesterSessionKey: "session-main",
+		},
+	}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
 	tool := NewTaskStopTool(taskMgr)
 	tool.SetStopHandler(func(ctx context.Context, taskID string) (*TaskStopResult, error) {
 		return &TaskStopResult{
@@ -249,11 +397,38 @@ func TestTaskStopToolInvokesHandler(t *testing.T) {
 		}, nil
 	})
 
-	out, err := tool.Execute(context.Background(), map[string]interface{}{"task_id": "task-1"})
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	out, err := tool.Execute(ctx, map[string]interface{}{"task_id": "task-1"})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
 	if !strings.Contains(out, `"status": "stop_requested"`) || !strings.Contains(out, `"task_id": "task-1"`) {
 		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestTaskStopToolRejectsCrossSessionTask(t *testing.T) {
+	taskMgr := task.NewManagerWithStore(&taskMemoryStore{})
+	if err := taskMgr.Create(&task.Record{
+		ID:         "task-1",
+		Backend:    task.BackendSubagent,
+		Type:       "subagent",
+		Status:     task.StatusRunning,
+		SessionKey: "session-foreign",
+		Subagent: &task.SubagentPayload{
+			RequesterSessionKey: "session-foreign",
+		},
+	}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+	tool := NewTaskStopTool(taskMgr)
+	tool.SetStopHandler(func(ctx context.Context, taskID string) (*TaskStopResult, error) {
+		t.Fatalf("stop handler should not be called for foreign task")
+		return nil, nil
+	})
+
+	ctx := execution.WithToolUseContext(context.Background(), execution.ToolUseContext{SessionKey: "session-main"})
+	if _, err := tool.Execute(ctx, map[string]interface{}{"task_id": "task-1"}); err == nil {
+		t.Fatalf("expected foreign task stop to be rejected")
 	}
 }

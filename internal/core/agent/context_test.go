@@ -9,7 +9,7 @@ import (
 	workspacepkg "github.com/smallnest/goclaw/internal/workspace"
 )
 
-func TestBuildSystemPromptIncludesBuiltinBoundaryAndNorms(t *testing.T) {
+func TestBuildSystemPromptDoesNotIncludeBuiltinBoundaryAndNorms(t *testing.T) {
 	workspace := t.TempDir()
 	builder := NewContextBuilder(NewMemoryStore(workspace), workspace)
 
@@ -21,8 +21,8 @@ func TestBuildSystemPromptIncludesBuiltinBoundaryAndNorms(t *testing.T) {
 		"# Working Norms",
 		"# Task Orchestration",
 	} {
-		if !strings.Contains(prompt, marker) {
-			t.Fatalf("expected builtin marker %q in prompt, got %q", marker, prompt)
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("did not expect builtin marker %q in prompt, got %q", marker, prompt)
 		}
 	}
 }
